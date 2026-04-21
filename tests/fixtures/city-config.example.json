@@ -1,0 +1,19 @@
+[
+  {
+    "cityKey": "nyc",
+    "displayName": "New York City Daily Weather",
+    "seriesSlug": "us-new-york-daily-weather",
+    "airportCode": "JFK",
+    "timezone": "America/New_York",
+    "enabled": true,
+    "resolutionSourceOverride": "airport:JFK"
+  },
+  {
+    "cityKey": "sfo",
+    "displayName": "San Francisco Daily Weather",
+    "seriesSlug": "us-san-francisco-daily-weather",
+    "airportCode": "SFO",
+    "timezone": "America/Los_Angeles",
+    "enabled": true
+  }
+]

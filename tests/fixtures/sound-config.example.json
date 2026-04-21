@@ -1,0 +1,18 @@
+[
+  {
+    "id": "alert-high-temp",
+    "name": "High temperature chime",
+    "filePath": "sounds/high-temp.wav",
+    "volume": 0.85,
+    "loop": false,
+    "description": "Used by extreme heat alerts."
+  },
+  {
+    "id": "alert-feed-lost",
+    "name": "Feed lost alert",
+    "filePath": "sounds/feed-lost.mp3",
+    "volume": 0.7,
+    "loop": true,
+    "description": "Loops until the user acknowledges data stream loss."
+  }
+]
