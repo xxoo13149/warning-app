@@ -20,8 +20,12 @@ interface BubbleBodyPlugin {
   cityId: string;
   visualRadius: number;
   collisionRadius: number;
-  homeX: number;
-  homeY: number;
+  anchorX: number;
+  anchorY: number;
+  anchorVelocityX: number;
+  anchorVelocityY: number;
+  driftRangeX: number;
+  driftRangeY: number;
   driftPhaseX: number;
   driftPhaseY: number;
   driftFreqX: number;
@@ -67,6 +71,155 @@ const seededUnit = (seed: string, salt: string) => {
 
 const seededBetween = (seed: string, salt: string, min: number, max: number) =>
   min + seededUnit(seed, salt) * (max - min);
+
+const FILTER_MODE_LABELS = {
+  ALL: '全部',
+  ALERTS: '重点告警',
+} as const;
+
+const REGION_LABELS = {
+  ALL: '全部',
+  NA: '北美',
+  EU: '欧洲',
+  ASIA: '亚洲',
+  OTHER: '其他',
+} as const;
+
+const DASHBOARD_COPY = {
+  newAlert: '新告警',
+  riskLevel: '风险分数',
+  alerts: '告警数量',
+  temperatureBand: '温度区间',
+  yesPrice: '“是”价格',
+} as const;
+
+type BubbleLayoutPlacement = {
+  x: number;
+  y: number;
+  anchorX: number;
+  anchorY: number;
+  anchorVelocityX: number;
+  anchorVelocityY: number;
+  driftRangeX: number;
+  driftRangeY: number;
+};
+
+const buildBubbleLayout = (
+  rows: PhysicsBubbleCityData[],
+  width: number,
+  height: number,
+): Map<string, BubbleLayoutPlacement> => {
+  const layout = new Map<string, BubbleLayoutPlacement>();
+  if (rows.length === 0) {
+    return layout;
+  }
+
+  const maxRadius = rows.reduce((current, row) => Math.max(current, row.visualRadius), 0);
+  const edgeInset = Math.max(maxRadius + 32, 86);
+  const usableWidth = Math.max(width - edgeInset * 2, width * 0.42);
+  const usableHeight = Math.max(height - edgeInset * 2, height * 0.42);
+  const centerX = width / 2;
+  const centerY = height / 2;
+  const spreadRadius = Math.max(usableWidth, usableHeight, 1);
+  const slotSeed = rows
+    .map((row) => row.id)
+    .slice()
+    .sort((left, right) => left.localeCompare(right))
+    .join('|');
+
+  const orderedRows = [...rows].sort((left, right) => {
+    const radiusDelta = right.visualRadius - left.visualRadius;
+    if (radiusDelta !== 0) {
+      return radiusDelta;
+    }
+    return left.id.localeCompare(right.id);
+  });
+
+  const placed: Array<{ id: string; x: number; y: number; radius: number }> = [];
+  const attemptsPerBubble = Math.max(64, Math.min(140, rows.length * 5 + 48));
+  const baseDriftX = Math.max(20, Math.min(54, usableWidth / Math.max(6, Math.sqrt(rows.length) * 2.1)));
+  const baseDriftY = Math.max(18, Math.min(48, usableHeight / Math.max(6, Math.sqrt(rows.length) * 2.1)));
+
+  const resolveCandidate = (row: PhysicsBubbleCityData, rowIndex: number) => {
+    const inset = row.visualRadius + 18;
+    const minX = inset;
+    const maxX = Math.max(inset, width - inset);
+    const minY = inset;
+    const maxY = Math.max(inset, height - inset);
+
+    let best: { x: number; y: number; score: number } | null = null;
+
+    for (let attemptIndex = 0; attemptIndex < attemptsPerBubble; attemptIndex += 1) {
+      const key = `${slotSeed}:${row.id}:${attemptIndex}`;
+      const randomX = seededBetween(key, 'x', minX, maxX);
+      const randomY = seededBetween(key, 'y', minY, maxY);
+      const orbitAngle = seededBetween(key, 'angle', 0, Math.PI * 2);
+      const orbitScale = Math.sqrt(seededBetween(key, 'orbit-scale', 0.04, 1));
+      const orbitX = clamp(
+        centerX + Math.cos(orbitAngle) * usableWidth * 0.48 * orbitScale,
+        minX,
+        maxX,
+      );
+      const orbitY = clamp(
+        centerY + Math.sin(orbitAngle) * usableHeight * 0.48 * orbitScale,
+        minY,
+        maxY,
+      );
+      const orbitMix = rowIndex < 3 ? 0.42 : 0.22;
+      const x = clamp(randomX * (1 - orbitMix) + orbitX * orbitMix, minX, maxX);
+      const y = clamp(randomY * (1 - orbitMix) + orbitY * orbitMix, minY, maxY);
+
+      let minClearance =
+        placed.length === 0 ? Math.min(maxX - minX, maxY - minY) * 0.45 : Number.POSITIVE_INFINITY;
+      for (const other of placed) {
+        const requiredGap = row.visualRadius + other.radius + 24;
+        const distance = Math.hypot(x - other.x, y - other.y);
+        minClearance = Math.min(minClearance, distance - requiredGap);
+      }
+
+      const edgeClearance = Math.min(x - minX, maxX - x, y - minY, maxY - y);
+      const centerDistance = Math.hypot(x - centerX, y - centerY);
+      const centerScore = 1 - Math.min(centerDistance / spreadRadius, 1);
+      const sizeScore = row.visualRadius / Math.max(maxRadius, 1);
+      const score =
+        minClearance * 1.4 +
+        edgeClearance * 0.18 +
+        centerScore * 34 * sizeScore +
+        seededBetween(key, 'score-noise', -6, 6);
+
+      if (!best || score > best.score) {
+        best = { x, y, score };
+      }
+    }
+
+    return (
+      best ?? {
+        x: clamp(centerX, minX, maxX),
+        y: clamp(centerY, minY, maxY),
+        score: 0,
+      }
+    );
+  };
+
+  for (let index = 0; index < orderedRows.length; index += 1) {
+    const row = orderedRows[index];
+    const candidate = resolveCandidate(row, index);
+    placed.push({ id: row.id, x: candidate.x, y: candidate.y, radius: row.visualRadius });
+
+    layout.set(row.id, {
+      x: candidate.x,
+      y: candidate.y,
+      anchorX: candidate.x,
+      anchorY: candidate.y,
+      anchorVelocityX: seededBetween(row.id, 'anchor-vx', -0.18, 0.18),
+      anchorVelocityY: seededBetween(row.id, 'anchor-vy', -0.15, 0.15),
+      driftRangeX: Math.min(baseDriftX, Math.max(18, row.visualRadius * 0.58)),
+      driftRangeY: Math.min(baseDriftY, Math.max(16, row.visualRadius * 0.5)),
+    });
+  }
+
+  return layout;
+};
 
 const getBubblePlugin = (body: Matter.Body) => body.plugin as BubbleBodyPlugin;
 
@@ -232,12 +385,12 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
     }
 
     const container = containerRef.current;
-    const width = Math.max(container.clientWidth, 1);
-    const height = Math.max(container.clientHeight, 1);
+    let currentWidth = Math.max(container.clientWidth, 1);
+    let currentHeight = Math.max(container.clientHeight, 1);
 
     const engine = Matter.Engine.create({
       gravity: { x: 0, y: 0, scale: 0 },
-      enableSleeping: true,
+      enableSleeping: false,
     });
 
     engine.positionIterations = 8;
@@ -255,20 +408,32 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
     };
 
     const walls = [
-      Matter.Bodies.rectangle(width / 2, -wallThickness / 2, width * 3, wallThickness, wallOptions),
       Matter.Bodies.rectangle(
-        width / 2,
-        height + wallThickness / 2,
-        width * 3,
+        currentWidth / 2,
+        -wallThickness / 2,
+        currentWidth * 3,
         wallThickness,
         wallOptions,
       ),
-      Matter.Bodies.rectangle(-wallThickness / 2, height / 2, wallThickness, height * 3, wallOptions),
       Matter.Bodies.rectangle(
-        width + wallThickness / 2,
-        height / 2,
+        currentWidth / 2,
+        currentHeight + wallThickness / 2,
+        currentWidth * 3,
         wallThickness,
-        height * 3,
+        wallOptions,
+      ),
+      Matter.Bodies.rectangle(
+        -wallThickness / 2,
+        currentHeight / 2,
+        wallThickness,
+        currentHeight * 3,
+        wallOptions,
+      ),
+      Matter.Bodies.rectangle(
+        currentWidth + wallThickness / 2,
+        currentHeight / 2,
+        wallThickness,
+        currentHeight * 3,
         wallOptions,
       ),
     ];
@@ -276,25 +441,19 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
 
     const newBodies: Record<string, Matter.Body> = {};
     const collisionPadding = getCollisionPadding(bubblePadding);
+    const layout = buildBubbleLayout(visiblePhysicsDataRef.current, currentWidth, currentHeight);
 
     for (const city of visiblePhysicsDataRef.current) {
-      const inset = city.visualRadius + 16;
-      const x = clamp(
-        seededBetween(city.id, 'x', inset, Math.max(inset, width - inset)),
-        inset,
-        Math.max(inset, width - inset),
-      );
-      const y = clamp(
-        seededBetween(city.id, 'y', inset, Math.max(inset, height - inset)),
-        inset,
-        Math.max(inset, height - inset),
-      );
+      const placement = layout.get(city.id);
+      if (!placement) {
+        continue;
+      }
       const collisionRadius = city.visualRadius + collisionPadding;
 
-      const body = Matter.Bodies.circle(x, y, collisionRadius, {
-        restitution: 0.03,
-        friction: 0.04,
-        frictionAir: 0.18,
+      const body = Matter.Bodies.circle(placement.x, placement.y, collisionRadius, {
+        restitution: 0.08,
+        friction: 0.02,
+        frictionAir: 0.08,
         density: 0.0016 * (city.visualRadius / 50),
         slop: 0.04,
       });
@@ -303,18 +462,22 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
         cityId: city.id,
         visualRadius: city.visualRadius,
         collisionRadius,
-        homeX: x,
-        homeY: y,
+        anchorX: placement.anchorX,
+        anchorY: placement.anchorY,
+        anchorVelocityX: placement.anchorVelocityX,
+        anchorVelocityY: placement.anchorVelocityY,
+        driftRangeX: placement.driftRangeX,
+        driftRangeY: placement.driftRangeY,
         driftPhaseX: seededBetween(city.id, 'phase-x', 0, Math.PI * 2),
         driftPhaseY: seededBetween(city.id, 'phase-y', 0, Math.PI * 2),
-        driftFreqX: seededBetween(city.id, 'freq-x', 0.00018, 0.00034),
-        driftFreqY: seededBetween(city.id, 'freq-y', 0.00014, 0.0003),
+        driftFreqX: seededBetween(city.id, 'freq-x', 0.00022, 0.00038),
+        driftFreqY: seededBetween(city.id, 'freq-y', 0.00018, 0.00034),
         visualData: visualDataByIdRef.current.get(city.id),
       } satisfies BubbleBodyPlugin;
 
       Matter.Body.setVelocity(body, {
-        x: seededBetween(city.id, 'vx', -0.02, 0.02),
-        y: seededBetween(city.id, 'vy', -0.02, 0.02),
+        x: seededBetween(city.id, 'vx', -0.18, 0.18),
+        y: seededBetween(city.id, 'vy', -0.14, 0.14),
       });
 
       newBodies[city.id] = body;
@@ -396,30 +559,73 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
       }
 
       const plugin = getBubblePlugin(dragEvent.body);
-      plugin.homeX = dragEvent.body.position.x;
-      plugin.homeY = dragEvent.body.position.y;
+      const inset = plugin.visualRadius + 16;
+      plugin.anchorX = clamp(
+        dragEvent.body.position.x + dragEvent.body.velocity.x * 34,
+        inset,
+        Math.max(inset, currentWidth - inset),
+      );
+      plugin.anchorY = clamp(
+        dragEvent.body.position.y + dragEvent.body.velocity.y * 34,
+        inset,
+        Math.max(inset, currentHeight - inset),
+      );
+      plugin.anchorVelocityX = clamp(
+        plugin.anchorVelocityX * 0.35 + dragEvent.body.velocity.x * 0.06,
+        -0.22,
+        0.22,
+      );
+      plugin.anchorVelocityY = clamp(
+        plugin.anchorVelocityY * 0.35 + dragEvent.body.velocity.y * 0.06,
+        -0.18,
+        0.18,
+      );
       Matter.Body.setVelocity(dragEvent.body, {
-        x: dragEvent.body.velocity.x * 0.25,
-        y: dragEvent.body.velocity.y * 0.25,
+        x: dragEvent.body.velocity.x * 0.72,
+        y: dragEvent.body.velocity.y * 0.72,
       });
     });
 
     Matter.Events.on(engine, 'beforeUpdate', () => {
       const timestamp = engine.timing.timestamp;
-      const driftForce = 0.00000045 * Math.max(floatSpeedRef.current, 0);
-      const springStrength = 0.000004;
+      const driftForce = 0.00000018 * Math.max(floatSpeedRef.current, 0);
+      const springStrength = 0.0000021;
+      const deltaFactor = Math.max(0.6, (engine.timing.lastDelta || 16.666) / 16.666);
+      const anchorSpeedScale = 0.7 + floatSpeedRef.current * 0.9;
 
       for (const body of Object.values(bodiesRef.current)) {
         const plugin = getBubblePlugin(body);
-        const dx = plugin.homeX - body.position.x;
-        const dy = plugin.homeY - body.position.y;
+        const inset = plugin.visualRadius + 16;
+        plugin.anchorX += plugin.anchorVelocityX * deltaFactor * anchorSpeedScale;
+        plugin.anchorY += plugin.anchorVelocityY * deltaFactor * anchorSpeedScale;
 
-        Matter.Body.applyForce(body, body.position, {
-          x: dx * springStrength * body.mass,
-          y: dy * springStrength * body.mass,
-        });
+        if (plugin.anchorX < inset || plugin.anchorX > currentWidth - inset) {
+          plugin.anchorVelocityX *= -1;
+          plugin.anchorX = clamp(plugin.anchorX, inset, Math.max(inset, currentWidth - inset));
+        }
+        if (plugin.anchorY < inset || plugin.anchorY > currentHeight - inset) {
+          plugin.anchorVelocityY *= -1;
+          plugin.anchorY = clamp(plugin.anchorY, inset, Math.max(inset, currentHeight - inset));
+        }
 
-        if (mouseConstraint.body?.id === body.id || driftForce <= 0) {
+        const targetX =
+          plugin.anchorX +
+          Math.sin(timestamp * plugin.driftFreqX + plugin.driftPhaseX) * plugin.driftRangeX;
+        const targetY =
+          plugin.anchorY +
+          Math.cos(timestamp * plugin.driftFreqY + plugin.driftPhaseY) * plugin.driftRangeY;
+        const dx = targetX - body.position.x;
+        const dy = targetY - body.position.y;
+        const isDragging = mouseConstraint.body?.id === body.id;
+
+        if (!isDragging) {
+          Matter.Body.applyForce(body, body.position, {
+            x: dx * springStrength * body.mass,
+            y: dy * springStrength * body.mass,
+          });
+        }
+
+        if (isDragging || driftForce <= 0) {
           continue;
         }
 
@@ -455,6 +661,8 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
 
       const nextWidth = Math.max(containerRef.current.clientWidth, 1);
       const nextHeight = Math.max(containerRef.current.clientHeight, 1);
+      currentWidth = nextWidth;
+      currentHeight = nextHeight;
 
       Matter.Body.setPosition(walls[0], { x: nextWidth / 2, y: -wallThickness / 2 });
       Matter.Body.setPosition(walls[1], {
@@ -470,8 +678,8 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
       for (const body of Object.values(bodiesRef.current)) {
         const plugin = getBubblePlugin(body);
         const inset = plugin.visualRadius + 16;
-        plugin.homeX = clamp(plugin.homeX, inset, Math.max(inset, nextWidth - inset));
-        plugin.homeY = clamp(plugin.homeY, inset, Math.max(inset, nextHeight - inset));
+        plugin.anchorX = clamp(plugin.anchorX, inset, Math.max(inset, nextWidth - inset));
+        plugin.anchorY = clamp(plugin.anchorY, inset, Math.max(inset, nextHeight - inset));
 
         if (
           body.position.x < inset ||
@@ -542,7 +750,7 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
               filterMode === 'ALL' ? 'bg-[#2D2D3A] text-white' : 'text-[#71717A] hover:text-white',
             )}
           >
-            ALL
+            {FILTER_MODE_LABELS.ALL}
           </button>
           <button
             onClick={() => useSettingsStore.getState().setFilterMode('ALERTS')}
@@ -553,7 +761,7 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
                 : 'text-[#71717A] hover:text-white',
             )}
           >
-            ALERTS
+            {FILTER_MODE_LABELS.ALERTS}
           </button>
         </div>
         <div className="flex rounded-md border border-[#2D2D3A] bg-[#16161E]/80 p-1 font-mono text-xs backdrop-blur-md">
@@ -566,7 +774,7 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
                 regionFilter === region ? 'bg-[#2D2D3A] text-white' : 'text-[#71717A] hover:text-white',
               )}
             >
-              {region}
+              {REGION_LABELS[region]}
             </button>
           ))}
         </div>
@@ -623,21 +831,14 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
             {showLabels ? (
               <div className="pointer-events-none relative z-10 flex flex-col items-center justify-center">
                 <span
-                  className="font-mono font-medium tracking-wider text-[#A1A1AA]"
-                  style={{ fontSize: Math.max(10, city.visualRadius * 0.25) }}
-                >
-                  {visual.code}
-                </span>
-
-                <span
-                  className="my-1 font-sans font-bold leading-none text-white"
+                  className="font-sans font-bold leading-none text-white"
                   style={{ fontSize: Math.max(16, city.visualRadius * 0.45) }}
                 >
                   {visual.temperature}°
                 </span>
 
                 <span
-                  className="font-sans font-normal uppercase tracking-[0.15em] text-[#808080]"
+                  className="mt-1 font-sans font-normal tracking-[0.04em] text-[#808080]"
                   style={{ fontSize: Math.max(8, city.visualRadius * 0.15) }}
                 >
                   {visual.name}
@@ -662,38 +863,35 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
 
           <div className="relative z-10">
             <div className="mb-2 flex items-center justify-between gap-4">
-              <h3 className="text-[14px] font-bold">
-                {hoveredCity.name}{' '}
-                <span className="text-[11px] text-[#71717A]">({hoveredCity.code})</span>
-              </h3>
+              <h3 className="text-[14px] font-bold">{hoveredCity.name}</h3>
               {hoveredCity.is_new_alert ? (
                 <span className="rounded-full border border-[#EF4444]/30 bg-[#EF4444]/20 px-2 py-0.5 text-[9px] font-bold text-[#EF4444]">
-                  NEW ALERT
+                  {DASHBOARD_COPY.newAlert}
                 </span>
               ) : null}
             </div>
 
             <div className="space-y-2 font-mono text-[11px] opacity-80">
               <div className="flex justify-between">
-                <span className="text-[#71717A]">RISK LEVEL:</span>
+                <span className="text-[#71717A]">{DASHBOARD_COPY.riskLevel}:</span>
                 <span className={cn('font-bold', getRiskTextColor(hoveredCity))}>
                   {hoveredCity.riskLevel}/100
                 </span>
               </div>
               <div className="flex justify-between">
-                <span className="text-[#71717A]">ALERTS:</span>
+                <span className="text-[#71717A]">{DASHBOARD_COPY.alerts}:</span>
                 <span className="text-white">{hoveredCity.alertCount}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-[#71717A]">TEMP BAND:</span>
+                <span className="text-[#71717A]">{DASHBOARD_COPY.temperatureBand}:</span>
                 <span className="text-white">{hoveredCity.dominantTemperatureBand}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-[#71717A]">YES PRICE:</span>
+                <span className="text-[#71717A]">{DASHBOARD_COPY.yesPrice}:</span>
                 <span className="text-white">
                   {hoveredCity.dominantYesPrice === null
                     ? '--'
-                    : `${Math.round(hoveredCity.dominantYesPrice * 100)}¢`}
+                    : `${Math.round(hoveredCity.dominantYesPrice * 100)} 美分`}
                 </span>
               </div>
             </div>

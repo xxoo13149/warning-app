@@ -18,7 +18,7 @@ interface BubblePageSettingsState {
 }
 
 export const useSettingsStore = create<BubblePageSettingsState>((set) => ({
-  floatSpeed: 0.15,
+  floatSpeed: 0.7,
   colorScheme: 'default',
   bubblePadding: 0,
   showLabels: true,
