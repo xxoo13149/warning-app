@@ -8,7 +8,7 @@ import {
   formatSideLabel,
   type BuiltinRuleKey,
 } from '../shared/alert-display';
-import type { AppLanguage, FeedMode, OrderSide, Severity } from './types/contracts';
+import type { AppLanguage, FeedMode, OrderSide } from './types/contracts';
 
 const messages = {
   'zh-CN': {
@@ -47,7 +47,7 @@ const messages = {
       time: '时间',
       city: '城市',
       date: '日期',
-      severity: '级别',
+      severity: '告警',
       message: '摘要',
       market: '盘口',
       status: '状态',
@@ -80,7 +80,7 @@ const messages = {
       alertsHint: '这里只保留最近且最重要的相关告警。',
       emptyDate: '当前日期下没有可展示的盘口。',
       noSelection: '点击一个泡泡后，这里会显示该盘口的核心信息。',
-      latestAlertsEmpty: '当前没有需要优先处理的告警。',
+      latestAlertsEmpty: '当前没有新的告警。',
       selectedMarket: '选中盘口',
       openExplorer: '查看完整详情',
       yesPrice: '“是”价格',
@@ -93,13 +93,13 @@ const messages = {
       temperatureBand: '温度区间',
       bubbleLegendTitle: '编码说明',
       bubbleLegendSize: '大小表示风险分数',
-      bubbleLegendColor: '颜色表示风险级别',
+      bubbleLegendColor: '颜色表示最近告警强弱',
       bubbleLegendMotion: '动画表示当前活跃度与交互反馈',
       bubbleScore: '风险分数',
-      bubbleSeverity: '主导风险',
+      bubbleSeverity: '告警强弱',
       bubbleUpdatedAt: '分数更新时间',
       relatedAlerts: '相关告警',
-      scoreHint: '最近 15 分钟告警强度聚合',
+      scoreHint: '泡泡强弱按最近一次告警时间判断：1 小时内强，超过 1 小时弱',
       serviceMini: '连接摘要',
     },
     explorer: {
@@ -122,7 +122,7 @@ const messages = {
     alerts: {
       title: '告警中心',
       rowsInFilter: (count: number) => `当前筛选结果 ${count} 条`,
-      severity: '告警级别',
+      severity: '告警',
       acknowledgement: '确认状态',
       unackedOnly: '仅看未确认',
       rule: '触发规则',
@@ -209,9 +209,9 @@ const messages = {
       resolved: '已结算',
     },
     severity: {
-      critical: '关键',
-      warning: '警告',
-      info: '提示',
+      critical: '告警',
+      warning: '告警',
+      info: '告警',
     },
   },
   'en-US': {
@@ -250,7 +250,7 @@ const messages = {
       time: 'Time',
       city: 'City',
       date: 'Date',
-      severity: 'Severity',
+      severity: 'Alert',
       message: 'Summary',
       market: 'Market',
       status: 'Status',
@@ -283,7 +283,7 @@ const messages = {
       alertsHint: 'Only the most important recent alerts are shown here.',
       emptyDate: 'No markets are available for the selected date.',
       noSelection: 'Select a bubble to inspect the market.',
-      latestAlertsEmpty: 'No priority alerts right now.',
+      latestAlertsEmpty: 'No new alerts right now.',
       selectedMarket: 'Selected Market',
       openExplorer: 'Open Full Details',
       yesPrice: 'YES Price',
@@ -296,13 +296,13 @@ const messages = {
       temperatureBand: 'Temperature Band',
       bubbleLegendTitle: 'Encoding',
       bubbleLegendSize: 'Size shows risk score',
-      bubbleLegendColor: 'Color shows risk level',
+      bubbleLegendColor: 'Color shows latest alert strength',
       bubbleLegendMotion: 'Motion shows activity and interaction feedback',
       bubbleScore: 'Risk Score',
-      bubbleSeverity: 'Dominant Risk',
+      bubbleSeverity: 'Alert Strength',
       bubbleUpdatedAt: 'Score Updated',
       relatedAlerts: 'Related Alerts',
-      scoreHint: 'Aggregated from alerts in the last 15 minutes',
+      scoreHint: 'Bubble strength follows the latest alert: within 1 hour is strong, otherwise weak',
       serviceMini: 'Connection Summary',
     },
     explorer: {
@@ -325,7 +325,7 @@ const messages = {
     alerts: {
       title: 'Alert Center',
       rowsInFilter: (count: number) => `${count} rows in current filter`,
-      severity: 'Severity',
+      severity: 'Alert',
       acknowledgement: 'Ack Status',
       unackedOnly: 'Unacked Only',
       rule: 'Rule',
@@ -412,9 +412,9 @@ const messages = {
       resolved: 'Resolved',
     },
     severity: {
-      critical: 'Critical',
-      warning: 'Warning',
-      info: 'Info',
+      critical: 'Alert',
+      warning: 'Alert',
+      info: 'Alert',
     },
   },
 };
@@ -427,7 +427,6 @@ interface I18nContextValue {
   copy: MessageShape;
   formatTime: (value: string) => string;
   formatDateTime: (value: string) => string;
-  severityLabel: (severity: Severity) => string;
   statusLabel: (status: 'active' | 'halted' | 'resolved') => string;
   modeLabel: (mode: FeedMode) => string;
   policyLabel: (policy: 'aggressive' | 'balanced' | 'conservative') => string;
@@ -494,7 +493,6 @@ export const LocaleProvider = ({ children }: { children: ReactNode }) => {
       copy,
       formatTime,
       formatDateTime,
-      severityLabel: (severity) => copy.severity[severity],
       statusLabel: (status) => copy.status[status],
       modeLabel: (mode) => copy.common[mode],
       policyLabel: (policy) => copy.policies[policy],

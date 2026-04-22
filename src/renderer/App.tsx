@@ -38,28 +38,25 @@ export const App = () => {
       />
     );
   } else if (workspace === 'alerts') {
-    content = (
-      <AlertCenterView
-        alerts={monitor.alerts}
-        onAcknowledge={(id) => void monitor.acknowledgeAlert(id)}
-      />
-    );
+    content = <AlertCenterView alerts={monitor.alerts} />;
   } else if (workspace === 'rules') {
     content = (
       <RulesSettingsView
         rules={monitor.rules}
         marketRows={monitor.markets}
+        alerts={monitor.alerts}
+        health={monitor.health}
         settings={monitor.settings}
         controlState={monitor.controlState}
         runtimeAction={monitor.runtimeAction}
         soundProfiles={monitor.soundProfiles}
         onPreviewRule={(rule) => monitor.previewRule(rule)}
         onSaveRules={(nextRules) => void monitor.saveRules(nextRules)}
-        onUpdateSettings={(patch) => void monitor.updateSettings(patch)}
-        onPickSound={(id) => void monitor.pickSound(id)}
-        onRegisterSound={(payload) => void monitor.registerSound(payload)}
+        onUpdateSettings={(patch) => monitor.updateSettings(patch)}
+        onPickSound={(id) => monitor.pickSound(id)}
+        onRegisterSound={(payload) => monitor.registerSound(payload)}
         onPreviewSound={(payload) => monitor.previewSound(payload)}
-        onImportCityMap={(lines) => void monitor.importCityMap(lines)}
+        onImportCityMap={(lines) => monitor.importCityMap(lines)}
         onSetNotificationsEnabled={(enabled) => void monitor.setNotificationsEnabled(enabled)}
         onStopMonitor={() => void monitor.stopMonitor()}
         onStartMonitor={() => void monitor.startMonitor()}

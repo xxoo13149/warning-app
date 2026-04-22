@@ -42,7 +42,7 @@ interface MonitorConsoleState {
   pickSound: (profileId: string) => Promise<void>;
   registerSound: (payload?: RegisterSoundPayload) => Promise<void>;
   previewSound: (payload: PreviewSoundPayload) => Promise<boolean>;
-  importCityMap: (lines: string[]) => Promise<void>;
+  importCityMap: (lines: string[]) => Promise<number>;
   setNotificationsEnabled: (enabled: boolean) => Promise<void>;
   stopMonitor: () => Promise<void>;
   startMonitor: () => Promise<void>;
@@ -473,7 +473,11 @@ export const useMonitorConsole = (): MonitorConsoleState => {
     ipcBridge.invoke<RulePreviewResult>('rules.preview', rule);
 
   const importCityMap = async (lines: string[]) => {
-    await ipcBridge.invoke('settings.importCityMap', { lines });
+    const response = await ipcBridge.invoke<{ ok: true; imported: number }>(
+      'settings.importCityMap',
+      { lines },
+    );
+    return Number(response?.imported ?? 0);
   };
 
   const setNotificationsEnabled = async (enabled: boolean) => {

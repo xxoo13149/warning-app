@@ -1,5 +1,6 @@
 import { Notification } from 'electron';
 
+import { buildAlertNotificationContent } from '../../shared/alert-presentation';
 import type { AlertTriggeredEvent } from '../contracts/ipc';
 
 export interface NotificationService {
@@ -38,12 +39,7 @@ export class ElectronNotificationService implements NotificationService {
   }
 
   public notifyAlert(alert: AlertTriggeredEvent): void {
-    const title =
-      alert.severity === 'critical'
-        ? 'Polymarket 天气监控 · 关键告警'
-        : alert.severity === 'warning'
-          ? 'Polymarket 天气监控 · 警告'
-          : 'Polymarket 天气监控 · 提示';
-    this.notify(title, alert.message);
+    const notification = buildAlertNotificationContent(alert);
+    this.notify(notification.title, notification.body);
   }
 }

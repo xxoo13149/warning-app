@@ -30,6 +30,7 @@ import { DEFAULT_CITY_CONFIGS } from '../shared/city-seeds';
 import {
   BUILTIN_DEFAULT_SOUND_ID,
   BUILTIN_SOUND_LIBRARY,
+  toBuiltinSoundPath,
 } from '../shared/sound-library';
 import type {
   WorkerBootstrapData,
@@ -311,23 +312,18 @@ const PRICE_CHANGE_WINDOW_MS = 5 * 60 * 1000;
 const PRICE_CHANGE_WINDOW_MAX_ENTRIES = 240;
 const MAINTENANCE_INTERVAL_MS = 30 * 60 * 1000;
 const BUBBLE_SCORE_RECOMPUTE_INTERVAL_MS = 60 * 1000;
-const BUBBLE_ALERT_LOOKBACK_MS = 15 * 60 * 1000;
+const BUBBLE_ALERT_HISTORY_START_MS = 0;
+const BUBBLE_STRONG_ALERT_WINDOW_MS = 60 * 60 * 1000;
+const BUBBLE_WEAK_SCORE_MULTIPLIER = 0.45;
 const BUBBLE_SCORE_MAX = 100;
 const DASHBOARD_MAX_VISIBLE_CITIES = 48;
 const CUSTOM_RULE_BUBBLE_WEIGHT = 60;
+const CURRENT_RULE_SCAN_ALERT_LIMIT = 80;
 const BUBBLE_WEIGHT_DEFAULTS: Record<BuiltinRuleKey, number> = {
   feed_stale: 95,
   liquidity_kill: 90,
   spread_threshold: 70,
   price_change_5m: 55,
-};
-const BUBBLE_SEVERITY_MULTIPLIER: Record<
-  Exclude<MarketRow['bubbleSeverity'], 'none'>,
-  number
-> = {
-  critical: 1,
-  warning: 0.65,
-  info: 0.35,
 };
 const BUBBLE_SEVERITY_RANK: Record<MarketRow['bubbleSeverity'], number> = {
   none: 0,
@@ -340,7 +336,6 @@ export class WorkerRuntime {
   private readonly port: MessagePort;
   private readonly repository: WeatherMonitorRepository;
   private readonly dataService: PolymarketDataService;
-  private readonly builtinSoundDir: string | null;
   private readonly marketState = new MarketStateStore();
   private readonly feedState = new FeedStateStore();
   private readonly alertEngine = new AlertEngine(this.marketState);
@@ -382,7 +377,6 @@ export class WorkerRuntime {
 
   constructor(port: MessagePort, bootstrapData: WorkerBootstrapData) {
     this.port = port;
-    this.builtinSoundDir = bootstrapData.builtinSoundDir ?? null;
     this.repository = new WeatherMonitorRepository({
       dbPath: bootstrapData.dbPath,
     });
@@ -511,14 +505,10 @@ export class WorkerRuntime {
   }
 
   private seedBuiltinSounds(): void {
-    if (!this.builtinSoundDir) {
-      return;
-    }
-
     const soundProfiles = BUILTIN_SOUND_LIBRARY.map((sound) => ({
       id: sound.id,
-      name: sound.nameEn,
-      filePath: path.join(this.builtinSoundDir ?? '', sound.fileName),
+      name: sound.nameZh,
+      filePath: toBuiltinSoundPath(sound.id),
       volume: clampSoundGain(sound.gain, 1),
       enabled: true,
       isBuiltin: true,
@@ -575,10 +565,11 @@ export class WorkerRuntime {
   }
 
   private refreshRulesSync(): void {
-    const rules = this.repository.queryAlertRules(false).map(normalizeLegacyEngineRule);
-    this.engineRules = rules;
     const settings = this.readSettings();
-    this.uiRules = rules.map((rule) => mapEngineRuleToUi(rule, settings));
+    const storedRules = this.repository.queryAlertRules(false).map(normalizeLegacyEngineRule);
+    this.uiRules = storedRules.map((rule) => mapEngineRuleToUi(rule, settings));
+    this.engineRules = this.uiRules.map((rule) => mapUiRuleToEngine(rule));
+    this.repository.upsertAlertRules(this.engineRules);
   }
 
   private startBubbleScoreLoop(): void {
@@ -594,58 +585,37 @@ export class WorkerRuntime {
 
   private recomputeBubbleScores(): void {
     const computedAt = Date.now();
-    const recentAlerts = this.repository.queryRecentAlertEventsForScoring(
-      computedAt - BUBBLE_ALERT_LOOKBACK_MS,
+    const alertRows = this.repository.queryRecentAlertEventsForScoring(
+      BUBBLE_ALERT_HISTORY_START_MS,
     );
     const ruleById = new Map(this.uiRules.map((rule) => [rule.id, rule]));
-    const contributionMap = new Map<
-      string,
-      Array<{ value: number; severity: Exclude<MarketRow['bubbleSeverity'], 'none'> }>
-    >();
+    const latestAlertByMarketId = new Map<string, (typeof alertRows)[number]>();
 
-    for (const alert of recentAlerts) {
+    for (const alert of alertRows) {
       if (!alert.marketId) {
         continue;
       }
 
+      const current = latestAlertByMarketId.get(alert.marketId);
+      if (!current || alert.triggeredAt > current.triggeredAt) {
+        latestAlertByMarketId.set(alert.marketId, alert);
+      }
+    }
+
+    const next = new Map<string, BubbleSnapshot>();
+    for (const [marketId, alert] of latestAlertByMarketId.entries()) {
       const ageMs = computedAt - alert.triggeredAt;
-      if (ageMs < 0 || ageMs >= BUBBLE_ALERT_LOOKBACK_MS) {
+      const severity = resolveBubbleSeverityFromAlertAge(ageMs);
+      if (!severity) {
         continue;
       }
 
-      const severity = severityToUi(alert.severity as AlertSeverity);
       const weight = resolveBubbleWeight(
         ruleById.get(alert.ruleId),
         (alert.builtinKey as BuiltinRuleKey | null | undefined) ?? undefined,
       );
-      const decay = 1 - ageMs / BUBBLE_ALERT_LOOKBACK_MS;
-      const value = weight * BUBBLE_SEVERITY_MULTIPLIER[severity] * decay;
-      if (value <= 0) {
-        continue;
-      }
-
-      const list = contributionMap.get(alert.marketId) ?? [];
-      list.push({ value, severity });
-      contributionMap.set(alert.marketId, list);
-    }
-
-    const next = new Map<string, BubbleSnapshot>();
-    for (const [marketId, contributions] of contributionMap.entries()) {
-      const ordered = [...contributions].sort((left, right) => right.value - left.value);
-      const [primary, ...rest] = ordered;
-      if (!primary) {
-        continue;
-      }
-
-      const secondary = rest.reduce((sum, item) => sum + item.value, 0);
-      const score = Math.min(BUBBLE_SCORE_MAX, primary.value + secondary * 0.25);
-      const severity = ordered.reduce<MarketRow['bubbleSeverity']>(
-        (highest, item) =>
-          BUBBLE_SEVERITY_RANK[item.severity] > BUBBLE_SEVERITY_RANK[highest]
-            ? item.severity
-            : highest,
-        'none',
-      );
+      const scoreMultiplier = severity === 'critical' ? 1 : BUBBLE_WEAK_SCORE_MULTIPLIER;
+      const score = Math.min(BUBBLE_SCORE_MAX, weight * scoreMultiplier);
 
       next.set(marketId, {
         score: Number(score.toFixed(2)),
@@ -1067,6 +1037,67 @@ export class WorkerRuntime {
     this.queueDashboardTick();
   }
 
+  private runCurrentRuleCheck(maxAlerts = CURRENT_RULE_SCAN_ALERT_LIMIT): void {
+    if (maxAlerts <= 0 || this.engineRules.every((rule) => !rule.enabled)) {
+      return;
+    }
+
+    const nowMs = Date.now();
+    const triggers: AlertTrigger[] = [];
+    const appendTriggers = (nextTriggers: AlertTrigger[]) => {
+      const remaining = maxAlerts - triggers.length;
+      if (remaining <= 0 || nextTriggers.length === 0) {
+        return;
+      }
+      triggers.push(...nextTriggers.slice(0, remaining));
+    };
+
+    for (const feed of this.feedState.list()) {
+      appendTriggers(this.alertEngine.evaluateFeedHealth(this.engineRules, feed, nowMs));
+      if (triggers.length >= maxAlerts) {
+        break;
+      }
+    }
+
+    if (triggers.length < maxAlerts) {
+      for (const state of this.latestTokenStateById.values()) {
+        const meta = this.tokenMetaById.get(state.tokenId);
+        if (!meta) {
+          continue;
+        }
+
+        appendTriggers(
+          this.alertEngine.evaluateMarketTick(
+            this.engineRules,
+            {
+              tokenId: state.tokenId,
+              marketId: meta.marketId,
+              cityKey: meta.cityKey,
+              seriesSlug: meta.seriesSlug,
+              eventDate: meta.eventDate,
+              temperatureBand: meta.temperatureBand,
+              eventId: meta.eventId,
+              side: meta.side,
+              timestamp: nowMs,
+              lastTradePrice: state.lastTradePrice ?? undefined,
+              bestBid: state.bestBid ?? undefined,
+              bestAsk: state.bestAsk ?? undefined,
+              spread: state.spread ?? undefined,
+              lastMessageAt: state.lastMessageAt,
+            },
+            nowMs,
+          ),
+        );
+
+        if (triggers.length >= maxAlerts) {
+          break;
+        }
+      }
+    }
+
+    this.persistAndEmitAlerts(triggers);
+  }
+
   private queryMarkets(query: MarketQuery | undefined): MarketQueryResult {
     const rows = this.buildMarketRows();
     let filtered = rows;
@@ -1392,9 +1423,9 @@ export class WorkerRuntime {
           : undefined,
     }));
     this.uiRules = nextRules;
-    const settings = this.readSettings();
-    this.engineRules = nextRules.map((rule) => mapUiRuleToEngine(rule, settings));
+    this.engineRules = nextRules.map((rule) => mapUiRuleToEngine(rule));
     this.repository.upsertAlertRules(this.engineRules);
+    this.runCurrentRuleCheck();
     this.recomputeBubbleScores();
     this.emitBubbleScoreTicks();
     this.queueDashboardTick();
@@ -1422,13 +1453,6 @@ export class WorkerRuntime {
       ...patch,
     };
     this.writeSettings(nextSettings);
-    if (
-      patch.quietHoursStart !== undefined ||
-      patch.quietHoursEnd !== undefined
-    ) {
-      this.engineRules = this.uiRules.map((rule) => mapUiRuleToEngine(rule, nextSettings));
-      this.repository.upsertAlertRules(this.engineRules);
-    }
     this.refreshRulesSync();
     return this.getSettingsPayload();
   }
@@ -2024,15 +2048,9 @@ function parseIsoTime(value: string | null | undefined): number {
 }
 
 function compareDashboardAlertRows(
-  left: { severity: AlertSeverity | string; triggeredAt: number },
-  right: { severity: AlertSeverity | string; triggeredAt: number },
+  left: { triggeredAt: number },
+  right: { triggeredAt: number },
 ): number {
-  const leftSeverity = severityToUi(left.severity as AlertSeverity);
-  const rightSeverity = severityToUi(right.severity as AlertSeverity);
-  const bySeverity = BUBBLE_SEVERITY_RANK[rightSeverity] - BUBBLE_SEVERITY_RANK[leftSeverity];
-  if (bySeverity !== 0) {
-    return bySeverity;
-  }
   return right.triggeredAt - left.triggeredAt;
 }
 
@@ -2123,10 +2141,16 @@ function resolveBubbleWeight(
   return Math.max(0, Math.min(candidate, BUBBLE_SCORE_MAX));
 }
 
-function mapUiRuleToEngine(
-  rule: AlertRule,
-  settings: Pick<AppSettings, 'quietHoursStart' | 'quietHoursEnd'> = DEFAULT_SETTINGS,
-): EngineAlertRule {
+function resolveBubbleSeverityFromAlertAge(
+  ageMs: number,
+): Exclude<MarketRow['bubbleSeverity'], 'none'> | null {
+  if (ageMs < 0 || !Number.isFinite(ageMs)) {
+    return null;
+  }
+  return ageMs <= BUBBLE_STRONG_ALERT_WINDOW_MS ? 'critical' : 'warning';
+}
+
+function mapUiRuleToEngine(rule: AlertRule): EngineAlertRule {
   const metric = mapUiMetricToEngine(rule.metric);
   const operator =
     rule.operator === 'crosses' ? 'crosses_above' : (rule.operator as EngineAlertRule['operator']);
@@ -2135,7 +2159,7 @@ function mapUiRuleToEngine(
     typeof rule.dedupeWindowSec === 'number' && Number.isFinite(rule.dedupeWindowSec)
       ? Math.max(0, Math.trunc(rule.dedupeWindowSec))
       : Math.max(30, Math.floor(rule.cooldownSec / 2));
-  const quietHours = rule.quietHours ?? buildQuietHoursFromSettings(settings);
+  const quietHours = rule.quietHours;
   return {
     id: rule.id,
     name: rule.name,

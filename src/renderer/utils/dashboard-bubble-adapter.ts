@@ -359,7 +359,7 @@ export const buildDashboardBubbleStats = (
   selectedDate: string,
 ): DashboardBubbleStats => {
   const totalAlerts = cities.reduce((sum, city) => sum + city.alertCount, 0);
-  const highRiskCount = cities.filter((city) => city.riskLevel >= 80).length;
+  const highRiskCount = cities.filter((city) => city.status_level === 'CRITICAL').length;
   const monitorStatusText = inferMonitorStatusText(health);
 
   return {

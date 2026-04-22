@@ -133,14 +133,14 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
         <div className="setting-group">
           <span className="mb-4 block text-[11px] font-semibold uppercase tracking-[0.1em] text-[#71717A]">
-            最近重点告警
+            最近告警
           </span>
           <div className="rounded border-l-2 border-[#EF4444] bg-[#0A0A0C] p-3 text-xs leading-5">
             <strong className="block break-words text-[#E4E4E7]">
-              {highlightAlertTitle || '暂无需要优先处理的告警'}
+              {highlightAlertTitle || '暂无最近告警'}
             </strong>
             <span className="mt-2 block break-words text-[#A1A1AA]">
-              {highlightAlertSummary || '当前运行正常，还没有新的高优先级异常。'}
+              {highlightAlertSummary || '当前运行正常，还没有新的告警。'}
             </span>
             {highlightAlertDetail ? (
               <span className="mt-2 block break-words text-[#71717A]">{highlightAlertDetail}</span>

@@ -74,7 +74,7 @@ const seededBetween = (seed: string, salt: string, min: number, max: number) =>
 
 const FILTER_MODE_LABELS = {
   ALL: '全部',
-  ALERTS: '重点告警',
+  ALERTS: '强告警',
 } as const;
 
 const REGION_LABELS = {
@@ -86,12 +86,19 @@ const REGION_LABELS = {
 } as const;
 
 const DASHBOARD_COPY = {
-  newAlert: '新告警',
-  riskLevel: '风险分数',
+  newAlert: '刚触发',
+  alertStrength: '告警强弱',
+  riskLevel: '泡泡分数',
   alerts: '告警数量',
   temperatureBand: '温度区间',
   yesPrice: '“是”价格',
 } as const;
+
+const STRENGTH_LABELS: Record<DashboardBubbleCityData['status_level'], string> = {
+  CRITICAL: '强',
+  WARNING: '弱',
+  NORMAL: '无告警',
+};
 
 type BubbleLayoutPlacement = {
   x: number;
@@ -296,6 +303,8 @@ const getRiskTextColor = (city: DashboardBubbleCityData) => {
   }
   return 'text-[#10B981]';
 };
+
+const getStrengthLabel = (city: DashboardBubbleCityData) => STRENGTH_LABELS[city.status_level];
 
 export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: BubbleChartProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -872,6 +881,12 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
             </div>
 
             <div className="space-y-2 font-mono text-[11px] opacity-80">
+              <div className="flex justify-between">
+                <span className="text-[#71717A]">{DASHBOARD_COPY.alertStrength}:</span>
+                <span className={cn('font-bold', getRiskTextColor(hoveredCity))}>
+                  {getStrengthLabel(hoveredCity)}
+                </span>
+              </div>
               <div className="flex justify-between">
                 <span className="text-[#71717A]">{DASHBOARD_COPY.riskLevel}:</span>
                 <span className={cn('font-bold', getRiskTextColor(hoveredCity))}>

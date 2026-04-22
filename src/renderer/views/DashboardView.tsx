@@ -39,12 +39,6 @@ const EMPTY_SNAPSHOT: DashboardSnapshot = {
   updatedAt: new Date(0).toISOString(),
 };
 
-const severityRank: Record<AlertEvent['severity'], number> = {
-  info: 1,
-  warning: 2,
-  critical: 3,
-};
-
 const sortAlerts = (alerts: AlertEvent[]) =>
   [...alerts].sort((left, right) => {
     const acknowledgementDelta = Number(left.acknowledged) - Number(right.acknowledged);
@@ -52,10 +46,6 @@ const sortAlerts = (alerts: AlertEvent[]) =>
       return acknowledgementDelta;
     }
 
-    const severityDelta = severityRank[right.severity] - severityRank[left.severity];
-    if (severityDelta !== 0) {
-      return severityDelta;
-    }
     return Date.parse(right.triggeredAt) - Date.parse(left.triggeredAt);
   });
 
@@ -290,15 +280,15 @@ export const DashboardView = ({ health, alerts, onOpenExplorer }: DashboardViewP
             <div className="ml-auto flex gap-4">
               <div className="flex items-center gap-1.5">
                 <span className="h-2 w-2 rounded-full bg-[#EF4444]" />
-                高风险 / 告警
+                强告警 / 1 小时内
               </div>
               <div className="flex items-center gap-1.5">
                 <span className="h-2 w-2 rounded-full bg-[#F59E0B]" />
-                中风险 / 波动
+                弱告警 / 超过 1 小时
               </div>
               <div className="flex items-center gap-1.5">
                 <span className="h-2 w-2 rounded-full bg-[#3B82F6]" />
-                低风险 / 稳定
+                无告警 / 稳定
               </div>
             </div>
           </div>

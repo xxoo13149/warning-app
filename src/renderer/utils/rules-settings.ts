@@ -179,9 +179,9 @@ export const RULE_METRIC_LABELS: Record<AlertRule['metric'], string> = {
 };
 
 export const RULE_SEVERITY_LABELS: Record<AlertRule['severity'], string> = {
-  critical: '紧急',
-  warning: '预警',
-  info: '提示',
+  critical: '告警',
+  warning: '告警',
+  info: '告警',
 };
 
 export const RULE_OPERATOR_LABELS: Record<AlertRule['operator'], string> = {

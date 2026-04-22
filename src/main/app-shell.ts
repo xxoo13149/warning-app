@@ -123,6 +123,45 @@ const resolveBuiltinSoundDir = (): string =>
     ? path.join(process.resourcesPath, 'assets', 'sounds')
     : path.join(process.cwd(), 'assets', 'sounds');
 
+const parseClockTimeToMinutes = (value: string): number | null => {
+  const match = value.trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) {
+    return null;
+  }
+
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (
+    !Number.isInteger(hours) ||
+    !Number.isInteger(minutes) ||
+    hours < 0 ||
+    hours > 23 ||
+    minutes < 0 ||
+    minutes > 59
+  ) {
+    return null;
+  }
+
+  return hours * 60 + minutes;
+};
+
+const isQuietHoursActive = (
+  settings: Pick<RuntimeState['settingsPayload']['settings'], 'quietHoursStart' | 'quietHoursEnd'>,
+): boolean => {
+  const start = parseClockTimeToMinutes(settings.quietHoursStart);
+  const end = parseClockTimeToMinutes(settings.quietHoursEnd);
+  if (start === null || end === null) {
+    return false;
+  }
+  if (start === end) {
+    return true;
+  }
+
+  const now = new Date();
+  const current = now.getHours() * 60 + now.getMinutes();
+  return start < end ? current >= start && current < end : current >= start || current < end;
+};
+
 export const bootstrapAppShell = async (): Promise<void> => {
   app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
   app.setAppUserModelId('com.polymarket.weather-monitor');
@@ -743,6 +782,9 @@ const patchHealth = (
     coreClient.on('alerts.new', async (alert) => {
       const runtime = getState();
       if (!runtime.controlState.notificationsEnabled) {
+        return;
+      }
+      if (isQuietHoursActive(runtime.settingsPayload.settings)) {
         return;
       }
 

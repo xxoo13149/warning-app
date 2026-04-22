@@ -6,6 +6,10 @@ export interface BuiltinSoundSeed {
   gain: number;
 }
 
+export const BUILTIN_SOUND_PATH_PREFIX = 'builtin:';
+
+export const toBuiltinSoundPath = (id: string): string => `${BUILTIN_SOUND_PATH_PREFIX}${id}`;
+
 export const BUILTIN_SOUND_LIBRARY: BuiltinSoundSeed[] = [
   {
     id: 'builtin-tick-soft',

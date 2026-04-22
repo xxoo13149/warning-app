@@ -244,11 +244,11 @@ export const registerIpcHandlers = ({
       }
 
       const result = await dialog.showOpenDialog({
-        title: 'Select alert sound',
+        title: '选择告警提示音',
         properties: ['openFile'],
         filters: [
           {
-            name: 'Audio',
+            name: '音频文件',
             extensions: ['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'],
           },
         ],
@@ -289,11 +289,11 @@ export const registerIpcHandlers = ({
 
       if (needsFilePicker) {
         const result = await dialog.showOpenDialog({
-          title: 'Import alert sound',
+          title: '导入告警提示音',
           properties: ['openFile'],
           filters: [
             {
-              name: 'Audio',
+              name: '音频文件',
               extensions: ['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'],
             },
           ],
@@ -327,9 +327,10 @@ export const registerIpcHandlers = ({
       payload: InvokePayloadMap['settings.previewSound'],
     ): Promise<InvokeResultMap['settings.previewSound']> => {
       const soundProfiles = getRuntimeState().settingsPayload.soundProfiles;
+      const selectedSoundId = getRuntimeState().settingsPayload.settings.selectedSoundProfileId;
       const targetSound = payload?.id
         ? soundProfiles.find((profile) => profile.id === payload.id)
-        : undefined;
+        : soundProfiles.find((profile) => profile.id === selectedSoundId);
       const filePath = payload?.filePath ?? targetSound?.filePath ?? '';
       if (!filePath) {
         return { ok: true, played: false };
