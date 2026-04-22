@@ -1,5 +1,5 @@
 import type { AlertEvent, AppHealth, CityBubbleSummary } from '../types/contracts';
-import { normalizeBandText } from './market-display';
+import { formatTemperatureBandLabel, normalizeBandText } from './market-display';
 
 export type BubbleRegion = 'NA' | 'EU' | 'ASIA' | 'OTHER';
 
@@ -197,6 +197,91 @@ const buildRecentAlertMap = (alerts: AlertEvent[], nowMs: number): Map<string, n
   return byCityKey;
 };
 
+const isReadableChineseText = (value?: string | null) => {
+  const text = value?.trim() ?? '';
+  return /[\u3400-\u9fff]/.test(text) && !/[A-Za-z]/.test(text);
+};
+
+const inferMonitorStatusText = (health: AppHealth) => {
+  if (health.connected) {
+    return '监控运行中';
+  }
+
+  const diagnostic = health.diagnostic?.trim();
+  if (isReadableChineseText(diagnostic)) {
+    return diagnostic ?? '监控连接中';
+  }
+
+  switch (health.errorSource) {
+    case 'ws':
+      return '实时连接异常';
+    case 'db':
+      return '本地数据服务异常';
+    case 'discovery':
+      return '发现服务异常';
+    case 'packaging':
+      return '运行资源缺失';
+    case 'network':
+      return '网络连接异常';
+    case 'startup':
+      return '启动流程异常';
+    case 'worker':
+      return '后台任务异常';
+    default:
+      break;
+  }
+
+  const normalized = diagnostic?.toLowerCase() ?? '';
+  if (!normalized) {
+    return '监控连接中';
+  }
+
+  if (normalized.includes('websocket') || normalized.includes(' ws ')) {
+    return '实时连接异常';
+  }
+
+  if (
+    normalized.includes('sqlite') ||
+    normalized.includes('better-sqlite3') ||
+    normalized.includes('database')
+  ) {
+    return '本地数据服务异常';
+  }
+
+  if (normalized.includes('discover') || normalized.includes('gamma')) {
+    return '发现服务异常';
+  }
+
+  if (
+    normalized.includes('network') ||
+    normalized.includes('proxy') ||
+    normalized.includes('tls') ||
+    normalized.includes('econn') ||
+    normalized.includes('enotfound') ||
+    normalized.includes('etimedout')
+  ) {
+    return '网络连接异常';
+  }
+
+  if (normalized.includes('timeout')) {
+    return '请求超时';
+  }
+
+  if (
+    normalized.includes('cannot find module') ||
+    normalized.includes('packaged resources') ||
+    normalized.includes('err_module_not_found')
+  ) {
+    return '运行资源缺失';
+  }
+
+  if (normalized.includes('permission') || normalized.includes('denied')) {
+    return '权限不足';
+  }
+
+  return '监控连接中';
+};
+
 export const buildDashboardBubbleData = (
   rows: CityBubbleSummary[],
   alerts: AlertEvent[],
@@ -221,7 +306,7 @@ export const buildDashboardBubbleData = (
       temperature: parseTemperature(row.dominantTemperatureBand),
       trend: resolveTrend(dominantMarket?.change5m),
       lastUpdated: row.updatedAt,
-      dominantTemperatureBand: row.dominantTemperatureBand,
+      dominantTemperatureBand: formatTemperatureBandLabel(row.dominantTemperatureBand),
       dominantYesPrice: row.dominantYesPrice,
     };
   });
@@ -275,9 +360,7 @@ export const buildDashboardBubbleStats = (
 ): DashboardBubbleStats => {
   const totalAlerts = cities.reduce((sum, city) => sum + city.alertCount, 0);
   const highRiskCount = cities.filter((city) => city.riskLevel >= 80).length;
-  const monitorStatusText = health.connected
-    ? '监控运行中'
-    : health.diagnostic?.trim() || '监控连接中';
+  const monitorStatusText = inferMonitorStatusText(health);
 
   return {
     totalAlerts,

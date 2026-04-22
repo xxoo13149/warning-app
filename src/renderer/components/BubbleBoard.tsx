@@ -27,9 +27,9 @@ import {
   stableHash,
 } from '../utils/bubble-board';
 import {
-  formatMarketCents,
+  formatMarketCentsLabel,
   formatMarketPercent,
-  normalizeBandText,
+  formatTemperatureBandLabel,
 } from '../utils/market-display';
 
 interface BubbleBoardProps {
@@ -54,7 +54,7 @@ const COLLISION_PADDING = 4;
 
 const bubbleCopy = {
   'zh-CN': {
-    yes: 'YES',
+    yes: '“是”价格',
     bid: '买一',
     ask: '卖一',
     spread: '价差',
@@ -725,9 +725,11 @@ export const BubbleBoard = ({
           const y = node.y ?? node.homeY;
           const labelSize = clamp(node.radius * 0.22, 11, 16);
           const secondarySize = clamp(node.radius * 0.13, 9, 12);
-          const secondaryText = `${formatMarketCents(row.dominantYesPrice)} · ${normalizeBandText(
-            row.dominantTemperatureBand,
-          )}`;
+          const secondaryText = `${formatMarketCentsLabel(
+            row.dominantYesPrice,
+            undefined,
+            language,
+          )} · ${formatTemperatureBandLabel(row.dominantTemperatureBand, language)}`;
 
           return (
             <g
@@ -874,7 +876,9 @@ export const BubbleBoard = ({
           <div className="physics-bubble-tooltip__head">
             <div>
               <strong>{hoveredNode.row.cityName}</strong>
-              <span>{normalizeBandText(hoveredNode.row.tooltipSnapshot.temperatureBand)}</span>
+              <span>
+                {formatTemperatureBandLabel(hoveredNode.row.tooltipSnapshot.temperatureBand, language)}
+              </span>
             </div>
             <span className={`severity severity--${hoveredNode.row.ringSeverity}`}>
               {resolveSeverityLabel(hoveredNode.row.ringSeverity, language)}
@@ -884,7 +888,9 @@ export const BubbleBoard = ({
           <div className="physics-bubble-tooltip__grid">
             <span>
               {copy.yes}
-              <strong>{formatMarketCents(hoveredNode.row.tooltipSnapshot.yesPrice)}</strong>
+              <strong>
+                {formatMarketCentsLabel(hoveredNode.row.tooltipSnapshot.yesPrice, undefined, language)}
+              </strong>
             </span>
             <span>
               {copy.alertFlash}
@@ -892,15 +898,21 @@ export const BubbleBoard = ({
             </span>
             <span>
               {copy.bid}
-              <strong>{formatMarketCents(hoveredNode.row.tooltipSnapshot.bestBid)}</strong>
+              <strong>
+                {formatMarketCentsLabel(hoveredNode.row.tooltipSnapshot.bestBid, undefined, language)}
+              </strong>
             </span>
             <span>
               {copy.ask}
-              <strong>{formatMarketCents(hoveredNode.row.tooltipSnapshot.bestAsk)}</strong>
+              <strong>
+                {formatMarketCentsLabel(hoveredNode.row.tooltipSnapshot.bestAsk, undefined, language)}
+              </strong>
             </span>
             <span>
               {copy.spread}
-              <strong>{formatMarketCents(hoveredNode.row.tooltipSnapshot.spread)}</strong>
+              <strong>
+                {formatMarketCentsLabel(hoveredNode.row.tooltipSnapshot.spread, undefined, language)}
+              </strong>
             </span>
             <span>
               {copy.change5m}

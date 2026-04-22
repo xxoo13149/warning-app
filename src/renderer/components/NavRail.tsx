@@ -12,14 +12,14 @@ export const NavRail = ({ active, onChange, alertCount }: NavRailProps) => {
   const copy =
     language === 'zh-CN'
       ? {
-          brandTitle: 'Polymarket',
+          brandTitle: '预警中心',
           brandSubtitle: '天气监控',
           workspaceAria: '工作区导航',
           items: {
-            dashboard: { label: '监控总览', alias: 'Bubble Board', hint: '城市风险首页' },
-            explorer: { label: '市场探索', alias: 'Market Explorer', hint: '查看完整盘口' },
-            alerts: { label: '告警中心', alias: 'Alert Center', hint: '处理异常与告警' },
-            rules: { label: '规则设置', alias: 'Rules & Settings', hint: '规则、声音与运行控制' },
+            dashboard: { label: '监控总览', alias: '风险看板', hint: '集中查看重点风险和最新变化' },
+            explorer: { label: '市场总览', alias: '盘口检索', hint: '按条件筛选并查看全部监控项' },
+            alerts: { label: '告警中心', alias: '待办处置', hint: '只显示需要人工处理的告警' },
+            rules: { label: '规则管理', alias: '条件与通知', hint: '快速调整监控条件、级别和提醒方式' },
           },
         }
       : {

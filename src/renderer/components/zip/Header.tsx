@@ -15,39 +15,39 @@ export const Header: React.FC<HeaderProps> = ({
   selectedDate,
 }) => {
   return (
-    <header className="h-[88px] bg-[#16161E] border-b border-[#2D2D3A] flex items-center justify-between px-6 z-20 relative">
+    <header className="relative z-20 flex h-[88px] items-center justify-between border-b border-[#2D2D3A] bg-[#16161E] px-6">
       <div className="flex flex-col justify-center">
-        <div className="flex items-center gap-2 font-bold text-[18px] text-[#3B82F6] tracking-[-0.5px]">
+        <div className="flex items-center gap-2 text-[18px] font-bold tracking-[-0.5px] text-[#3B82F6]">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
             <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
           </svg>
-          WEATHER ORACLE
+          天气风险总览
         </div>
-        <div className="text-[10px] text-[#71717A] mt-1 tracking-[0.1em] uppercase font-semibold">
-          Polymarket Weather Triage · {selectedDate || 'Latest Session'}
+        <div className="mt-1 text-[11px] font-medium tracking-[0.08em] text-[#71717A]">
+          重点城市与告警态势 · {selectedDate || '最新数据'}
         </div>
       </div>
 
       <div className="flex items-center gap-6">
         <div className="flex items-center gap-4 text-sm">
-          <div className="flex items-center gap-2 bg-[#0A0A0C] px-3 py-1.5 rounded border border-[#2D2D3A]">
-            <Activity className="w-4 h-4 text-[#F59E0B]" />
-            <span className="text-[#71717A]">High Risk:</span>
-            <span className="text-[#E4E4E7] font-bold">{highRiskCount}</span>
+          <div className="flex items-center gap-2 rounded border border-[#2D2D3A] bg-[#0A0A0C] px-3 py-1.5">
+            <Activity className="h-4 w-4 text-[#F59E0B]" />
+            <span className="text-[#71717A]">高风险地区</span>
+            <span className="font-bold text-[#E4E4E7]">{highRiskCount}</span>
           </div>
-          <div className="flex items-center gap-2 bg-[#EF4444]/10 px-3 py-1.5 rounded border border-[#EF4444]/20">
-            <div className="w-2 h-2 rounded-full bg-[#EF4444] animate-pulse" />
-            <span className="text-[#EF4444] opacity-80">Active Alerts:</span>
-            <span className="text-[#EF4444] font-bold">{totalAlerts}</span>
+          <div className="flex items-center gap-2 rounded border border-[#EF4444]/20 bg-[#EF4444]/10 px-3 py-1.5">
+            <div className="h-2 w-2 rounded-full bg-[#EF4444] animate-pulse" />
+            <span className="text-[#EF4444] opacity-80">待处理告警</span>
+            <span className="font-bold text-[#EF4444]">{totalAlerts}</span>
           </div>
         </div>
 
         <button
           onClick={onOpenSettings}
-          className="p-2 text-[#71717A] hover:text-[#E4E4E7] hover:bg-[#2D2D3A] rounded transition-colors"
-          title="Display Settings"
+          className="rounded p-2 text-[#71717A] transition-colors hover:bg-[#2D2D3A] hover:text-[#E4E4E7]"
+          title="打开设置"
         >
-          <Settings className="w-5 h-5" />
+          <Settings className="h-5 w-5" />
         </button>
       </div>
     </header>

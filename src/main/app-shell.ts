@@ -1,6 +1,7 @@
 import { app, BrowserWindow } from 'electron';
 import path from 'node:path';
 
+import { APP_NAME } from '../shared/constants';
 import type { AppControlState, StartupPhase } from '@/shared/contracts';
 import {
   DEFAULT_CONTROL_STATE,
@@ -80,7 +81,7 @@ const createMainWindow = (): BrowserWindow => {
     minHeight: 700,
     show: false,
     autoHideMenuBar: true,
-    title: 'Polymarket Weather Monitor',
+    title: APP_NAME,
     backgroundColor: '#0c111b',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),

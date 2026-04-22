@@ -1,5 +1,4 @@
 import type { AppControlState, StartupStatus } from '@/shared/contracts';
-import { BUILTIN_DEFAULT_SOUND_ID, BUILTIN_SOUND_LIBRARY } from '@/shared/sound-library';
 import type {
   AlertEvent,
   AlertRule,
@@ -15,6 +14,7 @@ import type {
   SoundProfile,
 } from '../types/contracts';
 import type { WarningApiBridge, BridgeListener } from '../types/bridge';
+import { BUILTIN_DEFAULT_SOUND_ID, BUILTIN_SOUND_LIBRARY } from '../../shared/sound-library';
 import {
   createBuiltinRuleTemplateMap,
   createCustomRule,
@@ -30,14 +30,33 @@ const createId = () => globalThis.crypto?.randomUUID?.() ?? `mock-${Date.now().t
 const nowIso = () => new Date().toISOString();
 const today = () => nowIso().slice(0, 10);
 
+const MOCK_TEMPERATURE_BANDS = {
+  tokyoMorning: '18℃ 至 20℃',
+  tokyoNoon: '20℃ 至 22℃',
+  newYorkCool: '15℃ 至 17℃',
+  sydneyWarm: '23℃ 至 25℃',
+} as const;
+
+const MOCK_SOUND_NAME_LABELS: Record<string, string> = {
+  'builtin-tick-soft': '轻柔滴答',
+  'builtin-sonar-soft': '柔和声呐',
+  'builtin-chime-short': '短铃提示',
+  'builtin-double-ding': '双声叮咚',
+  'builtin-high-bell': '高频铃声',
+  'builtin-critical-siren': '紧急警报',
+};
+
+const getMockSoundName = (soundId: string, fallbackName: string) =>
+  MOCK_SOUND_NAME_LABELS[soundId] ?? fallbackName;
+
 const MOCK_MARKETS: MarketRow[] = [
   {
     marketId: 'market-tokyo-1',
     cityKey: 'tokyo',
-    cityName: 'Tokyo',
+    cityName: '东京',
     airportCode: 'RJTT',
     eventDate: today(),
-    temperatureBand: '18C to 20C',
+    temperatureBand: MOCK_TEMPERATURE_BANDS.tokyoMorning,
     side: 'BOTH',
     yesPrice: 0.46,
     noPrice: 0.54,
@@ -56,10 +75,10 @@ const MOCK_MARKETS: MarketRow[] = [
   {
     marketId: 'market-tokyo-2',
     cityKey: 'tokyo',
-    cityName: 'Tokyo',
+    cityName: '东京',
     airportCode: 'RJTT',
     eventDate: today(),
-    temperatureBand: '20C to 22C',
+    temperatureBand: MOCK_TEMPERATURE_BANDS.tokyoNoon,
     side: 'BOTH',
     yesPrice: 0.31,
     noPrice: 0.69,
@@ -78,10 +97,10 @@ const MOCK_MARKETS: MarketRow[] = [
   {
     marketId: 'market-nyc-1',
     cityKey: 'new-york',
-    cityName: 'New York',
+    cityName: '纽约',
     airportCode: 'KJFK',
     eventDate: today(),
-    temperatureBand: '15C to 17C',
+    temperatureBand: MOCK_TEMPERATURE_BANDS.newYorkCool,
     side: 'BOTH',
     yesPrice: 0.64,
     noPrice: 0.36,
@@ -100,10 +119,10 @@ const MOCK_MARKETS: MarketRow[] = [
   {
     marketId: 'market-sydney-1',
     cityKey: 'sydney',
-    cityName: 'Sydney',
+    cityName: '悉尼',
     airportCode: 'YSSY',
     eventDate: today(),
-    temperatureBand: '23C to 25C',
+    temperatureBand: MOCK_TEMPERATURE_BANDS.sydneyWarm,
     side: 'BOTH',
     yesPrice: 0.52,
     noPrice: 0.48,
@@ -130,7 +149,7 @@ const MOCK_ALERTS: AlertEvent[] = [
     cityKey: 'new-york',
     marketId: 'market-nyc-1',
     tokenId: 'token-mock-1',
-    message: '纽约市场价差快速放大',
+    message: '纽约 15℃ 至 17℃ 市场买卖价差快速扩大',
     severity: 'critical',
     acknowledged: false,
     soundProfileId: 'builtin-critical-siren',
@@ -143,7 +162,7 @@ const MOCK_ALERTS: AlertEvent[] = [
     cityKey: 'tokyo',
     marketId: 'market-tokyo-1',
     tokenId: 'token-mock-2',
-    message: '东京 5 分钟价格异动',
+    message: '东京 18℃ 至 20℃ 市场 5 分钟价格快速上行',
     severity: 'warning',
     acknowledged: false,
     soundProfileId: 'builtin-double-ding',
@@ -207,7 +226,7 @@ const DEFAULT_CONTROL_STATE: AppControlState = {
 const createMockSoundProfiles = (): SoundProfile[] =>
   BUILTIN_SOUND_LIBRARY.map((sound) => ({
     id: sound.id,
-    name: sound.nameEn,
+    name: getMockSoundName(sound.id, sound.nameZh || sound.nameEn),
     filePath: `C:\\mock-sounds\\${sound.fileName}`,
     gain: sound.gain,
     enabled: true,
@@ -222,20 +241,21 @@ const createMockRules = (): AlertRule[] => {
     {
       cityKey: 'tokyo',
       eventDate: today(),
-      temperatureBand: '18C to 20C',
+      temperatureBand: MOCK_TEMPERATURE_BANDS.tokyoMorning,
       side: 'YES',
+      marketId: '',
     },
     'builtin-double-ding',
   );
 
-  customRule.name = 'Tokyo Morning Momentum';
+  customRule.name = '东京早盘价格突破';
   customRule.metric = 'price';
   customRule.operator = '>=';
   customRule.threshold = 0.55;
   customRule.windowSec = 180;
   customRule.cooldownSec = 240;
   customRule.dedupeWindowSec = 120;
-  customRule.scope.seriesSlug = 'weather-tokyo';
+  customRule.scope.seriesSlug = '东京天气早盘';
   customRule.quietHours = {
     startMinute: 60,
     endMinute: 360,
@@ -295,14 +315,17 @@ const buildDashboardSnapshot = (
     grouped.set(key, list);
   });
 
-  const rows = Array.from(grouped.values()).map((group) => {
+  const rows = Array.from(grouped.values()).flatMap((group) => {
     const ordered = [...group].sort((left, right) => right.bubbleScore - left.bubbleScore);
-    const dominant = ordered[0] ?? group[0]!;
+    const dominant = ordered[0];
+    if (!dominant) {
+      return [];
+    }
     const unackedAlertCount = alerts.filter(
       (alert) => !alert.acknowledged && alert.cityKey === dominant.cityKey,
     ).length;
 
-    return {
+    return [{
       cityKey: dominant.cityKey,
       cityName: dominant.cityName,
       airportCode: dominant.airportCode,
@@ -329,7 +352,7 @@ const buildDashboardSnapshot = (
         bubbleSeverity: row.bubbleSeverity,
         updatedAt: row.updatedAt,
       })),
-    };
+    }];
   });
 
   return {
@@ -407,7 +430,7 @@ export const createMockBridge = (): WarningApiBridge => {
   let controlState = clone(DEFAULT_CONTROL_STATE);
   let settings = clone(DEFAULT_SETTINGS);
   let soundProfiles = createMockSoundProfiles();
-  let markets = clone(MOCK_MARKETS);
+  const markets = clone(MOCK_MARKETS);
   let alerts = clone(MOCK_ALERTS);
   let rules = createMockRules();
 
@@ -439,7 +462,10 @@ export const createMockBridge = (): WarningApiBridge => {
     const soundId = payload?.id ?? `mock-sound-${createId().slice(0, 8)}`;
     const nextProfile: SoundProfile = {
       id: soundId,
-      name: payload?.name?.trim() || existing?.name || `Imported ${soundId.slice(-4)}`,
+      name:
+        payload?.name?.trim() ||
+        existing?.name ||
+        `导入提示音 ${soundId.slice(-4)}`,
       filePath:
         payload?.filePath ?? existing?.filePath ?? `C:\\mock-sounds\\${soundId}.wav`,
       gain: payload?.gain ?? existing?.gain ?? 0.75,
@@ -599,7 +625,7 @@ export const createMockBridge = (): WarningApiBridge => {
             return buildSettingsPayload(settings, soundProfiles) as T;
           }
           return registerSound({
-            name: 'Imported Sound',
+            name: '导入提示音',
             filePath: `C:\\mock-sounds\\imported-${createId().slice(0, 6)}.wav`,
             setAsDefault: true,
           }) as T;

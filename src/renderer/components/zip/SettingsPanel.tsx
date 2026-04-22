@@ -7,14 +7,22 @@ interface SettingsPanelProps {
   isOpen: boolean;
   onClose: () => void;
   highlightAlertTitle?: string;
-  highlightAlertMessage?: string;
+  highlightAlertSummary?: string;
+  highlightAlertDetail?: string;
 }
+
+const COLOR_SCHEME_LABELS: Record<ColorScheme, string> = {
+  default: '默认',
+  heatmap: '热力',
+  neon: '霓虹',
+};
 
 export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   isOpen,
   onClose,
   highlightAlertTitle,
-  highlightAlertMessage,
+  highlightAlertSummary,
+  highlightAlertDetail,
 }) => {
   const {
     floatSpeed,
@@ -32,27 +40,27 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   }
 
   return (
-    <div className="absolute top-0 right-0 h-full w-[280px] bg-[#16161E] border-l border-[#2D2D3A] shadow-2xl z-40 flex flex-col transform transition-transform duration-300 ease-in-out">
-      <div className="p-6 border-b border-[#2D2D3A] flex justify-between items-center">
+    <div className="absolute top-0 right-0 z-40 flex h-full w-[280px] flex-col border-l border-[#2D2D3A] bg-[#16161E] shadow-2xl transition-transform duration-300 ease-in-out">
+      <div className="flex items-center justify-between border-b border-[#2D2D3A] p-6">
         <div className="flex items-center gap-2 text-[#E4E4E7]">
-          <Settings className="w-5 h-5" />
+          <Settings className="h-5 w-5" />
           <h2 className="font-semibold">显示设置</h2>
         </div>
-        <button onClick={onClose} className="text-[#71717A] hover:text-[#E4E4E7] transition-colors">
-          <X className="w-5 h-5" />
+        <button onClick={onClose} className="text-[#71717A] transition-colors hover:text-[#E4E4E7]">
+          <X className="h-5 w-5" />
         </button>
       </div>
 
-      <div className="p-6 space-y-8 overflow-y-auto flex-1 text-[#E4E4E7]">
+      <div className="flex-1 space-y-8 overflow-y-auto p-6 text-[#E4E4E7]">
         <div className="setting-group mb-8">
-          <span className="block text-[11px] uppercase tracking-[0.1em] text-[#71717A] mb-4 font-semibold">
-            物理动力学
+          <span className="mb-4 block text-[11px] font-semibold uppercase tracking-[0.1em] text-[#71717A]">
+            漂浮参数
           </span>
 
           <div className="mb-5">
-            <label className="flex justify-between text-[13px] mb-2">
+            <label className="mb-2 flex justify-between text-[13px]">
               <span>漂浮速度</span>
-              <span className="text-[#71717A]">{floatSpeed.toFixed(1)}x</span>
+              <span className="text-[#71717A]">{floatSpeed.toFixed(1)} 倍</span>
             </label>
             <input
               type="range"
@@ -61,14 +69,14 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               step="0.1"
               value={floatSpeed}
               onChange={(event) => setFloatSpeed(parseFloat(event.target.value))}
-              className="w-full h-1 bg-[#2D2D3A] rounded-full appearance-none [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-[#3B82F6] [&::-webkit-slider-thumb]:rounded-full cursor-pointer"
+              className="w-full cursor-pointer appearance-none rounded-full bg-[#2D2D3A] h-1 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-[#3B82F6]"
             />
           </div>
 
           <div className="mb-5">
-            <label className="flex justify-between text-[13px] mb-2">
+            <label className="mb-2 flex justify-between text-[13px]">
               <span>碰撞间距</span>
-              <span className="text-[#71717A]">{bubblePadding}px</span>
+              <span className="text-[#71717A]">{bubblePadding} 像素</span>
             </label>
             <input
               type="range"
@@ -77,37 +85,37 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               step="1"
               value={bubblePadding}
               onChange={(event) => setBubblePadding(parseInt(event.target.value, 10))}
-              className="w-full h-1 bg-[#2D2D3A] rounded-full appearance-none [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-[#3B82F6] [&::-webkit-slider-thumb]:rounded-full cursor-pointer"
+              className="w-full cursor-pointer appearance-none rounded-full bg-[#2D2D3A] h-1 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-[#3B82F6]"
             />
           </div>
         </div>
 
         <div className="setting-group mb-8">
-          <span className="block text-[11px] uppercase tracking-[0.1em] text-[#71717A] mb-4 font-semibold">
-            视觉权重
+          <span className="mb-4 block text-[11px] font-semibold uppercase tracking-[0.1em] text-[#71717A]">
+            视觉风格
           </span>
 
           <div className="mb-5">
-            <label className="block text-[13px] mb-2">色彩方案</label>
+            <label className="mb-2 block text-[13px]">配色方案</label>
             <div className="grid grid-cols-1 gap-2">
               {(['default', 'heatmap', 'neon'] as ColorScheme[]).map((scheme) => (
                 <button
                   key={scheme}
                   onClick={() => setColorScheme(scheme)}
-                  className={`px-4 py-2 rounded text-[13px] font-medium capitalize transition-colors border ${
+                  className={`rounded border px-4 py-2 text-[13px] font-medium transition-colors ${
                     colorScheme === scheme
-                      ? 'bg-[#3B82F6]/10 border-[#3B82F6] text-[#3B82F6]'
-                      : 'bg-[#0A0A0C] border-[#2D2D3A] text-[#71717A] hover:text-[#E4E4E7]'
+                      ? 'border-[#3B82F6] bg-[#3B82F6]/10 text-[#3B82F6]'
+                      : 'border-[#2D2D3A] bg-[#0A0A0C] text-[#71717A] hover:text-[#E4E4E7]'
                   }`}
                 >
-                  {scheme}
+                  {COLOR_SCHEME_LABELS[scheme]}
                 </button>
               ))}
             </div>
           </div>
 
           <div className="flex items-center justify-between">
-            <label className="text-[13px]">显示城市标签</label>
+            <label className="text-[13px]">显示泡泡标签</label>
             <button
               onClick={() => setShowLabels(!showLabels)}
               className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
@@ -115,7 +123,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               }`}
             >
               <span
-                className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
+                className={`inline-block h-3 w-3 rounded-full bg-white transition-transform ${
                   showLabels ? 'translate-x-5' : 'translate-x-1'
                 }`}
               />
@@ -124,15 +132,19 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         </div>
 
         <div className="setting-group">
-          <span className="block text-[11px] uppercase tracking-[0.1em] text-[#71717A] mb-4 font-semibold">
+          <span className="mb-4 block text-[11px] font-semibold uppercase tracking-[0.1em] text-[#71717A]">
             最近重点告警
           </span>
-          <div className="text-xs bg-[#0A0A0C] p-3 rounded border-l-2 border-[#EF4444]">
-            <strong className="text-[#E4E4E7]">{highlightAlertTitle || '暂无高优先级告警'}</strong>
-            <br />
-            <span className="text-[#71717A] mt-1 inline-block">
-              {highlightAlertMessage || '当前没有需要优先处理的异常。'}
+          <div className="rounded border-l-2 border-[#EF4444] bg-[#0A0A0C] p-3 text-xs leading-5">
+            <strong className="block break-words text-[#E4E4E7]">
+              {highlightAlertTitle || '暂无需要优先处理的告警'}
+            </strong>
+            <span className="mt-2 block break-words text-[#A1A1AA]">
+              {highlightAlertSummary || '当前运行正常，还没有新的高优先级异常。'}
             </span>
+            {highlightAlertDetail ? (
+              <span className="mt-2 block break-words text-[#71717A]">{highlightAlertDetail}</span>
+            ) : null}
           </div>
         </div>
       </div>

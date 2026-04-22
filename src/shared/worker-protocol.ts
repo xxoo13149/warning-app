@@ -21,11 +21,15 @@ export type CoreInvokeChannel = Exclude<
   'app.control' | 'app.getControlState' | 'settings.previewSound'
 >;
 
-export interface WorkerInvokePayloadMap
-  extends Omit<InvokePayloadMap, 'app.control' | 'app.getControlState'> {}
+export type WorkerInvokePayloadMap = Omit<
+  InvokePayloadMap,
+  'app.control' | 'app.getControlState'
+>;
 
-export interface WorkerInvokeResultMap
-  extends Omit<InvokeResultMap, 'app.control' | 'app.getControlState'> {}
+export type WorkerInvokeResultMap = Omit<
+  InvokeResultMap,
+  'app.control' | 'app.getControlState'
+>;
 
 export type WorkerInvokeChannel = CoreInvokeChannel;
 

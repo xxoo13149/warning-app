@@ -10,16 +10,14 @@ import {
 } from '../shared/alert-display';
 import type { AppLanguage, FeedMode, OrderSide, Severity } from './types/contracts';
 
-const STORAGE_KEY = 'polymarket-weather-monitor.language.v3';
-
 const messages = {
   'zh-CN': {
     appLoading: '正在加载本地监控状态...',
-    brandTitle: 'Polymarket',
-    brandSubtitle: '天气监控',
+    brandTitle: '天气预警台',
+    brandSubtitle: '盘口监控',
     workspaceAria: '工作区导航',
     nav: {
-      dashboard: { label: '监控总览', hint: 'Bubble 首页' },
+      dashboard: { label: '监控总览', hint: '总览首页' },
       explorer: { label: '市场探索', hint: '完整工作台' },
       alerts: { label: '告警中心', hint: '事件与处理' },
       rules: { label: '规则设置', hint: '系统与运行控制' },
@@ -27,7 +25,7 @@ const messages = {
     topbar: {
       headline: '天气盘口监控台',
       shards: '分片',
-      tokens: 'Token',
+      tokens: '订阅数',
       latency: '延迟',
       markets: '盘口',
       alerts: '未确认告警',
@@ -43,8 +41,8 @@ const messages = {
       disconnected: '未连接',
       enabled: '已启用',
       disabled: '已关闭',
-      yes: '是（YES）',
-      no: '否（NO）',
+      yes: '是',
+      no: '否',
       all: '全部',
       time: '时间',
       city: '城市',
@@ -65,14 +63,14 @@ const messages = {
       temperatureBand: '温度区间',
     },
     dashboard: {
-      title: 'Bubble 监控总览',
+      title: '气泡监控总览',
       subtitle: '把同一天的全部监控盘口放进一张稳定的实时画布，优先看真正有风险的点。',
       dateLabel: '预测日期',
       scopeLabel: '展示范围',
       scopeAll: '全部盘口',
       scopeWatchlist: '仅关注盘口',
       scopeActive: '仅异常盘口',
-      boardTitle: '实时 Bubble 画布',
+      boardTitle: '实时气泡画布',
       boardHint: '单击查看右侧详情，双击跳到市场探索。',
       sideTitle: '盘口侧栏',
       sideHint: '当前选中盘口、相关告警与服务摘要。',
@@ -85,7 +83,7 @@ const messages = {
       latestAlertsEmpty: '当前没有需要优先处理的告警。',
       selectedMarket: '选中盘口',
       openExplorer: '查看完整详情',
-      yesPrice: 'YES 价格',
+      yesPrice: '“是”价格',
       bid: '买一',
       ask: '卖一',
       spread: '价差',
@@ -108,14 +106,14 @@ const messages = {
       title: '市场探索',
       summary: (rows: number, total: number) => `当前展示 ${rows} / ${total} 个盘口`,
       cityKey: '城市筛选',
-      cityPlaceholder: '例如：new-york',
+      cityPlaceholder: '输入城市标识或城市名',
       eventDate: '预测日期',
       sortBy: '排序字段',
       order: '排序方向',
       watchlistOnly: '仅关注盘口',
       requery: '重新查询',
       airport: '机场',
-      noPrice: 'NO 价格',
+      noPrice: '“否”价格',
       desc: '降序',
       asc: '升序',
       advanced: '高级信息',
@@ -147,7 +145,7 @@ const messages = {
       metric: '指标',
       threshold: '阈值',
       cooldown: '冷却',
-      bubbleWeight: 'Bubble 权重',
+      bubbleWeight: '风险权重',
       saveRules: '保存规则',
       startOnBoot: '开机自启',
       backgroundAudio: '后台播放提示音',
@@ -158,7 +156,7 @@ const messages = {
       soundProfile: '提示音',
       applySound: '应用提示音',
       cityImport: '城市 / 机场映射导入',
-      cityImportPlaceholder: 'new-york,KJFK\nlos-angeles,KLAX',
+      cityImportPlaceholder: '每行一条：城市标识,机场代码',
       importCityMapping: '导入映射',
       saveSettings: '保存设置',
       processStoppedHint: '监控进程未运行，部分设置变更会在后台恢复后生效。',
@@ -447,11 +445,7 @@ interface I18nContextValue {
 const I18nContext = createContext<I18nContextValue | null>(null);
 
 const readInitialLanguage = (): AppLanguage => {
-  if (typeof window === 'undefined') {
-    return 'zh-CN';
-  }
-  const stored = window.localStorage.getItem(STORAGE_KEY);
-  return stored === 'en-US' ? 'en-US' : 'zh-CN';
+  return 'zh-CN';
 };
 
 export const LocaleProvider = ({ children }: { children: ReactNode }) => {
@@ -460,9 +454,10 @@ export const LocaleProvider = ({ children }: { children: ReactNode }) => {
   const value = useMemo<I18nContextValue>(() => {
     const copy = messages[language];
     const setLanguage = (nextLanguage: AppLanguage) => {
-      setLanguageState(nextLanguage);
+      void nextLanguage;
+      setLanguageState('zh-CN');
       if (typeof window !== 'undefined') {
-        window.localStorage.setItem(STORAGE_KEY, nextLanguage);
+        window.localStorage.removeItem('polymarket-weather-monitor.language.v3');
       }
     };
 

@@ -19,6 +19,7 @@ import {
   buildDashboardBubbleStats,
   type PhysicsBubbleCityData,
 } from '../utils/dashboard-bubble-adapter';
+import { buildAlertPresentation } from '../utils/alert-summary';
 
 interface DashboardViewProps {
   health: AppHealth;
@@ -46,12 +47,71 @@ const severityRank: Record<AlertEvent['severity'], number> = {
 
 const sortAlerts = (alerts: AlertEvent[]) =>
   [...alerts].sort((left, right) => {
+    const acknowledgementDelta = Number(left.acknowledged) - Number(right.acknowledged);
+    if (acknowledgementDelta !== 0) {
+      return acknowledgementDelta;
+    }
+
     const severityDelta = severityRank[right.severity] - severityRank[left.severity];
     if (severityDelta !== 0) {
       return severityDelta;
     }
     return Date.parse(right.triggeredAt) - Date.parse(left.triggeredAt);
   });
+
+const isReadableChineseText = (value?: string | null) => {
+  const text = value?.trim() ?? '';
+  return /[\u3400-\u9fff]/.test(text) && !/[A-Za-z]/.test(text);
+};
+
+const toReadableDashboardError = (cause: unknown) => {
+  const message = cause instanceof Error ? cause.message.trim() : '';
+  if (!message) {
+    return '监控总览加载失败，请稍后重试。';
+  }
+
+  if (isReadableChineseText(message)) {
+    return message;
+  }
+
+  const normalized = message.toLowerCase();
+  if (
+    normalized.includes('cannot find module') ||
+    normalized.includes('packaged resources') ||
+    normalized.includes('err_module_not_found')
+  ) {
+    return '监控总览加载失败，运行资源缺失。';
+  }
+
+  if (normalized.includes('websocket') || normalized.includes(' ws ')) {
+    return '监控总览加载失败，实时连接异常。';
+  }
+
+  if (
+    normalized.includes('sqlite') ||
+    normalized.includes('better-sqlite3') ||
+    normalized.includes('database')
+  ) {
+    return '监控总览加载失败，本地数据服务异常。';
+  }
+
+  if (
+    normalized.includes('network') ||
+    normalized.includes('proxy') ||
+    normalized.includes('tls') ||
+    normalized.includes('econn') ||
+    normalized.includes('enotfound') ||
+    normalized.includes('etimedout')
+  ) {
+    return '监控总览加载失败，网络连接异常。';
+  }
+
+  if (normalized.includes('timeout')) {
+    return '监控总览加载失败，请求超时。';
+  }
+
+  return '监控总览加载失败，请检查后台服务后重试。';
+};
 
 export const DashboardView = ({ health, alerts, onOpenExplorer }: DashboardViewProps) => {
   const [snapshot, setSnapshot] = useState<DashboardSnapshot>(EMPTY_SNAPSHOT);
@@ -94,11 +154,7 @@ export const DashboardView = ({ health, alerts, onOpenExplorer }: DashboardViewP
         return;
       }
 
-      const message =
-        cause instanceof Error && cause.message.trim()
-          ? cause.message
-          : '首页数据加载失败';
-      setError(message);
+      setError(toReadableDashboardError(cause));
     } finally {
       if (requestSerialRef.current === serial) {
         setLoading(false);
@@ -172,6 +228,10 @@ export const DashboardView = ({ health, alerts, onOpenExplorer }: DashboardViewP
   );
 
   const highlightAlert = useMemo(() => sortAlerts(alerts)[0] ?? null, [alerts]);
+  const highlightAlertPresentation = useMemo(
+    () => (highlightAlert ? buildAlertPresentation(highlightAlert) : null),
+    [highlightAlert],
+  );
 
   const handleOpenCity = useCallback(
     (city: { cityKey: string; eventDate: string }) => {
@@ -202,15 +262,16 @@ export const DashboardView = ({ health, alerts, onOpenExplorer }: DashboardViewP
             />
           ) : (
             <div className="absolute inset-0 z-10 grid place-items-center text-sm text-[#71717A]">
-              {loading ? '正在加载泡泡监控首页...' : error || '当前没有可展示的城市数据。'}
+              {loading ? '正在加载泡泡监控总览...' : error || '当前没有可展示的城市数据。'}
             </div>
           )}
 
           <SettingsPanel
             isOpen={isSettingsOpen}
             onClose={() => setIsSettingsOpen(false)}
-            highlightAlertTitle={highlightAlert ? `${highlightAlert.cityKey} / ${highlightAlert.severity}` : undefined}
-            highlightAlertMessage={highlightAlert?.message}
+            highlightAlertTitle={highlightAlertPresentation?.title}
+            highlightAlertSummary={highlightAlertPresentation?.summary}
+            highlightAlertDetail={highlightAlertPresentation?.detail ?? undefined}
           />
 
           <div className="absolute bottom-0 left-0 right-0 z-10 flex h-12 items-center gap-6 border-t border-[#2D2D3A] bg-[#0A0A0C]/80 px-6 text-xs text-[#71717A] backdrop-blur-md">
@@ -220,11 +281,11 @@ export const DashboardView = ({ health, alerts, onOpenExplorer }: DashboardViewP
                   health.connected ? 'bg-[#10B981]' : 'bg-[#F59E0B]'
                 }`}
               />
-              运行状态: {stats.monitorStatusText}
+              运行状态：{stats.monitorStatusText}
             </div>
             <div className="font-mono">
-              城市: {stats.visibleCityCount} | 覆盖盘口: {stats.coveredMarketCount} | 延迟: {stats.latencyMs}
-              ms
+              城市：{stats.visibleCityCount} · 覆盖盘口：{stats.coveredMarketCount} · 延迟：
+              {stats.latencyMs} 毫秒
             </div>
             <div className="ml-auto flex gap-4">
               <div className="flex items-center gap-1.5">

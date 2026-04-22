@@ -1,12 +1,12 @@
 import { memo, startTransition, useDeferredValue, useEffect, useState } from 'react';
 
 import { useI18n } from '../i18n';
-import type { MarketQuery, MarketRow } from '../types/contracts';
+import type { AppLanguage, MarketQuery, MarketRow } from '../types/contracts';
 import {
-  formatMarketCents,
+  formatMarketCentsLabel,
   formatMarketPercent,
+  formatTemperatureBandLabel,
   hasMarketQuoteSignal,
-  normalizeBandText,
 } from '../utils/market-display';
 
 interface MarketExplorerViewProps {
@@ -20,9 +20,10 @@ interface MarketExplorerViewProps {
 interface MarketExplorerRowProps {
   row: MarketRow;
   formatTime: (value: string) => string;
+  language: AppLanguage;
 }
 
-const MarketExplorerRow = memo(({ row, formatTime }: MarketExplorerRowProps) => {
+const MarketExplorerRow = memo(({ row, formatTime, language }: MarketExplorerRowProps) => {
   const spreadClass = (row.spread ?? 0) >= 0.05 ? 'value-down' : '';
   const changeClass = row.change5m >= 0 ? 'value-up' : 'value-down';
   const hasQuotes = hasMarketQuoteSignal(row);
@@ -31,12 +32,12 @@ const MarketExplorerRow = memo(({ row, formatTime }: MarketExplorerRowProps) => 
     <tr>
       <td>{row.cityName}</td>
       <td>{row.eventDate}</td>
-      <td>{normalizeBandText(row.temperatureBand)}</td>
-      <td>{formatMarketCents(row.yesPrice, { treatZeroAsUnknown: !hasQuotes })}</td>
-      <td>{formatMarketCents(row.bestBid, { treatZeroAsUnknown: !hasQuotes })}</td>
-      <td>{formatMarketCents(row.bestAsk, { treatZeroAsUnknown: !hasQuotes })}</td>
+      <td>{formatTemperatureBandLabel(row.temperatureBand, language)}</td>
+      <td>{formatMarketCentsLabel(row.yesPrice, { treatZeroAsUnknown: !hasQuotes }, language)}</td>
+      <td>{formatMarketCentsLabel(row.bestBid, { treatZeroAsUnknown: !hasQuotes }, language)}</td>
+      <td>{formatMarketCentsLabel(row.bestAsk, { treatZeroAsUnknown: !hasQuotes }, language)}</td>
       <td className={spreadClass}>
-        {formatMarketCents(row.spread, { treatZeroAsUnknown: !hasQuotes })}
+        {formatMarketCentsLabel(row.spread, { treatZeroAsUnknown: !hasQuotes }, language)}
       </td>
       <td className={changeClass}>{formatMarketPercent(row.change5m)}</td>
       <td>{formatTime(row.updatedAt)}</td>
@@ -51,7 +52,7 @@ export const MarketExplorerView = ({
   onQueryChange,
   onRefresh,
 }: MarketExplorerViewProps) => {
-  const { copy, formatTime, sortByLabel } = useI18n();
+  const { copy, formatTime, language, sortByLabel } = useI18n();
   const [cityKey, setCityKey] = useState(query.cityKey ?? '');
   const [eventDate, setEventDate] = useState(query.eventDate ?? '');
   const [watchlistOnly, setWatchlistOnly] = useState(Boolean(query.watchlistedOnly));
@@ -164,7 +165,12 @@ export const MarketExplorerView = ({
             </thead>
             <tbody>
               {rows.map((row) => (
-                <MarketExplorerRow key={row.marketId} row={row} formatTime={formatTime} />
+                <MarketExplorerRow
+                  key={row.marketId}
+                  row={row}
+                  formatTime={formatTime}
+                  language={language}
+                />
               ))}
             </tbody>
           </table>

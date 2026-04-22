@@ -48,6 +48,22 @@ export const formatMarketCents = (
   return `${Math.round(cents)}${CENT}`;
 };
 
+export const formatMarketCentsLabel = (
+  value: number | null | undefined,
+  options?: {
+    compact?: boolean;
+    treatZeroAsUnknown?: boolean;
+  },
+  language: AppLanguage = 'zh-CN',
+) => {
+  const formatted = formatMarketCents(value, options);
+  if (language !== 'zh-CN') {
+    return formatted;
+  }
+
+  return formatted.replace(/¢/g, ' 美分');
+};
+
 export const formatMarketPercent = (value: number | null | undefined) => {
   if (value === null || value === undefined || !Number.isFinite(value)) {
     return '--';
@@ -58,10 +74,37 @@ export const formatMarketPercent = (value: number | null | undefined) => {
 
 export const normalizeBandText = (value: string) => normalizeTemperatureBand(value) || value;
 
+export const formatTemperatureBandLabel = (value: string, language: AppLanguage = 'zh-CN') => {
+  const normalized = normalizeBandText(value);
+  if (language !== 'zh-CN') {
+    return normalized;
+  }
+
+  return normalized
+    .replace(/\bless than\s+/gi, '低于 ')
+    .replace(/\bmore than\s+/gi, '高于 ')
+    .replace(/\bat least\s+/gi, '不低于 ')
+    .replace(/\bat most\s+/gi, '不高于 ')
+    .replace(/\bbetween\s+/gi, '')
+    .replace(/\bfrom\s+/gi, '')
+    .replace(/\s+(?:to|through|and)\s+/gi, ' 至 ')
+    .replace(/\s+or\s+(?:higher|above|more)\b/gi, ' 以上')
+    .replace(/\s+or\s+(?:lower|below|less)\b/gi, ' 以下')
+    .replace(/\babove\s+/gi, '高于 ')
+    .replace(/\bbelow\s+/gi, '低于 ')
+    .replace(/\bover\s+/gi, '高于 ')
+    .replace(/\bunder\s+/gi, '低于 ')
+    .replace(/\s*°F\b/gi, ' 华氏度')
+    .replace(/\s*°C\b/gi, ' 摄氏度')
+    .replace(/\s+/g, ' ')
+    .trim();
+};
+
 export const shortenTemperatureBand = (value: string, language: AppLanguage) => {
-  const normalized = normalizeBandText(value)
+  const normalized = formatTemperatureBandLabel(value, language)
     .replace(/\s+to\s+/gi, '–')
     .replace(/\s+through\s+/gi, '–')
+    .replace(/\s+至\s+/g, '–')
     .replace(/\s+or higher/gi, '+')
     .replace(/\s+or lower/gi, '-')
     .replace(/\s+/g, ' ')
@@ -87,10 +130,14 @@ export const buildBubbleSecondaryLabel = (
   language: AppLanguage,
 ) => {
   const shortBand = shortenTemperatureBand(market.temperatureBand, language);
-  const price = formatMarketCents(market.yesPrice, {
-    compact: true,
-    treatZeroAsUnknown: !hasMarketQuoteSignal(market),
-  });
+  const price = formatMarketCentsLabel(
+    market.yesPrice,
+    {
+      compact: true,
+      treatZeroAsUnknown: !hasMarketQuoteSignal(market),
+    },
+    language,
+  );
 
   return `${shortBand} · ${price}`;
 };

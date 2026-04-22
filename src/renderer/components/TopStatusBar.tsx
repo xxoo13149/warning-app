@@ -18,26 +18,24 @@ export const TopStatusBar = ({
   activeAlerts,
   onRefresh,
 }: TopStatusBarProps) => {
-  const { language, setLanguage } = useI18n();
+  const { language } = useI18n();
   const effectiveMode = health.mode === 'degraded' ? 'degraded' : mode;
   const copy =
     language === 'zh-CN'
       ? {
-          headline: '天气盘口监控台',
-          connected: '已连接',
-          disconnected: '未连接',
-          live: '实时',
-          mock: '模拟',
-          degraded: '降级',
-          shards: '分片',
-          tokens: 'Token',
-          latency: '延迟',
-          markets: '盘口',
-          alerts: '未确认告警',
-          lastSync: '最近同步',
-          language: '语言',
-          refresh: '刷新',
-          zh: '中文',
+          headline: '天气预警工作台',
+          connected: '连接正常',
+          disconnected: '连接中断',
+          live: '实时监控',
+          mock: '模拟演练',
+          degraded: '降级运行',
+          shards: '运行分片',
+          tokens: '订阅标的',
+          latency: '响应延迟',
+          markets: '监控项',
+          alerts: '待处理告警',
+          lastSync: '最近更新',
+          refresh: '刷新数据',
         }
       : {
           headline: 'Weather Market Monitor',
@@ -52,9 +50,7 @@ export const TopStatusBar = ({
           markets: 'Markets',
           alerts: 'Unacked Alerts',
           lastSync: 'Last Sync',
-          language: 'Language',
           refresh: 'Refresh',
-          zh: '中文',
         };
 
   const formatTime = (value: string) => {
@@ -76,12 +72,30 @@ export const TopStatusBar = ({
     () => [
       { label: copy.shards, value: `${health.shardActive}/${health.shardTotal}` },
       { label: copy.tokens, value: String(health.subscribedTokens) },
-      { label: copy.latency, value: `${Math.round(health.latencyMs)}ms` },
+      {
+        label: copy.latency,
+        value:
+          language === 'zh-CN'
+            ? `${Math.round(health.latencyMs)} 毫秒`
+            : `${Math.round(health.latencyMs)}ms`,
+      },
       { label: copy.markets, value: String(marketTotal) },
       { label: copy.alerts, value: String(activeAlerts) },
       { label: copy.lastSync, value: formatTime(health.lastSyncAt) },
     ],
-    [activeAlerts, copy.alerts, copy.lastSync, copy.latency, copy.markets, copy.shards, copy.tokens, formatTime, health, marketTotal],
+    [
+      activeAlerts,
+      copy.alerts,
+      copy.lastSync,
+      copy.latency,
+      copy.markets,
+      copy.shards,
+      copy.tokens,
+      formatTime,
+      health,
+      language,
+      marketTotal,
+    ],
   );
 
   return (
@@ -109,30 +123,11 @@ export const TopStatusBar = ({
       </div>
 
       <div className="topbar__actions">
-        <div className="language-toggle" role="group" aria-label={copy.language}>
-          <button
-            type="button"
-            className={
-              language === 'zh-CN'
-                ? 'language-toggle__button language-toggle__button--active'
-                : 'language-toggle__button'
-            }
-            onClick={() => setLanguage('zh-CN')}
-          >
-            {copy.zh}
-          </button>
-          <button
-            type="button"
-            className={
-              language === 'en-US'
-                ? 'language-toggle__button language-toggle__button--active'
-                : 'language-toggle__button'
-            }
-            onClick={() => setLanguage('en-US')}
-          >
-            EN
-          </button>
-        </div>
+        {language === 'zh-CN' ? (
+          <div className="status-chip">
+            <span>中文界面</span>
+          </div>
+        ) : null}
         <button type="button" className="ghost-button" onClick={onRefresh}>
           {copy.refresh}
         </button>

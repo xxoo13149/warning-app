@@ -149,7 +149,7 @@ export const builtinRuleMeta: Record<BuiltinRuleKey, LocalizedMeta> = {
     en: '5m Move',
     zhAlias: 'change5m',
     enAlias: 'change5m',
-    descriptionZh: '监控 YES 价格在最近 5 分钟内的波动幅度。',
+    descriptionZh: '监控“是”价格在最近 5 分钟内的波动幅度。',
     descriptionEn: 'Monitors the YES price move over the last 5 minutes.',
   },
   spread_threshold: {
@@ -231,11 +231,11 @@ export const formatBuiltinRuleDescription = (
 export const formatSideLabel = (side: MarketSideKey, locale: DisplayLocale) => {
   switch (side) {
     case 'YES':
-      return locale === 'zh-CN' ? '是（YES）' : 'YES';
+      return locale === 'zh-CN' ? '是' : 'YES';
     case 'NO':
-      return locale === 'zh-CN' ? '否（NO）' : 'NO';
+      return locale === 'zh-CN' ? '否' : 'NO';
     default:
-      return locale === 'zh-CN' ? '双边' : 'Both';
+      return locale === 'zh-CN' ? '双向' : 'Both';
   }
 };
 
