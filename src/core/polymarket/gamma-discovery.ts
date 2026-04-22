@@ -5,7 +5,7 @@ import {
   DEFAULT_WEATHER_TAG_ID,
   DEFAULT_WEATHER_TAG_SLUG,
 } from './constants';
-import { requestJson, toQueryString, uniqueStrings } from './http';
+import { requestJson, toNumberOrUndefined, toQueryString, uniqueStrings } from './http';
 import { buildUndiciDispatcher } from './network';
 import type { Dispatcher } from 'undici';
 import type {
@@ -16,6 +16,7 @@ import type {
   GammaEvent,
   GammaMarket,
   GammaTag,
+  MarketPriceSeed,
   NormalizedEvent,
   NormalizedMarket,
 } from './types';
@@ -103,6 +104,174 @@ function parseStringList(value: unknown): string[] {
   return [trimmed];
 }
 
+interface StructuredToken {
+  tokenId: string;
+  outcome?: string;
+}
+
+function clampProbability(value: number | undefined): number | undefined {
+  if (value === undefined || !Number.isFinite(value)) {
+    return undefined;
+  }
+  if (value < 0 || value > 1) {
+    return undefined;
+  }
+  return Number(value.toFixed(6));
+}
+
+function complementProbability(value: number | undefined): number | undefined {
+  return value === undefined ? undefined : clampProbability(1 - value);
+}
+
+function parseStructuredTokens(value: unknown): StructuredToken[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const tokens: StructuredToken[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') {
+      continue;
+    }
+
+    const record = item as Record<string, unknown>;
+    const tokenIdCandidates = [
+      record.token_id,
+      record.tokenId,
+      record.asset_id,
+      record.assetId,
+      record.id,
+    ];
+    const tokenId = tokenIdCandidates.find(
+      (candidate): candidate is string =>
+        typeof candidate === 'string' && candidate.trim().length > 0,
+    );
+    if (!tokenId) {
+      continue;
+    }
+
+    const outcomeCandidates = [record.outcome, record.name, record.title];
+    const outcome = outcomeCandidates.find(
+      (candidate): candidate is string =>
+        typeof candidate === 'string' && candidate.trim().length > 0,
+    );
+    tokens.push({
+      tokenId,
+      outcome: outcome?.trim(),
+    });
+  }
+
+  return tokens;
+}
+
+function pickYesNoTokenIdsFromStructuredTokens(tokens: StructuredToken[]): {
+  yesTokenId?: string;
+  noTokenId?: string;
+} {
+  let yesTokenId: string | undefined;
+  let noTokenId: string | undefined;
+
+  for (const token of tokens) {
+    const lowered = token.outcome?.trim().toLowerCase();
+    if (!yesTokenId && lowered === 'yes') {
+      yesTokenId = token.tokenId;
+    }
+    if (!noTokenId && lowered === 'no') {
+      noTokenId = token.tokenId;
+    }
+  }
+
+  return { yesTokenId, noTokenId };
+}
+
+function parseProbabilityList(value: unknown): number[] {
+  const probabilities: number[] = [];
+  for (const item of parseStringList(value)) {
+    const parsed = clampProbability(toNumberOrUndefined(item));
+    if (parsed !== undefined) {
+      probabilities.push(parsed);
+    }
+  }
+  return probabilities;
+}
+
+function pickYesNoOutcomeValues(outcomes: string[], values: number[]): {
+  yesValue?: number;
+  noValue?: number;
+} {
+  let yesValue: number | undefined;
+  let noValue: number | undefined;
+
+  if (outcomes.length === values.length) {
+    outcomes.forEach((outcome, index) => {
+      const lowered = outcome.trim().toLowerCase();
+      if (lowered === 'yes') {
+        yesValue = values[index];
+      }
+      if (lowered === 'no') {
+        noValue = values[index];
+      }
+    });
+  }
+
+  if (yesValue === undefined && values.length > 0) {
+    yesValue = values[0];
+  }
+  if (noValue === undefined && values.length > 1) {
+    noValue = values[1];
+  }
+
+  return { yesValue, noValue };
+}
+
+function toOptionalMarketPriceSeed(seed: MarketPriceSeed): MarketPriceSeed | undefined {
+  if (
+    seed.lastTradePrice === undefined &&
+    seed.bestBid === undefined &&
+    seed.bestAsk === undefined
+  ) {
+    return undefined;
+  }
+  return seed;
+}
+
+function buildPriceSeed(market: GammaMarket, outcomes: string[]): NormalizedMarket['priceSeed'] {
+  const record = market as Record<string, unknown>;
+  const outcomePrices = pickYesNoOutcomeValues(
+    outcomes,
+    parseProbabilityList(record.outcomePrices),
+  );
+  const bestBid = clampProbability(toNumberOrUndefined(record.bestBid));
+  const bestAsk = clampProbability(toNumberOrUndefined(record.bestAsk));
+  const yesLastTradePrice =
+    outcomePrices.yesValue ??
+    clampProbability(
+      toNumberOrUndefined(record.lastTradePrice ?? record.price ?? record.currentPrice),
+    );
+  const noLastTradePrice =
+    outcomePrices.noValue ?? complementProbability(yesLastTradePrice);
+
+  const yesSeed = toOptionalMarketPriceSeed({
+    lastTradePrice: yesLastTradePrice,
+    bestBid,
+    bestAsk,
+  });
+  const noSeed = toOptionalMarketPriceSeed({
+    lastTradePrice: noLastTradePrice,
+    bestBid: complementProbability(bestAsk),
+    bestAsk: complementProbability(bestBid),
+  });
+
+  if (!yesSeed && !noSeed) {
+    return undefined;
+  }
+
+  return {
+    yes: yesSeed,
+    no: noSeed,
+  };
+}
+
 function pickYesNoTokenIds(outcomes: string[], tokenIds: string[]): {
   yesTokenId?: string;
   noTokenId?: string;
@@ -155,10 +324,14 @@ function normalizeMarket(
     return null;
   }
 
+  const structuredTokens = parseStructuredTokens(
+    (market as Record<string, unknown>).tokens,
+  );
   const tokenIds = uniqueStrings(
     parseStringList(market.clobTokenIds).concat(
       parseStringList((market as Record<string, unknown>).tokenIds),
       parseStringList((market as Record<string, unknown>).outcomeTokenIds),
+      structuredTokens.map((token) => token.tokenId),
     ),
   );
 
@@ -167,7 +340,14 @@ function normalizeMarket(
   }
 
   const outcomes = parseStringList(market.outcomes);
-  const { yesTokenId, noTokenId } = pickYesNoTokenIds(outcomes, tokenIds);
+  const fallbackOutcomes =
+    outcomes.length > 0
+      ? outcomes
+      : structuredTokens
+          .map((token) => token.outcome)
+          .filter((outcome): outcome is string => Boolean(outcome));
+  const structuredTokenIds = pickYesNoTokenIdsFromStructuredTokens(structuredTokens);
+  const fallbackTokenIds = pickYesNoTokenIds(fallbackOutcomes, tokenIds);
 
   return {
     seriesSlug: String(event.seriesSlug ?? ''),
@@ -181,10 +361,11 @@ function normalizeMarket(
     active: parseBoolean(market.active, true),
     closed: parseBoolean(market.closed, false),
     tokenIds,
-    yesTokenId,
-    noTokenId,
-    outcomes,
+    yesTokenId: structuredTokenIds.yesTokenId ?? fallbackTokenIds.yesTokenId,
+    noTokenId: structuredTokenIds.noTokenId ?? fallbackTokenIds.noTokenId,
+    outcomes: fallbackOutcomes,
     cityKey,
+    priceSeed: buildPriceSeed(market, fallbackOutcomes),
   };
 }
 

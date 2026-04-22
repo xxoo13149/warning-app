@@ -57,6 +57,18 @@ export interface NormalizedMarket {
   noTokenId?: string;
   outcomes: string[];
   cityKey?: string;
+  priceSeed?: NormalizedMarketPriceSeed;
+}
+
+export interface MarketPriceSeed {
+  lastTradePrice?: number;
+  bestBid?: number;
+  bestAsk?: number;
+}
+
+export interface NormalizedMarketPriceSeed {
+  yes?: MarketPriceSeed;
+  no?: MarketPriceSeed;
 }
 
 export interface NormalizedEvent {

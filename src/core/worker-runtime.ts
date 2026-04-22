@@ -12,7 +12,12 @@ import type {
   NewPriceTick,
   TrackedMarket as DbTrackedMarket,
 } from './db/schema';
-import type { NormalizedEvent, ShardStatusEvent, TokenRuntimeState } from './polymarket/types';
+import type {
+  MarketPriceSeed,
+  NormalizedEvent,
+  ShardStatusEvent,
+  TokenRuntimeState,
+} from './polymarket/types';
 import { PolymarketDataService } from './services/polymarket-data-service';
 import { FeedStateStore, MarketStateStore } from './state/market-state';
 import {
@@ -238,6 +243,52 @@ const toUiScopeSide = (side: 'yes' | 'no' | undefined): 'YES' | 'NO' | 'BOTH' =>
   if (side === 'no') return 'NO';
   return 'BOTH';
 };
+
+const DISPLAY_MIDPOINT_MAX_SPREAD = 0.1;
+
+const normalizeOptionalNumber = (
+  value: number | null | undefined,
+): number | undefined =>
+  typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+
+const sameOptionalNumber = (
+  left: number | null | undefined,
+  right: number | null | undefined,
+): boolean => normalizeOptionalNumber(left) === normalizeOptionalNumber(right);
+
+const resolveSpread = (
+  bestBid: number | null | undefined,
+  bestAsk: number | null | undefined,
+): number | null => {
+  const bid = normalizeOptionalNumber(bestBid);
+  const ask = normalizeOptionalNumber(bestAsk);
+  return bid !== undefined && ask !== undefined ? Math.max(0, ask - bid) : null;
+};
+
+const resolveDisplayPrice = (
+  lastTradePrice: number | null | undefined,
+  bestBid: number | null | undefined,
+  bestAsk: number | null | undefined,
+): number | null => {
+  const trade = normalizeOptionalNumber(lastTradePrice);
+  if (trade !== undefined) {
+    return trade;
+  }
+
+  const bid = normalizeOptionalNumber(bestBid);
+  const ask = normalizeOptionalNumber(bestAsk);
+  if (bid !== undefined && ask !== undefined) {
+    const spread = Math.max(0, ask - bid);
+    return spread <= DISPLAY_MIDPOINT_MAX_SPREAD
+      ? Number(((bid + ask) / 2).toFixed(6))
+      : bid;
+  }
+
+  return bid ?? ask ?? null;
+};
+
+const complementPrice = (price: number | null): number | null =>
+  price === null ? null : Number(Math.max(0, Math.min(1, 1 - price)).toFixed(6));
 
 const buildQuietHoursFromSettings = (
   settings: Pick<AppSettings, 'quietHoursStart' | 'quietHoursEnd'>,
@@ -621,7 +672,7 @@ export class WorkerRuntime {
 
   private bindServiceEvents(): void {
     this.dataService.on('discovery', async (universe) => {
-      this.handleDiscovery(universe.events);
+      await this.handleDiscovery(universe.events);
       this.hasSuccessfulDiscovery = true;
       this.clearServiceError();
       this.queueDashboardTick();
@@ -682,7 +733,7 @@ export class WorkerRuntime {
     });
   }
 
-  private handleDiscovery(events: NormalizedEvent[]): void {
+  private async handleDiscovery(events: NormalizedEvent[]): Promise<void> {
     const trackedEvents = events.map((event) => ({
       eventId: event.eventId,
       cityKey: event.cityKey ?? '',
@@ -724,6 +775,76 @@ export class WorkerRuntime {
         updatedAt: Date.now(),
       })),
     );
+    await this.applyDiscoveryPriceSeeds(events);
+  }
+
+  private async applyDiscoveryPriceSeeds(events: NormalizedEvent[]): Promise<void> {
+    const timestamp = Date.now();
+    const pendingStates: TokenRuntimeState[] = [];
+
+    for (const event of events) {
+      for (const market of event.markets) {
+        if (market.yesTokenId && market.priceSeed?.yes) {
+          const next = this.mergeDiscoveryPriceSeed(
+            market.yesTokenId,
+            market.priceSeed.yes,
+            timestamp,
+          );
+          if (next) {
+            pendingStates.push(next);
+          }
+        }
+
+        if (market.noTokenId && market.priceSeed?.no) {
+          const next = this.mergeDiscoveryPriceSeed(
+            market.noTokenId,
+            market.priceSeed.no,
+            timestamp,
+          );
+          if (next) {
+            pendingStates.push(next);
+          }
+        }
+      }
+    }
+
+    for (const tokenState of pendingStates) {
+      await this.handleTokenState(tokenState);
+    }
+  }
+
+  private mergeDiscoveryPriceSeed(
+    tokenId: string,
+    seed: MarketPriceSeed,
+    timestamp: number,
+  ): TokenRuntimeState | null {
+    const existing = this.latestTokenStateById.get(tokenId);
+    const nextLastTradePrice =
+      normalizeOptionalNumber(existing?.lastTradePrice) ?? seed.lastTradePrice;
+    const nextBestBid = normalizeOptionalNumber(existing?.bestBid) ?? seed.bestBid;
+    const nextBestAsk = normalizeOptionalNumber(existing?.bestAsk) ?? seed.bestAsk;
+    const nextSpread =
+      normalizeOptionalNumber(existing?.spread) ??
+      normalizeOptionalNumber(resolveSpread(nextBestBid, nextBestAsk));
+
+    if (
+      sameOptionalNumber(existing?.lastTradePrice, nextLastTradePrice) &&
+      sameOptionalNumber(existing?.bestBid, nextBestBid) &&
+      sameOptionalNumber(existing?.bestAsk, nextBestAsk) &&
+      sameOptionalNumber(existing?.spread, nextSpread)
+    ) {
+      return null;
+    }
+
+    return {
+      tokenId,
+      lastTradePrice: nextLastTradePrice,
+      bestBid: nextBestBid,
+      bestAsk: nextBestAsk,
+      spread: nextSpread ?? undefined,
+      updatedAt: timestamp,
+      lastEventType: 'discovery',
+    };
   }
 
   private refreshIndexes(): void {
@@ -837,21 +958,6 @@ export class WorkerRuntime {
       bestBid: tokenState.bestBid ?? null,
       bestAsk: tokenState.bestAsk ?? null,
       spread: tokenState.spread ?? null,
-    });
-    this.marketState.recordTick({
-      tokenId: tokenState.tokenId,
-      marketId: meta.marketId,
-      cityKey: meta.cityKey,
-      seriesSlug: meta.seriesSlug,
-      eventDate: meta.eventDate,
-      temperatureBand: meta.temperatureBand,
-      side: meta.side,
-      timestamp,
-      lastTradePrice: tokenState.lastTradePrice,
-      bestBid: tokenState.bestBid,
-      bestAsk: tokenState.bestAsk,
-      spread: tokenState.spread,
-      lastMessageAt: timestamp,
     });
 
     const triggers = this.alertEngine.evaluateMarketTick(this.engineRules, {
@@ -973,6 +1079,11 @@ export class WorkerRuntime {
     }
     if (query?.watchlistedOnly) {
       filtered = filtered.filter((row) => row.watchlisted);
+    }
+    if (query?.side && query.side !== 'BOTH') {
+      filtered = filtered.filter(
+        (row) => row.side === query.side || row.side === 'BOTH',
+      );
     }
 
     const sortBy = query?.sortBy ?? 'updatedAt';
@@ -1551,30 +1662,27 @@ export class WorkerRuntime {
     const noState = this.latestTokenStateById.get(market.tokenNoId);
 
     const yesLatest = this.marketState.getLatest(market.tokenYesId);
-    const yesPrice =
-      yesLatest?.lastTradePrice ??
-      yesState?.lastTradePrice ??
-      yesLatest?.bestBid ??
-      yesState?.bestBid ??
-      null;
     const noLatest = this.marketState.getLatest(market.tokenNoId);
-    const noPrice =
-      noLatest?.lastTradePrice ??
-      noState?.lastTradePrice ??
-      noLatest?.bestBid ??
-      noState?.bestBid ??
-      (typeof yesPrice === 'number' ? Math.max(0, 1 - yesPrice) : null);
     const bestBid = yesLatest?.bestBid ?? yesState?.bestBid ?? null;
-    const bestAsk = yesLatest?.bestAsk ?? yesState?.bestAsk ?? yesPrice;
+    const bestAsk = yesLatest?.bestAsk ?? yesState?.bestAsk ?? null;
+    const yesPrice = resolveDisplayPrice(
+      yesLatest?.lastTradePrice ?? yesState?.lastTradePrice ?? null,
+      bestBid,
+      bestAsk,
+    );
+    const noPrice =
+      resolveDisplayPrice(
+        noLatest?.lastTradePrice ?? noState?.lastTradePrice ?? null,
+        noLatest?.bestBid ?? noState?.bestBid ?? null,
+        noLatest?.bestAsk ?? noState?.bestAsk ?? null,
+      ) ?? complementPrice(yesPrice);
     const spread =
       yesLatest?.spread ??
       yesState?.spread ??
-      (typeof bestBid === 'number' && typeof bestAsk === 'number'
-        ? Math.max(0, bestAsk - bestBid)
-        : null);
+      resolveSpread(bestBid, bestAsk);
     const change5m = this.computePriceChangePct(
       market.tokenYesId,
-      typeof yesPrice === 'number' ? yesPrice : 0,
+      yesPrice ?? 0,
       asOfTimestamp,
     );
     const bubbleSnapshot = this.bubbleSnapshotByMarketId.get(market.marketId);

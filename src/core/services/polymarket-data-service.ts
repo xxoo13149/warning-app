@@ -254,8 +254,31 @@ export class PolymarketDataService extends EventEmitter {
     } else if (eventType === 'book') {
       const bids = (event as Record<string, unknown>).bids;
       const asks = (event as Record<string, unknown>).asks;
-      existing.bookBestBid = this.pickBookEdge(bids, true);
-      existing.bookBestAsk = this.pickBookEdge(asks, false);
+      const bookBestBid = this.pickBookEdge(bids, true);
+      const bookBestAsk = this.pickBookEdge(asks, false);
+
+      if (
+        bookBestBid === undefined &&
+        bookBestAsk === undefined &&
+        existing.bestBid === undefined &&
+        existing.bestAsk === undefined &&
+        existing.bookBestBid === undefined &&
+        existing.bookBestAsk === undefined &&
+        existing.lastTradePrice === undefined
+      ) {
+        return;
+      }
+
+      existing.bookBestBid = bookBestBid;
+      existing.bookBestAsk = bookBestAsk;
+      existing.bestBid = bookBestBid;
+      existing.bestAsk = bookBestAsk;
+      existing.spread =
+        bookBestBid !== undefined && bookBestAsk !== undefined
+          ? Number((bookBestAsk - bookBestBid).toFixed(6))
+          : undefined;
+    } else {
+      return;
     }
 
     this.tokenStates.set(tokenId, existing);
