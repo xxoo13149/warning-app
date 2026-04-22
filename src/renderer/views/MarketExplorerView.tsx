@@ -2,7 +2,7 @@ import { memo, startTransition, useDeferredValue, useEffect, useMemo, useState }
 
 import { useI18n } from '../i18n';
 import { cn } from '../lib/tailwind-utils';
-import type { AppLanguage, MarketQuery, MarketRow } from '../types/contracts';
+import type { AppLanguage, MarketQuery, MarketRow, OrderSide } from '../types/contracts';
 import {
   formatMarketCentsLabel,
   formatMarketPercent,
@@ -35,6 +35,7 @@ interface MarketBandProps {
 }
 
 type MarketExplorerMode = 'overview' | 'precise';
+type MarketSideFilter = '' | Extract<OrderSide, 'YES' | 'NO'>;
 
 const MARKET_STATUS_LABELS: Record<MarketRow['status'], string> = {
   active: '交易中',
@@ -49,8 +50,20 @@ const MARKET_SEVERITY_LABELS: Record<MarketRow['bubbleSeverity'], string> = {
   critical: '高风险',
 };
 
+const MARKET_SIDE_LABELS: Record<MarketSideFilter, string> = {
+  '': '全部方向',
+  YES: '是',
+  NO: '否',
+};
+
 const DEFAULT_SORT_BY: NonNullable<MarketQuery['sortBy']> = 'volume24h';
 const DEFAULT_SORT_DIR: NonNullable<MarketQuery['sortDir']> = 'desc';
+const SEVERITY_WEIGHT: Record<MarketRow['bubbleSeverity'], number> = {
+  critical: 3,
+  warning: 2,
+  info: 1,
+  none: 0,
+};
 
 const marketHasWideSpread = (row: MarketRow) => (row.spread ?? 0) >= 0.05;
 
@@ -66,13 +79,34 @@ const getMarketRowClassName = (selected: boolean) =>
   cn('market-table-row', selected && 'is-selected');
 
 const groupMarketsByCity = (rows: MarketRow[]) => {
-  const groups = new Map<string, { key: string; cityName: string; rows: MarketRow[] }>();
+  const groups = new Map<
+    string,
+    {
+      key: string;
+      cityName: string;
+      rows: MarketRow[];
+      riskCount: number;
+      watchlistedCount: number;
+      maxSeverityWeight: number;
+      latestUpdatedAt: string;
+    }
+  >();
 
   rows.forEach((row) => {
     const key = row.cityKey || row.cityName;
     const current = groups.get(key);
     if (current) {
       current.rows.push(row);
+      current.watchlistedCount += row.watchlisted ? 1 : 0;
+      current.riskCount +=
+        row.bubbleSeverity === 'critical' || row.bubbleSeverity === 'warning' ? 1 : 0;
+      current.maxSeverityWeight = Math.max(
+        current.maxSeverityWeight,
+        SEVERITY_WEIGHT[row.bubbleSeverity],
+      );
+      if (Date.parse(row.updatedAt) > Date.parse(current.latestUpdatedAt)) {
+        current.latestUpdatedAt = row.updatedAt;
+      }
       return;
     }
 
@@ -80,10 +114,32 @@ const groupMarketsByCity = (rows: MarketRow[]) => {
       key,
       cityName: row.cityName || row.cityKey,
       rows: [row],
+      riskCount: row.bubbleSeverity === 'critical' || row.bubbleSeverity === 'warning' ? 1 : 0,
+      watchlistedCount: row.watchlisted ? 1 : 0,
+      maxSeverityWeight: SEVERITY_WEIGHT[row.bubbleSeverity],
+      latestUpdatedAt: row.updatedAt,
     });
   });
 
-  return [...groups.values()];
+  return [...groups.values()].sort((left, right) => {
+    if (left.maxSeverityWeight !== right.maxSeverityWeight) {
+      return right.maxSeverityWeight - left.maxSeverityWeight;
+    }
+
+    if (left.watchlistedCount !== right.watchlistedCount) {
+      return right.watchlistedCount - left.watchlistedCount;
+    }
+
+    if (left.riskCount !== right.riskCount) {
+      return right.riskCount - left.riskCount;
+    }
+
+    if (left.rows.length !== right.rows.length) {
+      return right.rows.length - left.rows.length;
+    }
+
+    return left.cityName.localeCompare(right.cityName, 'zh-CN');
+  });
 };
 
 const MarketExplorerRow = memo(
@@ -167,6 +223,9 @@ export const MarketExplorerView = ({
   const { copy, formatTime, language, sortByLabel } = useI18n();
   const [cityKey, setCityKey] = useState(query.cityKey ?? '');
   const [eventDate, setEventDate] = useState(query.eventDate ?? '');
+  const [sideFilter, setSideFilter] = useState<MarketSideFilter>(
+    query.side === 'YES' || query.side === 'NO' ? query.side : '',
+  );
   const [watchlistOnly, setWatchlistOnly] = useState(Boolean(query.watchlistedOnly));
   const [viewMode, setViewMode] = useState<MarketExplorerMode>('overview');
   const [selectedMarketId, setSelectedMarketId] = useState<string | null>(null);
@@ -186,6 +245,7 @@ export const MarketExplorerView = ({
   const activeFilterLabels = [
     cityKey.trim() ? `城市：${cityKey.trim()}` : '城市：全部',
     eventDate ? `日期：${eventDate}` : '日期：全部',
+    `方向：${MARKET_SIDE_LABELS[sideFilter]}`,
     watchlistOnly ? '仅关注盘口' : '全部盘口',
     `排序：${sortByLabel(query.sortBy ?? DEFAULT_SORT_BY)} / ${
       (query.sortDir ?? DEFAULT_SORT_DIR) === 'desc' ? '降序' : '升序'
@@ -199,6 +259,10 @@ export const MarketExplorerView = ({
   useEffect(() => {
     setEventDate(query.eventDate ?? '');
   }, [query.eventDate]);
+
+  useEffect(() => {
+    setSideFilter(query.side === 'YES' || query.side === 'NO' ? query.side : '');
+  }, [query.side]);
 
   useEffect(() => {
     setWatchlistOnly(Boolean(query.watchlistedOnly));
@@ -215,9 +279,10 @@ export const MarketExplorerView = ({
   useEffect(() => {
     onQueryChange({
       eventDate: eventDate || undefined,
+      side: sideFilter || undefined,
       watchlistedOnly: watchlistOnly || undefined,
     });
-  }, [eventDate, onQueryChange, watchlistOnly]);
+  }, [eventDate, onQueryChange, sideFilter, watchlistOnly]);
 
   useEffect(() => {
     if (rows.length === 0) {
@@ -233,10 +298,12 @@ export const MarketExplorerView = ({
   const clearFilters = () => {
     setCityKey('');
     setEventDate('');
+    setSideFilter('');
     setWatchlistOnly(false);
     onQueryChange({
       cityKey: undefined,
       eventDate: undefined,
+      side: undefined,
       watchlistedOnly: undefined,
     });
   };
@@ -248,6 +315,7 @@ export const MarketExplorerView = ({
 
     setCityKey(selectedMarket.cityKey);
     setEventDate(selectedMarket.eventDate);
+    setSideFilter(selectedMarket.side === 'YES' || selectedMarket.side === 'NO' ? selectedMarket.side : '');
   };
 
   return (
@@ -286,6 +354,18 @@ export const MarketExplorerView = ({
                 value={eventDate}
                 onChange={(event) => setEventDate(event.target.value)}
               />
+            </label>
+
+            <label className="field field--small">
+              <span>方向</span>
+              <select
+                value={sideFilter}
+                onChange={(event) => setSideFilter(event.target.value as MarketSideFilter)}
+              >
+                <option value="">全部方向</option>
+                <option value="YES">是</option>
+                <option value="NO">否</option>
+              </select>
             </label>
 
             <label className="field field--small">
@@ -390,10 +470,13 @@ export const MarketExplorerView = ({
                         <div>
                           <strong>{group.cityName}</strong>
                           <span>
-                            {group.rows.length} 个盘口 · 最新更新 {formatTime(group.rows[0].updatedAt)}
+                            {group.rows.length} 个盘口 · 最新更新 {formatTime(group.latestUpdatedAt)}
                           </span>
                         </div>
-                        <span>{group.rows.filter((row) => row.watchlisted).length} 个关注</span>
+                        <div className="market-city-group__stats">
+                          <span>{group.riskCount} 个重点风险</span>
+                          <span>{group.watchlistedCount} 个关注</span>
+                        </div>
                       </header>
                       <div className="market-band-grid">
                         {group.rows.map((row) => (
