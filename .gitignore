@@ -110,3 +110,4 @@ asar-list.txt
 # Workspace scratch / imports
 .codex-temp/
 .tmp_zip_import/
+.packaging/

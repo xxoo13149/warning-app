@@ -22,6 +22,10 @@ import type {
   WorkerRequest,
   WorkerResponse,
 } from '@/shared/worker-protocol';
+import {
+  createRuntimeLogger,
+  resolveRuntimeLogDirFromDbPath,
+} from './runtime-log';
 
 type PendingRequest = {
   resolve: (value: unknown) => void;
@@ -29,6 +33,11 @@ type PendingRequest = {
   timeout: ReturnType<typeof setTimeout>;
   channel: WorkerInvokeChannel;
 };
+
+interface WorkerLaunchCandidate {
+  label: string;
+  workerPath: string;
+}
 
 export const CORE_WORKER_HEALTH_INVOKE_TIMEOUT_MS = 4_000;
 export const CORE_WORKER_DEFAULT_INVOKE_TIMEOUT_MS = 12_000;
@@ -43,6 +52,7 @@ export declare interface CoreWorkerClient {
 
 export class CoreWorkerClient extends EventEmitter {
   private readonly bootstrapData: WorkerBootstrapData;
+  private readonly log: (message: string, error?: unknown) => void;
   private worker: Worker | null = null;
   private readonly pending = new Map<string, PendingRequest>();
   private latestHealth: AppHealth = { ...DEFAULT_HEALTH };
@@ -53,6 +63,11 @@ export class CoreWorkerClient extends EventEmitter {
   constructor(bootstrapData: WorkerBootstrapData) {
     super();
     this.bootstrapData = bootstrapData;
+    this.log = createRuntimeLogger(
+      'core-worker.log',
+      resolveRuntimeLogDirFromDbPath(bootstrapData.dbPath),
+      'core-worker-client',
+    );
   }
 
   start(): void {
@@ -61,22 +76,49 @@ export class CoreWorkerClient extends EventEmitter {
     }
 
     this.stopRequested = false;
-    const workerPath = this.resolveWorkerPath();
-    if (!workerPath) {
-      const reason = 'Core worker entry not found in packaged resources.';
+    const workerEntry = this.resolveWorkerPath();
+    if (!workerEntry) {
+      const reason = `Core worker entry not found. Checked: ${this.describeWorkerCandidates()}`;
       this.lastWorkerFailureReason = reason;
       this.lastWorkerFailureSource = 'packaging';
       this.markHealthDegraded();
+      this.log(reason);
       this.emit('error', new Error(reason));
       return;
     }
 
-    const worker = new Worker(workerPath, {
-      workerData: this.bootstrapData,
-    });
+    this.log(
+      `Starting worker from ${workerEntry.workerPath} (${workerEntry.label}); resourcesPath=${process.resourcesPath ?? 'n/a'}`,
+    );
+
+    let worker: Worker;
+    try {
+      worker = new Worker(workerEntry.workerPath, {
+        workerData: this.bootstrapData,
+        stdout: true,
+        stderr: true,
+      });
+    } catch (error) {
+      const reason = `Failed to start core worker from ${workerEntry.workerPath}`;
+      this.lastWorkerFailureReason = `${reason}: ${error instanceof Error ? error.message : String(error)}`;
+      this.lastWorkerFailureSource = classifyWorkerErrorSource(
+        this.lastWorkerFailureReason,
+      );
+      this.markHealthDegraded();
+      this.log(reason, error);
+      this.emit('error', error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
     this.worker = worker;
     this.lastWorkerFailureReason = null;
     this.lastWorkerFailureSource = null;
+    this.attachWorkerOutput(worker);
+    worker.on('online', () => {
+      if (this.worker !== worker) {
+        return;
+      }
+      this.log(`Worker online: ${workerEntry.workerPath}`);
+    });
     worker.on('message', (message: WorkerMessage) => {
       if (this.worker !== worker) {
         return;
@@ -90,6 +132,7 @@ export class CoreWorkerClient extends EventEmitter {
       this.lastWorkerFailureReason = error.message;
       this.lastWorkerFailureSource = classifyWorkerErrorSource(error.message);
       this.markHealthDegraded();
+      this.log('Worker emitted error event.', error);
       this.flushPending(new Error(`Core worker error: ${error.message}`));
       this.emit('error', error);
     });
@@ -114,6 +157,7 @@ export class CoreWorkerClient extends EventEmitter {
           ? classifyWorkerErrorSource(reason)
           : 'startup';
       this.markHealthDegraded();
+      this.log(`Worker exited with code ${code}; expectedStop=${String(expectedStop)}`);
       this.flushPending(new Error(`Core worker exited with code ${code}`));
       if (!expectedStop && code !== 0) {
         this.emit('error', new Error(`Core worker exited with code ${code}`));
@@ -129,6 +173,7 @@ export class CoreWorkerClient extends EventEmitter {
     }
     this.stopRequested = true;
     this.flushPending(new Error('Core worker stopped.'));
+    this.log('Stopping worker.');
     await worker.terminate();
     this.markHealthDegraded();
   }
@@ -279,18 +324,81 @@ export class CoreWorkerClient extends EventEmitter {
     }
   }
 
-  private resolveWorkerPath(): string | null {
-    const candidates = [
-      path.join(__dirname, 'worker.js'),
-      path.join(process.resourcesPath, 'app.asar', '.vite', 'build', 'worker.js'),
-      path.join(process.resourcesPath, 'app', '.vite', 'build', 'worker.js'),
-    ];
+  private resolveWorkerPath(): WorkerLaunchCandidate | null {
+    const candidates = this.getWorkerCandidates();
     for (const candidate of candidates) {
-      if (fs.existsSync(candidate)) {
+      if (fs.existsSync(candidate.workerPath)) {
         return candidate;
       }
     }
     return null;
+  }
+
+  private getWorkerCandidates(): WorkerLaunchCandidate[] {
+    const candidates: WorkerLaunchCandidate[] = [];
+
+    if (process.resourcesPath) {
+      candidates.push(
+        {
+          label: 'packaged-resources-vite',
+          workerPath: path.join(process.resourcesPath, '.vite', 'build', 'worker.js'),
+        },
+        {
+          label: 'packaged-asar-unpacked',
+          workerPath: path.join(
+            process.resourcesPath,
+            'app.asar.unpacked',
+            '.vite',
+            'build',
+            'worker.js',
+          ),
+        },
+        {
+          label: 'packaged-asar',
+          workerPath: path.join(process.resourcesPath, 'app.asar', '.vite', 'build', 'worker.js'),
+        },
+        {
+          label: 'packaged-app-dir',
+          workerPath: path.join(process.resourcesPath, 'app', '.vite', 'build', 'worker.js'),
+        },
+      );
+    }
+
+    candidates.push({
+      label: 'sibling-build-output',
+      workerPath: path.join(__dirname, 'worker.js'),
+    });
+
+    return candidates;
+  }
+
+  private describeWorkerCandidates(): string {
+    return this.getWorkerCandidates()
+      .map((candidate) => `${candidate.label}=${candidate.workerPath}`)
+      .join(', ');
+  }
+
+  private attachWorkerOutput(worker: Worker): void {
+    worker.stdout?.setEncoding('utf8');
+    worker.stderr?.setEncoding('utf8');
+    worker.stdout?.on('data', (chunk: string | Buffer) => {
+      if (this.worker !== worker) {
+        return;
+      }
+      const text = chunk.toString().trim();
+      if (text) {
+        this.log(`[worker stdout] ${text}`);
+      }
+    });
+    worker.stderr?.on('data', (chunk: string | Buffer) => {
+      if (this.worker !== worker) {
+        return;
+      }
+      const text = chunk.toString().trim();
+      if (text) {
+        this.log(`[worker stderr] ${text}`);
+      }
+    });
   }
 }
 

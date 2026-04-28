@@ -1,5 +1,7 @@
 import type {
   AlertEvent,
+  AlertListQuery,
+  AlertListResult,
   AlertRule,
   AppHealth,
   AppSettings,
@@ -9,17 +11,26 @@ import type {
   MarketQuery,
   MarketQueryResult,
   MarketRow,
+  PreviewSoundResult,
   PreviewSoundPayload,
   RegisterSoundPayload,
   RulePreviewResult,
+  RuntimeDiagnosticsPackageResult,
   SettingsPayload,
+  StorageBackupResult,
+  StorageCleanupResult,
+  StorageMaintenanceResult,
   SoundProfile,
-} from '@/renderer/types/contracts';
+} from '@/shared/monitor-contracts';
 import type {
   AppControlRequest,
   AppControlState,
   StartupStatus,
 } from '@/shared/contracts';
+import {
+  DEFAULT_ALERT_RETENTION_DAYS,
+  DEFAULT_TICK_RETENTION_DAYS,
+} from '../../shared/constants';
 
 export const INVOKE_CHANNELS = [
   'app.getHealth',
@@ -32,6 +43,10 @@ export const INVOKE_CHANNELS = [
   'rules.list',
   'rules.preview',
   'rules.save',
+  'storage.clearCache',
+  'storage.createBackup',
+  'storage.createDiagnostics',
+  'storage.runMaintenance',
   'settings.get',
   'settings.update',
   'settings.importCityMap',
@@ -43,6 +58,7 @@ export const INVOKE_CHANNELS = [
 export const EVENT_CHANNELS = [
   'app.health',
   'app.controlState',
+  'app.navigate',
   'dashboard.tick',
   'markets.tick',
   'alerts.new',
@@ -51,6 +67,13 @@ export const EVENT_CHANNELS = [
 export type InvokeChannel = (typeof INVOKE_CHANNELS)[number];
 export type EventChannel = (typeof EVENT_CHANNELS)[number];
 export type AlertTriggeredEvent = AlertEvent;
+export type AppNavigationTarget = 'dashboard' | 'alerts' | 'explorer' | 'rules';
+
+export interface AppNavigateEvent {
+  target: AppNavigationTarget;
+  alertId?: string;
+  source?: 'notification-click' | 'tray' | 'app' | string;
+}
 
 export interface AlertsAckInput {
   id?: string;
@@ -89,11 +112,15 @@ export interface InvokePayloadMap {
   'app.control': AppControlRequest;
   'dashboard.query': DashboardQuery | undefined;
   'markets.query': MarketQuery | undefined;
-  'alerts.list': { limit?: number; acknowledged?: boolean } | undefined;
+  'alerts.list': AlertListQuery | undefined;
   'alerts.ack': AlertsAckInput;
   'rules.list': undefined;
   'rules.preview': AlertRule;
   'rules.save': AlertRule[] | { rules: AlertRule[] };
+  'storage.clearCache': undefined;
+  'storage.createBackup': undefined;
+  'storage.createDiagnostics': undefined;
+  'storage.runMaintenance': undefined;
   'settings.get': undefined;
   'settings.update': Partial<AppSettings>;
   'settings.importCityMap': CityMapImportPayload;
@@ -108,22 +135,27 @@ export interface InvokeResultMap {
   'app.control': AppControlResult;
   'dashboard.query': DashboardSnapshot;
   'markets.query': MarketQueryResult;
-  'alerts.list': { rows: AlertEvent[]; total: number };
+  'alerts.list': AlertListResult;
   'alerts.ack': { ok: true; updated: number };
   'rules.list': { rows: AlertRule[] };
   'rules.preview': RulePreviewResult;
   'rules.save': { rows: AlertRule[] };
+  'storage.clearCache': StorageCleanupResult;
+  'storage.createBackup': StorageBackupResult;
+  'storage.createDiagnostics': RuntimeDiagnosticsPackageResult;
+  'storage.runMaintenance': StorageMaintenanceResult;
   'settings.get': SettingsPayload;
   'settings.update': SettingsPayload;
   'settings.importCityMap': { ok: true; imported: number };
   'settings.pickSound': SettingsPayload;
   'settings.registerSound': SettingsPayload;
-  'settings.previewSound': { ok: true; played: boolean };
+  'settings.previewSound': PreviewSoundResult;
 }
 
 export interface EventPayloadMap {
   'app.health': RuntimeHealth;
   'app.controlState': AppControlState;
+  'app.navigate': AppNavigateEvent;
   'dashboard.tick': DashboardTickPayload;
   'markets.tick': MarketRow[] | MarketQueryResult;
   'alerts.new': AlertEvent;
@@ -155,6 +187,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   backgroundAudio: true,
   reconnectPolicy: 'balanced',
   pollIntervalSec: 60,
+  tickRetentionDays: DEFAULT_TICK_RETENTION_DAYS,
+  alertRetentionDays: DEFAULT_ALERT_RETENTION_DAYS,
   selectedSoundProfileId: '',
   quietHoursStart: '23:00',
   quietHoursEnd: '06:00',

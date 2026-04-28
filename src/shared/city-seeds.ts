@@ -1,10 +1,15 @@
 import type { CityConfig } from './contracts';
 
-const mk = (cityKey: string, displayName: string, seriesSlug: string): CityConfig => ({
+const mk = (
+  cityKey: string,
+  displayName: string,
+  seriesSlug: string,
+  airportCode: string | null = null,
+): CityConfig => ({
   cityKey,
   displayName,
   seriesSlug,
-  airportCode: null,
+  airportCode,
   timezone: null,
   enabled: true,
   resolutionSourceOverride: null,
@@ -24,6 +29,7 @@ export const DEFAULT_CITY_CONFIGS: CityConfig[] = [
   mk('chongqing', 'Chongqing', 'chongqing-daily-weather'),
   mk('dallas', 'Dallas', 'dallas-daily-weather'),
   mk('denver', 'Denver', 'denver-daily-weather'),
+  mk('guangzhou', 'Guangzhou', 'guangzhou-daily-weather', 'CAN'),
   mk('helsinki', 'Helsinki', 'helsinki-daily-weather'),
   mk('hong-kong', 'Hong Kong', 'hong-kong-daily-weather'),
   mk('houston', 'Houston', 'houston-daily-weather'),

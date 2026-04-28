@@ -1,15 +1,19 @@
 import type {
   AlertEvent,
+  AlertListQuery,
+  AlertListResult,
   AlertRule,
   AppHealth,
   AppSettings,
   MarketQuery,
   MarketQueryResult,
+  PreviewSoundResult,
   PreviewSoundPayload,
   RegisterSoundPayload,
   RulePreviewResult,
   SettingsPayload,
-} from '@/renderer/types/contracts';
+  StorageMaintenanceResult,
+} from './monitor-contracts';
 
 export type Severity = AlertEvent['severity'];
 export type AppControlAction =
@@ -22,6 +26,8 @@ export type AppControlAction =
 export type StartupPhase =
   | 'idle'
   | 'starting'
+  | 'connecting'
+  | 'discovering'
   | 'retrying'
   | 'ready'
   | 'failed'
@@ -62,11 +68,12 @@ export type SettingsUpdatePayload = Partial<AppSettings>;
 export interface WorkerRequestMap {
   'app.getHealth': undefined;
   'markets.query': MarketQuery | undefined;
-  'alerts.list': { limit?: number; acknowledged?: boolean } | undefined;
+  'alerts.list': AlertListQuery | undefined;
   'alerts.ack': { id?: string; ids?: string[] };
   'rules.list': undefined;
   'rules.preview': AlertRule;
   'rules.save': AlertRule[] | { rules: AlertRule[] };
+  'storage.runMaintenance': undefined;
   'settings.get': undefined;
   'settings.update': SettingsUpdatePayload;
   'settings.importCityMap': { filePath?: string; lines?: string[] };
@@ -78,15 +85,18 @@ export interface WorkerRequestMap {
 export interface WorkerResponseMap {
   'app.getHealth': AppHealth;
   'markets.query': MarketQueryResult;
-  'alerts.list': { rows: AlertEvent[]; total: number };
+  'alerts.list': AlertListResult;
   'alerts.ack': { ok?: true; updated: number };
   'rules.list': { rows: AlertRule[] };
   'rules.preview': RulePreviewResult;
   'rules.save': { rows: AlertRule[] };
+  'storage.runMaintenance': StorageMaintenanceResult;
   'settings.get': SettingsPayload;
   'settings.update': SettingsPayload;
   'settings.importCityMap': { ok?: true; imported: number };
   'settings.pickSound': SettingsPayload;
   'settings.registerSound': SettingsPayload;
-  'settings.previewSound': { ok?: true; played: boolean };
+  'settings.previewSound': PreviewSoundResult;
 }
+
+export type { PreviewSoundResult };

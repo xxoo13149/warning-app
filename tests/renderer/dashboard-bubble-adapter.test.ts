@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { AlertEvent, AppHealth, CityBubbleSummary } from '../../src/renderer/types/contracts';
 import {
+  buildDashboardBubbleId,
   buildBubblePhysicsSignature,
   buildDashboardBubbleData,
   buildDashboardBubblePhysicsData,
@@ -100,9 +101,41 @@ describe('dashboard bubble adapter', () => {
     expect(rows[0]?.is_new_alert).toBe(false);
   });
 
-  it('builds stable physics data and ignores visual churn in signature', () => {
+  it('builds distinct bubble ids for the same city across different dates', () => {
+    const rows = [
+      buildSummary({
+        cityKey: 'london',
+        cityName: 'London',
+        airportCode: 'EGLC',
+        eventDate: '2026-04-15',
+      }),
+      buildSummary({
+        cityKey: 'london',
+        cityName: 'London',
+        airportCode: 'EGLC',
+        eventDate: '2026-04-16',
+      }),
+    ];
+
+    const visualRows = buildDashboardBubbleData(rows, [], Date.parse('2026-04-16T00:10:00.000Z'));
+    const physicsRows = buildDashboardBubblePhysicsData(rows);
+
+    expect(visualRows.map((row) => row.id)).toEqual([
+      buildDashboardBubbleId('london', '2026-04-15'),
+      buildDashboardBubbleId('london', '2026-04-16'),
+    ]);
+    expect(physicsRows.map((row) => row.id)).toEqual(visualRows.map((row) => row.id));
+    expect(new Set(visualRows.map((row) => row.id)).size).toBe(2);
+  });
+
+  it('keeps the physics signature stable for score and radius churn', () => {
     const basePhysics = buildDashboardBubblePhysicsData([buildSummary()]);
-    const changedPhysics = buildDashboardBubblePhysicsData([
+    const smallChangePhysics = buildDashboardBubblePhysicsData([
+      buildSummary({
+        cityBubbleScore: 90,
+      }),
+    ]);
+    const largeChangePhysics = buildDashboardBubblePhysicsData([
       buildSummary({
         cityBubbleScore: 12,
         dominantTemperatureBand: '28°C or higher',
@@ -115,14 +148,66 @@ describe('dashboard bubble adapter', () => {
       filterMode: 'ALL',
       regionFilter: 'ALL',
     });
-    const changedSignature = buildBubblePhysicsSignature(changedPhysics, {
+    const smallChangeSignature = buildBubblePhysicsSignature(smallChangePhysics, {
+      layoutKey: '2026-04-15',
+      filterMode: 'ALL',
+      regionFilter: 'ALL',
+    });
+    const largeChangeSignature = buildBubblePhysicsSignature(largeChangePhysics, {
       layoutKey: '2026-04-15',
       filterMode: 'ALL',
       regionFilter: 'ALL',
     });
 
-    expect(basePhysics[0]?.visualRadius).toBeGreaterThan(changedPhysics[0]?.visualRadius ?? 0);
-    expect(baseSignature).toBe(changedSignature);
+    expect(smallChangePhysics[0]?.visualRadius).not.toBe(basePhysics[0]?.visualRadius);
+    expect(basePhysics[0]?.visualRadius).toBeLessThanOrEqual(54);
+    expect(largeChangePhysics[0]?.visualRadius).toBeGreaterThanOrEqual(22);
+    expect(baseSignature).toBe(smallChangeSignature);
+    expect(baseSignature).toBe(largeChangeSignature);
+  });
+
+  it('keeps risk level and radius finite when upstream scores are invalid', () => {
+    const invalidRows = [
+      buildSummary({ cityKey: 'nan-score', cityBubbleScore: Number.NaN }),
+      buildSummary({ cityKey: 'infinite-score', cityBubbleScore: Number.POSITIVE_INFINITY }),
+      buildSummary({
+        cityKey: 'missing-score',
+        cityBubbleScore: undefined as unknown as number,
+      }),
+    ];
+
+    const visualRows = buildDashboardBubbleData(invalidRows, []);
+    const physicsRows = buildDashboardBubblePhysicsData(invalidRows);
+
+    for (const row of visualRows) {
+      expect(Number.isFinite(row.riskLevel)).toBe(true);
+      expect(row.riskLevel).toBeGreaterThanOrEqual(0);
+      expect(row.riskLevel).toBeLessThanOrEqual(100);
+    }
+
+    for (const row of physicsRows) {
+      expect(Number.isFinite(row.visualRadius)).toBe(true);
+      expect(row.visualRadius).toBeGreaterThanOrEqual(22);
+      expect(row.visualRadius).toBeLessThanOrEqual(54);
+    }
+  });
+
+  it('changes the physics signature when collision padding changes', () => {
+    const physics = buildDashboardBubblePhysicsData([buildSummary()]);
+    const baseSignature = buildBubblePhysicsSignature(physics, {
+      layoutKey: '2026-04-15',
+      filterMode: 'ALL',
+      regionFilter: 'ALL',
+      bubblePadding: 0,
+    });
+    const paddedSignature = buildBubblePhysicsSignature(physics, {
+      layoutKey: '2026-04-15',
+      filterMode: 'ALL',
+      regionFilter: 'ALL',
+      bubblePadding: 24,
+    });
+
+    expect(paddedSignature).not.toBe(baseSignature);
   });
 
   it('changes the physics signature when layout or visible set changes', () => {

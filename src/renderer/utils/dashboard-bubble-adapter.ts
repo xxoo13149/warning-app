@@ -42,6 +42,9 @@ export interface DashboardBubbleStats {
   monitorStatusText: string;
 }
 
+export const buildDashboardBubbleId = (cityKey: string, eventDate: string) =>
+  `${eventDate}::${cityKey}`;
+
 const RECENT_ALERT_WINDOW_MS = 120_000;
 
 const CITY_REGION_MAP: Record<string, BubbleRegion> = {
@@ -58,6 +61,7 @@ const CITY_REGION_MAP: Record<string, BubbleRegion> = {
   chongqing: 'ASIA',
   dallas: 'NA',
   denver: 'NA',
+  guangzhou: 'ASIA',
   helsinki: 'EU',
   'hong-kong': 'ASIA',
   houston: 'NA',
@@ -96,7 +100,29 @@ const CITY_REGION_MAP: Record<string, BubbleRegion> = {
 
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
 
-const buildVisualRadius = (riskLevel: number) => 40 + (riskLevel / 100) * 60;
+const clampFinite = (value: number | null | undefined, min: number, max: number, fallback: number) => {
+  const numeric = typeof value === 'number' ? value : Number.NaN;
+  if (!Number.isFinite(numeric)) {
+    return clamp(fallback, min, max);
+  }
+  return clamp(numeric, min, max);
+};
+
+const BUBBLE_MIN_RADIUS = 22;
+const BUBBLE_MAX_RADIUS = 54;
+
+const buildVisualRadius = (riskLevel: number) => {
+  const normalized = clampFinite(riskLevel, 0, 100, 0) / 100;
+  return Number(
+    (
+      BUBBLE_MIN_RADIUS +
+      Math.sqrt(normalized) * (BUBBLE_MAX_RADIUS - BUBBLE_MIN_RADIUS)
+    ).toFixed(2),
+  );
+};
+
+const buildRiskLevel = (score: number | null | undefined) =>
+  Math.round(clampFinite(score, 0, 100, 0));
 
 const resolveRegion = (cityKey: string): BubbleRegion => CITY_REGION_MAP[cityKey] ?? 'OTHER';
 
@@ -293,13 +319,13 @@ export const buildDashboardBubbleData = (
     const dominantMarket = row.topMarkets[0];
 
     return {
-      id: row.cityKey,
+      id: buildDashboardBubbleId(row.cityKey, row.eventDate),
       cityKey: row.cityKey,
       eventDate: row.eventDate,
       name: row.cityName,
       code: resolveCode(row),
       region: resolveRegion(row.cityKey),
-      riskLevel: clamp(Math.round(row.cityBubbleScore), 0, 100),
+      riskLevel: buildRiskLevel(row.cityBubbleScore),
       status_level: resolveStatusLevel(row.cityBubbleSeverity),
       is_new_alert: recentAlerts.has(row.cityKey),
       alertCount: row.unackedAlertCount,
@@ -316,10 +342,10 @@ export const buildDashboardBubblePhysicsData = (
   rows: CityBubbleSummary[],
 ): PhysicsBubbleCityData[] =>
   rows.map((row) => {
-    const riskLevel = clamp(Math.round(row.cityBubbleScore), 0, 100);
+    const riskLevel = buildRiskLevel(row.cityBubbleScore);
 
     return {
-      id: row.cityKey,
+      id: buildDashboardBubbleId(row.cityKey, row.eventDate),
       cityKey: row.cityKey,
       eventDate: row.eventDate,
       name: row.cityName,
@@ -336,6 +362,7 @@ export const buildBubblePhysicsSignature = (
     layoutKey?: string;
     filterMode?: string;
     regionFilter?: string;
+    bubblePadding?: number;
   },
 ) => {
   const ids = rows
@@ -343,11 +370,16 @@ export const buildBubblePhysicsSignature = (
     .slice()
     .sort((left, right) => left.localeCompare(right))
     .join('|');
+  const bubblePadding =
+    typeof options?.bubblePadding === 'number' && Number.isFinite(options.bubblePadding)
+      ? options.bubblePadding.toFixed(2)
+      : '';
 
   return [
     options?.layoutKey ?? '',
     options?.filterMode ?? '',
     options?.regionFilter ?? '',
+    bubblePadding,
     ids,
   ].join('::');
 };

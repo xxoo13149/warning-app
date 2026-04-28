@@ -1,6 +1,11 @@
-import { and, desc, eq, gte, lte } from 'drizzle-orm';
+import path from 'node:path';
+import { and, asc, count, desc, eq, gte, inArray, lt, lte, or } from 'drizzle-orm';
 import type { AlertRule, AlertScope, AlertTrigger, QuietHours } from '../alerts';
 import type { AlertMessageKey, BuiltinRuleKey } from '../../shared/alert-display';
+import {
+  DEFAULT_ALERT_RETENTION_DAYS,
+  DEFAULT_TICK_RETENTION_DAYS,
+} from '../../shared/constants';
 import {
   alertEvents,
   alertRules,
@@ -27,14 +32,17 @@ import {
   type NewSoundProfile,
   type NewTrackedEvent,
   type NewTrackedMarket,
+  type PriceTick,
   type SoundProfile,
   type TrackedEvent,
   type TrackedMarket,
 } from './schema';
+import { archivePriceTickBatch, type TickArchiveMonthResult } from './tick-archive';
 import { closeDbConnection, createDbConnection, type DbConnection } from './sqlite';
 
 export interface RepositoryOptions {
   dbPath: string;
+  archiveDir?: string;
   nowMs?: () => number;
 }
 
@@ -49,18 +57,55 @@ export interface AlertEventQuery {
   acknowledged?: boolean;
   limit?: number;
   sinceTriggeredAt?: number;
+  cursor?: {
+    triggeredAt: number;
+    id: string;
+  };
+}
+
+export const ALERT_EVENT_PAGE_LIMIT_DEFAULT = 200;
+export const ALERT_EVENT_PAGE_LIMIT_MAX = 500;
+
+export interface AlertEventPage {
+  rows: AlertEventRow[];
+  total: number;
+  hasMore: boolean;
+  nextCursor?: {
+    triggeredAt: number;
+    id: string;
+  };
 }
 
 export interface FeedHealthQuery {
   status?: string;
 }
 
+export interface ArchivePriceTicksQuery {
+  cutoffTimestamp: number;
+  batchSize?: number;
+}
+
+export interface ArchivePriceTicksResult {
+  selected: number;
+  inserted: number;
+  skipped: number;
+  deleted: number;
+  archivedRows: number;
+  prunedRows: number;
+  aggregateRows: number;
+  checkpointSuggested: boolean;
+  hasMore: boolean;
+  months: TickArchiveMonthResult[];
+}
+
 export class WeatherMonitorRepository {
   private readonly connection: DbConnection;
+  private readonly archiveDir: string;
   private readonly nowMs: () => number;
 
   constructor(options: RepositoryOptions) {
     this.connection = createDbConnection(options.dbPath);
+    this.archiveDir = options.archiveDir ?? path.join(path.dirname(options.dbPath), 'archive');
     this.nowMs = options.nowMs ?? (() => Date.now());
   }
 
@@ -72,10 +117,22 @@ export class WeatherMonitorRepository {
     closeDbConnection(this.connection);
   }
 
+  checkpointWal(): void {
+    this.connection.sqlite.pragma('wal_checkpoint(TRUNCATE)');
+  }
+
+  compactDatabase(): void {
+    this.checkpointWal();
+    this.connection.sqlite.exec('VACUUM');
+    this.checkpointWal();
+    this.connection.sqlite.pragma('optimize');
+  }
+
   seedDefaults(): void {
     const now = this.nowMs();
     const settings: NewAppSetting[] = [
-      { key: 'tickRetentionDays', value: '7', updatedAt: now },
+      { key: 'tickRetentionDays', value: String(DEFAULT_TICK_RETENTION_DAYS), updatedAt: now },
+      { key: 'alertRetentionDays', value: String(DEFAULT_ALERT_RETENTION_DAYS), updatedAt: now },
       { key: 'startupEnabled', value: 'false', updatedAt: now },
       { key: 'alertsMuted', value: 'false', updatedAt: now },
     ];
@@ -241,9 +298,72 @@ export class WeatherMonitorRepository {
       .all();
   }
 
-  prunePriceTicks(retentionDays = 7): number {
+  prunePriceTicks(retentionDays = DEFAULT_TICK_RETENTION_DAYS): number {
     const cutoffMs = this.nowMs() - retentionDays * 24 * 60 * 60 * 1000;
     const result = this.connection.orm.delete(priceTicks).where(lte(priceTicks.timestamp, cutoffMs)).run();
+    return Number(result.changes ?? 0);
+  }
+
+  archivePriceTicks(queryOrRetentionDays: ArchivePriceTicksQuery | number): ArchivePriceTicksResult {
+    const query =
+      typeof queryOrRetentionDays === 'number'
+        ? {
+            cutoffTimestamp:
+              this.nowMs() - normalizeRetentionDays(queryOrRetentionDays) * 24 * 60 * 60 * 1000,
+          }
+        : queryOrRetentionDays;
+    const cutoffTimestamp = normalizeCutoffTimestamp(query.cutoffTimestamp);
+    const batchSize = normalizeBatchSize(query.batchSize);
+    const rows = this.connection.orm
+      .select()
+      .from(priceTicks)
+      .where(lte(priceTicks.timestamp, cutoffTimestamp))
+      .orderBy(asc(priceTicks.timestamp), asc(priceTicks.id))
+      .limit(batchSize)
+      .all();
+
+    if (rows.length === 0) {
+      return {
+        selected: 0,
+        inserted: 0,
+        skipped: 0,
+        deleted: 0,
+        archivedRows: 0,
+        prunedRows: 0,
+        aggregateRows: 0,
+        checkpointSuggested: false,
+        hasMore: false,
+        months: [],
+      };
+    }
+
+    const archiveResult = archivePriceTickBatch({
+      archiveDir: this.archiveDir,
+      ticks: rows.map(mapArchivedPriceTick),
+    });
+
+    const deleted = this.deletePriceTicksById(rows.map((row) => row.id));
+
+    return {
+      selected: rows.length,
+      inserted: archiveResult.inserted,
+      skipped: archiveResult.skipped,
+      deleted,
+      archivedRows: archiveResult.inserted,
+      prunedRows: deleted,
+      aggregateRows: archiveResult.aggregateRows,
+      checkpointSuggested: archiveResult.inserted > 0 || deleted > 0,
+      hasMore: this.hasPriceTicksAtOrBefore(cutoffTimestamp),
+      months: archiveResult.months,
+    };
+  }
+
+  pruneAlertEvents(retentionDays = DEFAULT_ALERT_RETENTION_DAYS): number {
+    const cutoffMs = this.nowMs() - retentionDays * 24 * 60 * 60 * 1000;
+    const result = this.connection.orm
+      .delete(alertEvents)
+      .where(lte(alertEvents.triggeredAt, cutoffMs))
+      .run();
     return Number(result.changes ?? 0);
   }
 
@@ -294,25 +414,73 @@ export class WeatherMonitorRepository {
     this.connection.orm.insert(alertEvents).values(rows).run();
   }
 
-  queryAlertEvents(query: AlertEventQuery = {}): AlertEventRow[] {
-    const limit = query.limit ?? 200;
-    const filters = [];
+  queryAlertEvents(query: AlertEventQuery = {}): AlertEventPage {
+    const limit = Math.max(
+      1,
+      Math.min(query.limit ?? ALERT_EVENT_PAGE_LIMIT_DEFAULT, ALERT_EVENT_PAGE_LIMIT_MAX),
+    );
+    const baseFilters = [];
     if (query.acknowledged !== undefined) {
-      filters.push(eq(alertEvents.acknowledged, query.acknowledged));
+      baseFilters.push(eq(alertEvents.acknowledged, query.acknowledged));
     }
     if (typeof query.sinceTriggeredAt === 'number') {
-      filters.push(gte(alertEvents.triggeredAt, query.sinceTriggeredAt));
+      baseFilters.push(gte(alertEvents.triggeredAt, query.sinceTriggeredAt));
     }
 
-    const queryBuilder = this.connection.orm.select().from(alertEvents);
-    if (filters.length === 0) {
-      return queryBuilder.orderBy(desc(alertEvents.triggeredAt)).limit(limit).all();
+    const totalFilter = baseFilters.length > 0 ? and(...baseFilters) : undefined;
+    const totalRow = totalFilter
+      ? this.connection.orm
+          .select({ value: count() })
+          .from(alertEvents)
+          .where(totalFilter)
+          .get()
+      : this.connection.orm.select({ value: count() }).from(alertEvents).get();
+    const total = Number(totalRow?.value ?? 0);
+
+    const rowFilters = [...baseFilters];
+    if (query.cursor) {
+      rowFilters.push(
+        or(
+          lt(alertEvents.triggeredAt, query.cursor.triggeredAt),
+          and(
+            eq(alertEvents.triggeredAt, query.cursor.triggeredAt),
+            lt(alertEvents.id, query.cursor.id),
+          ),
+        )!,
+      );
     }
-    return queryBuilder
-      .where(and(...filters))
-      .orderBy(desc(alertEvents.triggeredAt))
-      .limit(limit)
-      .all();
+
+    const rowFilter = rowFilters.length > 0 ? and(...rowFilters) : undefined;
+    const rows = rowFilter
+      ? this.connection.orm
+          .select()
+          .from(alertEvents)
+          .where(rowFilter)
+          .orderBy(desc(alertEvents.triggeredAt), desc(alertEvents.id))
+          .limit(limit + 1)
+          .all()
+      : this.connection.orm
+          .select()
+          .from(alertEvents)
+          .orderBy(desc(alertEvents.triggeredAt), desc(alertEvents.id))
+          .limit(limit + 1)
+          .all();
+
+    const hasMore = rows.length > limit;
+    const pageRows = hasMore ? rows.slice(0, limit) : rows;
+    const lastRow = pageRows.at(-1);
+
+    return {
+      rows: pageRows,
+      total,
+      hasMore,
+      nextCursor: lastRow
+        ? {
+            triggeredAt: lastRow.triggeredAt,
+            id: lastRow.id,
+          }
+        : undefined,
+    };
   }
 
   queryRecentAlertEventsForScoring(sinceTriggeredAt: number): AlertEventRow[] {
@@ -407,6 +575,30 @@ export class WeatherMonitorRepository {
       return this.connection.orm.select().from(feedHealth).all();
     }
     return this.connection.orm.select().from(feedHealth).where(eq(feedHealth.status, query.status)).all();
+  }
+
+  private deletePriceTicksById(ids: number[]): number {
+    if (ids.length === 0) {
+      return 0;
+    }
+
+    let deleted = 0;
+    for (let index = 0; index < ids.length; index += 400) {
+      const chunk = ids.slice(index, index + 400);
+      const result = this.connection.orm.delete(priceTicks).where(inArray(priceTicks.id, chunk)).run();
+      deleted += Number(result.changes ?? 0);
+    }
+    return deleted;
+  }
+
+  private hasPriceTicksAtOrBefore(cutoffTimestamp: number): boolean {
+    const row = this.connection.orm
+      .select({ id: priceTicks.id })
+      .from(priceTicks)
+      .where(lte(priceTicks.timestamp, cutoffTimestamp))
+      .limit(1)
+      .get();
+    return row !== undefined;
   }
 }
 
@@ -515,4 +707,44 @@ function normalizeAlertMetric(metric: string): AlertRule['metric'] {
     default:
       return 'spread_threshold';
   }
+}
+
+function mapArchivedPriceTick(row: PriceTick) {
+  return {
+    id: row.id,
+    tokenId: row.tokenId,
+    marketId: row.marketId,
+    timestamp: row.timestamp,
+    lastTradePrice: row.lastTradePrice ?? null,
+    bestBid: row.bestBid ?? null,
+    bestAsk: row.bestAsk ?? null,
+    spread: row.spread ?? null,
+  };
+}
+
+function normalizeCutoffTimestamp(cutoffTimestamp: number): number {
+  if (!Number.isFinite(cutoffTimestamp)) {
+    throw new Error('archivePriceTicks requires a finite cutoffTimestamp');
+  }
+  return Math.floor(cutoffTimestamp);
+}
+
+function normalizeBatchSize(batchSize?: number): number {
+  if (batchSize === undefined) {
+    return 5_000;
+  }
+
+  if (!Number.isFinite(batchSize) || batchSize <= 0) {
+    throw new Error('archivePriceTicks batchSize must be a positive finite number');
+  }
+
+  return Math.max(1, Math.floor(batchSize));
+}
+
+function normalizeRetentionDays(retentionDays: number): number {
+  if (!Number.isFinite(retentionDays) || retentionDays <= 0) {
+    return DEFAULT_TICK_RETENTION_DAYS;
+  }
+
+  return Math.max(1, Math.floor(retentionDays));
 }

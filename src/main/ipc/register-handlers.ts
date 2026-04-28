@@ -1,4 +1,4 @@
-import { app, dialog, ipcMain } from 'electron';
+import { app, dialog, ipcMain, session } from 'electron';
 import path from 'node:path';
 
 import type {
@@ -11,26 +11,38 @@ import type {
 } from '../contracts/ipc';
 import { DEFAULT_HEALTH as DEFAULT_HEALTH_VALUE } from '../contracts/ipc';
 import type { CoreWorkerClient } from '../services/core-worker-client';
+import type { PreviewSoundPlaybackResult } from '../services/audio-window';
+import {
+  clearRuntimeStorageCache,
+  createRuntimeStorageBackup,
+  inspectRuntimeStorageSummary,
+} from '../services/runtime-storage';
+import { createRuntimeDiagnosticsPackage } from '../services/runtime-diagnostics';
+import type { RuntimePaths } from '../services/runtime-paths';
 
 type EmitEvent = <C extends EventChannel>(channel: C, payload: EventPayloadMap[C]) => void;
 
 interface RegisterIpcHandlersOptions {
   coreClient: CoreWorkerClient;
+  runtimePaths: RuntimePaths;
   getRuntimeState: () => RuntimeState;
   setRuntimeState: (updater: (prev: RuntimeState) => RuntimeState) => void;
+  setRuntimeHealth: (health: RuntimeState['health']) => void;
   emitEvent: EmitEvent;
   getControlState: () => RuntimeState['controlState'];
   setNotificationsEnabled: (enabled: boolean) => RuntimeState['controlState'];
   startMonitoring: () => Promise<RuntimeState['controlState']>;
   stopMonitoring: () => Promise<RuntimeState['controlState']>;
-  quitApplication: () => RuntimeState['controlState'];
-  previewSoundFromPath: (filePath: string, gain?: number) => Promise<boolean>;
+  quitApplication: () => Promise<RuntimeState['controlState']>;
+  previewSoundFromPath: (filePath: string, gain?: number) => Promise<PreviewSoundPlaybackResult>;
 }
 
 export const registerIpcHandlers = ({
   coreClient,
+  runtimePaths,
   getRuntimeState,
   setRuntimeState,
+  setRuntimeHealth,
   emitEvent,
   getControlState,
   setNotificationsEnabled,
@@ -38,16 +50,24 @@ export const registerIpcHandlers = ({
   stopMonitoring,
   quitApplication,
   previewSoundFromPath,
-}: RegisterIpcHandlersOptions): void => {
+}: RegisterIpcHandlersOptions): (() => void) => {
+  const attachStorageSummary = (
+    settingsPayload: RuntimeState['settingsPayload'],
+  ): RuntimeState['settingsPayload'] => ({
+    ...settingsPayload,
+    storageSummary: inspectRuntimeStorageSummary(runtimePaths),
+  });
+  const getSettingsPayloadWithStorageSummary = (): RuntimeState['settingsPayload'] =>
+    attachStorageSummary(getRuntimeState().settingsPayload);
+
   ipcMain.handle('app.getHealth', async (): Promise<InvokeResultMap['app.getHealth']> => {
     try {
       const health = await coreClient.invoke('app.getHealth');
-      setRuntimeState((prev) => ({ ...prev, health }));
+      setRuntimeHealth(health);
       return health;
     } catch {
       const fallbackHealth = toDegradedHealth(getRuntimeState().health);
-      setRuntimeState((prev) => ({ ...prev, health: fallbackHealth }));
-      emitEvent('app.health', fallbackHealth);
+      setRuntimeHealth(fallbackHealth);
       return fallbackHealth;
     }
   });
@@ -79,7 +99,7 @@ export const registerIpcHandlers = ({
             nextState = await stopMonitoring();
             break;
           case 'quitApp':
-            nextState = quitApplication();
+            nextState = await quitApplication();
             break;
           default:
             return {
@@ -148,13 +168,8 @@ export const registerIpcHandlers = ({
 
   ipcMain.handle(
     'alerts.list',
-    async (_event, payload: InvokePayloadMap['alerts.list']) => {
-      try {
-        return await coreClient.invoke('alerts.list', payload);
-      } catch {
-        return { rows: [], total: 0 };
-      }
-    },
+    async (_event, payload: InvokePayloadMap['alerts.list']) =>
+      coreClient.invoke('alerts.list', payload),
   );
 
   ipcMain.handle('alerts.ack', async (_event, payload: InvokePayloadMap['alerts.ack']) => {
@@ -187,14 +202,71 @@ export const registerIpcHandlers = ({
     })),
   );
 
+  ipcMain.handle(
+    'storage.clearCache',
+    async (): Promise<InvokeResultMap['storage.clearCache']> => {
+      await session.defaultSession.clearCache().catch(() => undefined);
+      const result = await clearRuntimeStorageCache(runtimePaths);
+      setRuntimeState((prev) => ({
+        ...prev,
+        settingsPayload: {
+          ...prev.settingsPayload,
+          storageSummary: result.storageSummary,
+        },
+      }));
+      return result;
+    },
+  );
+
+  ipcMain.handle(
+    'storage.createBackup',
+    async (): Promise<InvokeResultMap['storage.createBackup']> => {
+      const result = await createRuntimeStorageBackup(runtimePaths);
+      setRuntimeState((prev) => ({
+        ...prev,
+        settingsPayload: {
+          ...prev.settingsPayload,
+          storageSummary: result.storageSummary,
+        },
+      }));
+      return result;
+    },
+  );
+
+  ipcMain.handle(
+    'storage.createDiagnostics',
+    async (): Promise<InvokeResultMap['storage.createDiagnostics']> =>
+      createRuntimeDiagnosticsPackage(runtimePaths),
+  );
+
+  ipcMain.handle(
+    'storage.runMaintenance',
+    async (): Promise<InvokeResultMap['storage.runMaintenance']> => {
+      const workerResult = await coreClient.invoke('storage.runMaintenance');
+      const result = {
+        ...workerResult,
+        storageSummary: inspectRuntimeStorageSummary(runtimePaths),
+      } satisfies InvokeResultMap['storage.runMaintenance'];
+      setRuntimeState((prev) => ({
+        ...prev,
+        settingsPayload: {
+          ...prev.settingsPayload,
+          storageSummary: result.storageSummary,
+          storageMaintenance: result.summary,
+        },
+      }));
+      return result;
+    },
+  );
+
   ipcMain.handle('settings.get', async (): Promise<InvokeResultMap['settings.get']> => {
     try {
-      const settingsPayload = await coreClient.invoke('settings.get');
+      const settingsPayload = attachStorageSummary(await coreClient.invoke('settings.get'));
       setRuntimeState((prev) => ({ ...prev, settingsPayload }));
       applyLoginItem(settingsPayload.settings.startOnBoot);
       return settingsPayload;
     } catch {
-      return getRuntimeState().settingsPayload;
+      return getSettingsPayloadWithStorageSummary();
     }
   });
 
@@ -205,12 +277,14 @@ export const registerIpcHandlers = ({
       payload: InvokePayloadMap['settings.update'],
     ): Promise<InvokeResultMap['settings.update']> => {
       try {
-        const settingsPayload = await coreClient.invoke('settings.update', payload);
+        const settingsPayload = attachStorageSummary(
+          await coreClient.invoke('settings.update', payload),
+        );
         setRuntimeState((prev) => ({ ...prev, settingsPayload }));
         applyLoginItem(settingsPayload.settings.startOnBoot);
         return settingsPayload;
       } catch {
-        return getRuntimeState().settingsPayload;
+        return getSettingsPayloadWithStorageSummary();
       }
     },
   );
@@ -221,10 +295,7 @@ export const registerIpcHandlers = ({
       _event,
       payload: InvokePayloadMap['settings.importCityMap'],
     ): Promise<InvokeResultMap['settings.importCityMap']> =>
-      coreClient.invoke('settings.importCityMap', payload).catch(() => ({
-        ok: true,
-        imported: 0,
-      })),
+      coreClient.invoke('settings.importCityMap', payload),
   );
 
   ipcMain.handle(
@@ -235,11 +306,13 @@ export const registerIpcHandlers = ({
     ): Promise<InvokeResultMap['settings.pickSound']> => {
       if (payload?.id) {
         try {
-          const nextPayload = await coreClient.invoke('settings.pickSound', payload);
+          const nextPayload = attachStorageSummary(
+            await coreClient.invoke('settings.pickSound', payload),
+          );
           setRuntimeState((prev) => ({ ...prev, settingsPayload: nextPayload }));
           return nextPayload;
         } catch {
-          return getRuntimeState().settingsPayload;
+          return getSettingsPayloadWithStorageSummary();
         }
       }
 
@@ -259,15 +332,17 @@ export const registerIpcHandlers = ({
       }
 
       try {
-        const nextPayload = await coreClient.invoke('settings.registerSound', {
-          filePath: result.filePaths[0],
-          name: path.basename(result.filePaths[0]),
-          setAsDefault: true,
-        });
+        const nextPayload = attachStorageSummary(
+          await coreClient.invoke('settings.registerSound', {
+            filePath: result.filePaths[0],
+            name: path.basename(result.filePaths[0]),
+            setAsDefault: true,
+          }),
+        );
         setRuntimeState((prev) => ({ ...prev, settingsPayload: nextPayload }));
         return nextPayload;
       } catch {
-        return getRuntimeState().settingsPayload;
+        return getSettingsPayloadWithStorageSummary();
       }
     },
   );
@@ -310,13 +385,11 @@ export const registerIpcHandlers = ({
         };
       }
 
-      try {
-        const nextPayload = await coreClient.invoke('settings.registerSound', request);
-        setRuntimeState((prev) => ({ ...prev, settingsPayload: nextPayload }));
-        return nextPayload;
-      } catch {
-        return getRuntimeState().settingsPayload;
-      }
+      const nextPayload = attachStorageSummary(
+        await coreClient.invoke('settings.registerSound', request),
+      );
+      setRuntimeState((prev) => ({ ...prev, settingsPayload: nextPayload }));
+      return nextPayload;
     },
   );
 
@@ -336,27 +409,38 @@ export const registerIpcHandlers = ({
         return { ok: true, played: false };
       }
 
-      const played = await previewSoundFromPath(filePath, payload?.gain ?? targetSound?.gain ?? 1);
-      return { ok: true, played };
+      const result = await previewSoundFromPath(filePath, payload?.gain ?? targetSound?.gain ?? 1);
+      return { ok: true, ...result };
     },
   );
 
-  coreClient.on('app.health', (payload) => {
-    setRuntimeState((prev) => ({ ...prev, health: payload }));
-    emitEvent('app.health', payload);
-  });
+  const handleAppHealth = (payload: AppHealth) => {
+    setRuntimeHealth(payload);
+  };
 
-  coreClient.on('dashboard.tick', (payload) => {
+  const handleDashboardTick = (payload: EventPayloadMap['dashboard.tick']) => {
     emitEvent('dashboard.tick', payload);
-  });
+  };
 
-  coreClient.on('markets.tick', (payload) => {
+  const handleMarketsTick = (payload: EventPayloadMap['markets.tick']) => {
     emitEvent('markets.tick', payload);
-  });
+  };
 
-  coreClient.on('alerts.new', (payload) => {
+  const handleAlertsNew = (payload: EventPayloadMap['alerts.new']) => {
     emitEvent('alerts.new', payload);
-  });
+  };
+
+  coreClient.on('app.health', handleAppHealth);
+  coreClient.on('dashboard.tick', handleDashboardTick);
+  coreClient.on('markets.tick', handleMarketsTick);
+  coreClient.on('alerts.new', handleAlertsNew);
+
+  return () => {
+    coreClient.off('app.health', handleAppHealth);
+    coreClient.off('dashboard.tick', handleDashboardTick);
+    coreClient.off('markets.tick', handleMarketsTick);
+    coreClient.off('alerts.new', handleAlertsNew);
+  };
 };
 
 function applyLoginItem(enabled: boolean): void {

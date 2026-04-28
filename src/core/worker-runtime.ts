@@ -5,8 +5,14 @@ import type { MessagePort } from 'node:worker_threads';
 
 import { AlertEngine } from './alerts/engine';
 import type { AlertRule as EngineAlertRule, AlertSeverity, AlertTrigger } from './alerts/types';
-import { WeatherMonitorRepository } from './db/repository';
+import {
+  ALERT_EVENT_PAGE_LIMIT_DEFAULT,
+  ALERT_EVENT_PAGE_LIMIT_MAX,
+  WeatherMonitorRepository,
+  type AlertEventQuery,
+} from './db/repository';
 import type {
+  AlertEventRow as DbAlertEventRow,
   CityConfig as DbCityConfig,
   LatestTokenState as DbLatestTokenState,
   NewPriceTick,
@@ -28,6 +34,14 @@ import {
 } from '../shared/alert-display';
 import { DEFAULT_CITY_CONFIGS } from '../shared/city-seeds';
 import {
+  DEFAULT_ALERT_RETENTION_DAYS,
+  DEFAULT_TICK_RETENTION_DAYS,
+  MAX_ALERT_RETENTION_DAYS,
+  MAX_TICK_RETENTION_DAYS,
+  MIN_ALERT_RETENTION_DAYS,
+  MIN_TICK_RETENTION_DAYS,
+} from '../shared/constants';
+import {
   BUILTIN_DEFAULT_SOUND_ID,
   BUILTIN_SOUND_LIBRARY,
   toBuiltinSoundPath,
@@ -43,6 +57,8 @@ import type {
 import { cityConfigArraySchema } from '../shared/schemas';
 import type {
   AlertEvent,
+  AlertListCursor,
+  AlertListResult,
   AlertRule,
   AppHealth,
   AppSettings,
@@ -56,8 +72,10 @@ import type {
   RegisterSoundPayload,
   RulePreviewResult,
   SettingsPayload,
+  StorageMaintenanceResult,
+  StorageMaintenanceSummary,
   SoundProfile,
-} from '../renderer/types/contracts';
+} from '../shared/monitor-contracts';
 import { DEFAULT_HEALTH, DEFAULT_SETTINGS } from '../main/contracts/ipc';
 
 const APP_SETTING_KEYS = {
@@ -65,6 +83,8 @@ const APP_SETTING_KEYS = {
   backgroundAudio: 'backgroundAudio',
   reconnectPolicy: 'reconnectPolicy',
   pollIntervalSec: 'pollIntervalSec',
+  tickRetentionDays: 'tickRetentionDays',
+  alertRetentionDays: 'alertRetentionDays',
   selectedSoundProfileId: 'selectedSoundProfileId',
   quietHoursStart: 'quietHoursStart',
   quietHoursEnd: 'quietHoursEnd',
@@ -179,6 +199,18 @@ const severityToUi = (severity: AlertSeverity): AlertEvent['severity'] => {
   return 'info';
 };
 
+type EmittedAlertSource = Exclude<AlertEvent['source'], undefined>;
+
+const toTokenAlertSource = (lastEventType?: string): EmittedAlertSource => {
+  if (lastEventType === 'discovery') {
+    return 'discovery-seed';
+  }
+  if (lastEventType === 'snapshot') {
+    return 'snapshot-backfill';
+  }
+  return 'realtime';
+};
+
 const uiToEngineSeverity = (severity: AlertRule['severity']): AlertSeverity => {
   if (severity === 'critical') return 'critical';
   if (severity === 'warning') return 'medium';
@@ -192,6 +224,36 @@ const parseTimeToMinutes = (value: string): number => {
   }
   return hours * 60 + minutes;
 };
+
+const parseAlertListCursor = (
+  cursor: AlertListCursor | undefined,
+): { triggeredAt: number; id: string } | undefined => {
+  const triggeredAt = cursor?.triggeredAt?.trim();
+  const id = cursor?.id?.trim();
+  if (!triggeredAt || !id) {
+    return undefined;
+  }
+
+  const triggeredAtMs = Date.parse(triggeredAt);
+  if (!Number.isFinite(triggeredAtMs)) {
+    return undefined;
+  }
+
+  return {
+    triggeredAt: triggeredAtMs,
+    id,
+  };
+};
+
+const toAlertListCursor = (
+  cursor: { triggeredAt: number; id: string } | undefined,
+): AlertListCursor | undefined =>
+  cursor
+    ? {
+        triggeredAt: new Date(cursor.triggeredAt).toISOString(),
+        id: cursor.id,
+      }
+    : undefined;
 
 const toDbCityConfig = (city: {
   cityKey: string;
@@ -230,6 +292,129 @@ const clampSoundGain = (value: number | undefined, fallback = 1): number => {
   }
   return Math.max(0, Math.min(value, 1));
 };
+
+const normalizeTickRetentionDays = (value: number | string | undefined): number => {
+  const parsed = typeof value === 'string' ? Number(value) : typeof value === 'number' ? value : Number.NaN;
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_TICK_RETENTION_DAYS;
+  }
+  return Math.max(
+    MIN_TICK_RETENTION_DAYS,
+    Math.min(MAX_TICK_RETENTION_DAYS, Math.trunc(parsed)),
+  );
+};
+
+const normalizeAlertRetentionDays = (value: number | string | undefined): number => {
+  const parsed = typeof value === 'string' ? Number(value) : typeof value === 'number' ? value : Number.NaN;
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_ALERT_RETENTION_DAYS;
+  }
+  return Math.max(
+    MIN_ALERT_RETENTION_DAYS,
+    Math.min(MAX_ALERT_RETENTION_DAYS, Math.trunc(parsed)),
+  );
+};
+
+type TickArchiveMaintenanceResult =
+  | number
+  | {
+      archivedRows?: number;
+      archivedTickRows?: number;
+      archivedRawTicks?: number;
+      prunedRows?: number;
+      removedRows?: number;
+      deletedRows?: number;
+      aggregateRows?: number;
+      hasMore?: boolean;
+      checkpointSuggested?: boolean;
+      compactSuggested?: boolean;
+    };
+
+interface TickArchiveMaintenanceQuery {
+  cutoffTimestamp: number;
+  batchSize?: number;
+}
+
+type TickArchiveMaintenanceRepository = WeatherMonitorRepository & {
+  archivePriceTicks?: (query: number | TickArchiveMaintenanceQuery) => TickArchiveMaintenanceResult;
+  archiveAndPrunePriceTicks?: (retentionDays: number) => TickArchiveMaintenanceResult;
+  maintainPriceTickArchive?: (retentionDays: number) => TickArchiveMaintenanceResult;
+  maintainPriceTicks?: (retentionDays: number) => TickArchiveMaintenanceResult;
+};
+
+const normalizeMaintenanceRowCount = (value: number | undefined): number =>
+  typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.trunc(value) : 0;
+
+const normalizeTickArchiveMaintenanceResult = (
+  result: TickArchiveMaintenanceResult,
+): {
+  archivedRows: number;
+  prunedRows: number;
+  aggregateRows: number;
+  changedRows: number;
+  hasMore: boolean;
+  compactSuggested: boolean;
+  checkpointSuggested: boolean;
+} => {
+  if (typeof result === 'number') {
+    const prunedRows = normalizeMaintenanceRowCount(result);
+    return {
+      archivedRows: 0,
+      prunedRows,
+      aggregateRows: 0,
+      changedRows: prunedRows,
+      hasMore: false,
+      compactSuggested: false,
+      checkpointSuggested: prunedRows > 0,
+    };
+  }
+
+  const archivedRows = normalizeMaintenanceRowCount(
+    result.archivedRows ?? result.archivedTickRows ?? result.archivedRawTicks,
+  );
+  const prunedRows = normalizeMaintenanceRowCount(
+    result.prunedRows ?? result.removedRows ?? result.deletedRows,
+  );
+  const aggregateRows = normalizeMaintenanceRowCount(result.aggregateRows);
+  return {
+    archivedRows,
+    prunedRows,
+    aggregateRows,
+    changedRows: archivedRows + prunedRows + aggregateRows,
+    hasMore: result.hasMore === true,
+    compactSuggested: result.compactSuggested === true,
+    checkpointSuggested: result.checkpointSuggested === true || archivedRows > 0 || prunedRows > 0,
+  };
+};
+
+interface TickArchiveMaintenanceRunSummary {
+  changedRows: number;
+  archivedRows: number;
+  prunedRows: number;
+  aggregateRows: number;
+  checkpointed: boolean;
+  compacted: boolean;
+}
+
+interface AlertHistoryMaintenanceRunSummary {
+  prunedRows: number;
+  checkpointed: boolean;
+  compacted: boolean;
+}
+
+const createDefaultStorageMaintenanceSummary = (): StorageMaintenanceSummary => ({
+  status: 'idle',
+  lastRunAt: null,
+  lastSuccessAt: null,
+  lastDurationMs: null,
+  lastArchivedRows: 0,
+  lastPrunedTickRows: 0,
+  lastPrunedAlertRows: 0,
+  lastCheckpointAt: null,
+  lastCompactionAt: null,
+  lastReason: null,
+  lastError: null,
+});
 
 const toEngineScopeSide = (
   side: 'YES' | 'NO' | 'BOTH' | undefined,
@@ -311,6 +496,9 @@ const PRICE_TICK_BATCH_LIMIT = 64;
 const PRICE_CHANGE_WINDOW_MS = 5 * 60 * 1000;
 const PRICE_CHANGE_WINDOW_MAX_ENTRIES = 240;
 const MAINTENANCE_INTERVAL_MS = 30 * 60 * 1000;
+const STARTUP_MAINTENANCE_DELAY_MS = 15_000;
+const TICK_ARCHIVE_BATCH_SIZE = 50_000;
+const MAX_TICK_ARCHIVE_BATCHES_PER_RUN = 80;
 const BUBBLE_SCORE_RECOMPUTE_INTERVAL_MS = 60 * 1000;
 const BUBBLE_ALERT_HISTORY_START_MS = 0;
 const BUBBLE_STRONG_ALERT_WINDOW_MS = 60 * 60 * 1000;
@@ -319,6 +507,8 @@ const BUBBLE_SCORE_MAX = 100;
 const DASHBOARD_MAX_VISIBLE_CITIES = 48;
 const CUSTOM_RULE_BUBBLE_WEIGHT = 60;
 const CURRENT_RULE_SCAN_ALERT_LIMIT = 80;
+const STARTUP_RULE_SCAN_MAX_STATE_AGE_MS = 90 * 1000;
+const STORAGE_COMPACTION_PRUNE_THRESHOLD = 10_000;
 const BUBBLE_WEIGHT_DEFAULTS: Record<BuiltinRuleKey, number> = {
   feed_stale: 95,
   liquidity_kill: 90,
@@ -330,6 +520,131 @@ const BUBBLE_SEVERITY_RANK: Record<MarketRow['bubbleSeverity'], number> = {
   info: 1,
   warning: 2,
   critical: 3,
+};
+const MARKET_SEARCH_SEPARATOR_PATTERN = /[\s_-]+/g;
+const MARKET_CITY_SEARCH_ALIASES: Record<string, string[]> = {
+  amsterdam: ['ams', '阿姆斯特丹'],
+  ankara: ['esb', '安卡拉'],
+  atlanta: ['atl', '亚特兰大'],
+  austin: ['aus', '奥斯汀'],
+  beijing: ['pek', 'pkx', '北京'],
+  busan: ['pus', '釜山'],
+  'buenos-aires': ['eze', 'aep', '布宜诺斯艾利斯'],
+  'cape-town': ['cpt', '开普敦'],
+  chengdu: ['ctu', 'tfu', '成都'],
+  chicago: ['ord', 'mdw', '芝加哥'],
+  chongqing: ['ckg', '重庆', '重慶'],
+  dallas: ['dfw', 'dal', '达拉斯'],
+  denver: ['den', '丹佛'],
+  guangzhou: ['can', '广州', '廣州', 'baiyun'],
+  helsinki: ['hel', '赫尔辛基'],
+  'hong-kong': ['hkg', '香港'],
+  houston: ['iah', 'hou', '休斯敦'],
+  istanbul: ['ist', '伊斯坦布尔'],
+  jakarta: ['cgk', '雅加达'],
+  jeddah: ['jed', '吉达'],
+  'kuala-lumpur': ['kul', '吉隆坡'],
+  lagos: ['los', '拉各斯'],
+  london: ['lhr', 'lgw', 'lcy', '伦敦'],
+  'los-angeles': ['lax', '洛杉矶'],
+  lucknow: ['lko', '勒克瑙'],
+  madrid: ['mad', '马德里'],
+  'mexico-city': ['mex', '墨西哥城'],
+  miami: ['mia', '迈阿密'],
+  milan: ['mxp', 'lin', '米兰'],
+  moscow: ['svo', 'dme', '莫斯科'],
+  munich: ['muc', '慕尼黑'],
+  nyc: ['nyc', 'jfk', 'lga', 'ewr', 'new-york', 'new york', '纽约', '紐約'],
+  'panama-city': ['pty', '巴拿马城'],
+  paris: ['cdg', 'ory', '巴黎'],
+  'san-francisco': ['sfo', '旧金山', '舊金山'],
+  'sao-paulo': ['gru', '圣保罗', '聖保羅'],
+  seattle: ['sea', '西雅图'],
+  seoul: ['icn', 'gmp', '首尔', '首爾'],
+  shanghai: ['pvg', 'sha', '上海'],
+  shenzhen: ['szx', '深圳'],
+  singapore: ['sin', '新加坡'],
+  taipei: ['tpe', '台北'],
+  'tel-aviv': ['tlv', '特拉维夫'],
+  tokyo: ['tyo', 'hnd', 'nrt', '东京', '東京'],
+  toronto: ['yyz', '多伦多'],
+  warsaw: ['waw', '华沙'],
+  wellington: ['wlg', '惠灵顿'],
+  wuhan: ['wuh', '武汉', '武漢'],
+};
+
+const normalizeMarketSearchValue = (value: string | null | undefined): string =>
+  (value ?? '').trim().toLocaleLowerCase();
+
+const compactMarketSearchValue = (value: string): string =>
+  normalizeMarketSearchValue(value).replace(MARKET_SEARCH_SEPARATOR_PATTERN, '');
+
+const marketFieldMatchesSearch = (
+  value: string | null | undefined,
+  searchTerm: string,
+  compactSearchTerm: string,
+): boolean => {
+  const normalized = normalizeMarketSearchValue(value);
+  if (!normalized) {
+    return false;
+  }
+  return normalized.includes(searchTerm) || compactMarketSearchValue(normalized).includes(compactSearchTerm);
+};
+
+const marketRowMatchesSearch = (row: MarketRow, rawSearchTerm: string): boolean => {
+  const searchTerm = normalizeMarketSearchValue(rawSearchTerm);
+  if (!searchTerm) {
+    return true;
+  }
+  const compactSearchTerm = compactMarketSearchValue(searchTerm);
+  const cityAliases =
+    MARKET_CITY_SEARCH_ALIASES[row.cityKey] ??
+    MARKET_CITY_SEARCH_ALIASES[compactMarketSearchValue(row.cityKey)] ??
+    [];
+  return [
+    row.cityKey,
+    row.cityName,
+    row.airportCode,
+    row.marketId,
+    row.temperatureBand,
+    ...cityAliases,
+  ].some((value) => marketFieldMatchesSearch(value, searchTerm, compactSearchTerm));
+};
+
+const getTodayDateKey = (): string => new Date().toISOString().slice(0, 10);
+
+const isDecisionUsefulMarketRow = (row: MarketRow, today: string): boolean =>
+  row.status === 'active' && row.eventDate >= today;
+
+const getMarketLifecycleRank = (row: MarketRow, today: string): number => {
+  const isCurrentOrFuture = row.eventDate >= today;
+  if (row.status === 'active' && isCurrentOrFuture) {
+    return 0;
+  }
+  if (row.status === 'active') {
+    return 1;
+  }
+  if (row.status === 'halted' && isCurrentOrFuture) {
+    return 2;
+  }
+  if (row.status === 'halted') {
+    return 3;
+  }
+  if (isCurrentOrFuture) {
+    return 4;
+  }
+  return 5;
+};
+
+const compareMarketLifecycle = (left: MarketRow, right: MarketRow, today: string): number => {
+  const rankDelta = getMarketLifecycleRank(left, today) - getMarketLifecycleRank(right, today);
+  if (rankDelta !== 0) {
+    return rankDelta;
+  }
+  if (left.eventDate !== right.eventDate) {
+    return left.eventDate.localeCompare(right.eventDate);
+  }
+  return 0;
 };
 
 export class WorkerRuntime {
@@ -359,8 +674,14 @@ export class WorkerRuntime {
   private serviceStarted = false;
   private serviceRetryTimer?: ReturnType<typeof setTimeout>;
   private maintenanceTimer?: ReturnType<typeof setInterval>;
+  private startupMaintenanceTimer?: ReturnType<typeof setTimeout>;
+  private maintenanceInFlight: Promise<StorageMaintenanceResult> | null = null;
+  private maintenanceSummary: StorageMaintenanceSummary =
+    createDefaultStorageMaintenanceSummary();
   private lastServiceError: string | null = null;
   private hasSuccessfulDiscovery = false;
+  private startupRuleCheckCompleted = false;
+  private primedLiveAlertTokenIds = new Set<string>();
 
   private lastServiceErrorSource: HealthErrorSource | null = null;
 
@@ -401,8 +722,8 @@ export class WorkerRuntime {
     this.seedBuiltinSounds();
     this.refreshIndexes();
     this.bindServiceEvents();
-    this.startMaintenanceLoop();
     await this.ensureDataServiceStarted();
+    this.startMaintenanceLoop();
     await this.refreshRules();
     this.recomputeBubbleScores();
     this.startBubbleScoreLoop();
@@ -448,7 +769,7 @@ export class WorkerRuntime {
       case 'markets.query':
         return this.queryMarkets(payload as MarketQuery | undefined) as WorkerInvokeResultMap[C];
       case 'alerts.list':
-        return this.listAlerts(payload as { limit?: number; acknowledged?: boolean } | undefined) as WorkerInvokeResultMap[C];
+        return this.listAlerts(payload as WorkerInvokePayloadMap['alerts.list']) as WorkerInvokeResultMap[C];
       case 'alerts.ack':
         return this.ackAlerts(payload as WorkerInvokePayloadMap['alerts.ack']) as WorkerInvokeResultMap[C];
       case 'rules.list':
@@ -457,6 +778,10 @@ export class WorkerRuntime {
         return this.previewRule(payload as RulePreviewPayload) as WorkerInvokeResultMap[C];
       case 'rules.save':
         return this.saveRules(payload as RuleSavePayload) as WorkerInvokeResultMap[C];
+      case 'storage.runMaintenance':
+        return (await this.runStorageMaintenance('manual', {
+          allowCompaction: true,
+        })) as WorkerInvokeResultMap[C];
       case 'settings.get':
         return this.getSettingsPayload() as WorkerInvokeResultMap[C];
       case 'settings.update':
@@ -645,6 +970,7 @@ export class WorkerRuntime {
       await this.handleDiscovery(universe.events);
       this.hasSuccessfulDiscovery = true;
       this.clearServiceError();
+      this.maybeRunStartupRuleCheck();
       this.queueDashboardTick();
       await this.emitHealth();
     });
@@ -658,6 +984,7 @@ export class WorkerRuntime {
       if (status.state === 'open') {
         this.clearServiceError();
       }
+      this.maybeRunStartupRuleCheck();
       await this.emitHealth();
     });
 
@@ -679,6 +1006,7 @@ export class WorkerRuntime {
         updatedAt: status.at,
       });
       this.persistAndEmitAlerts(triggers);
+      this.maybeRunStartupRuleCheck();
       await this.emitHealth();
     });
 
@@ -699,6 +1027,7 @@ export class WorkerRuntime {
         message: rawMessage,
         severity: 'warning',
         acknowledged: false,
+        source: 'system',
       });
     });
   }
@@ -930,7 +1259,7 @@ export class WorkerRuntime {
       spread: tokenState.spread ?? null,
     });
 
-    const triggers = this.alertEngine.evaluateMarketTick(this.engineRules, {
+    const marketInput = {
       tokenId: tokenState.tokenId,
       marketId: meta.marketId,
       cityKey: meta.cityKey,
@@ -945,9 +1274,24 @@ export class WorkerRuntime {
       bestAsk: tokenState.bestAsk,
       spread: tokenState.spread,
       lastMessageAt: timestamp,
-    });
-
-    this.persistAndEmitAlerts(triggers);
+    };
+    const alertSource = toTokenAlertSource(tokenState.lastEventType);
+    if (alertSource === 'realtime') {
+      if (!this.primedLiveAlertTokenIds.has(tokenState.tokenId)) {
+        // Treat the first live tick after startup as the baseline for realtime alerting.
+        this.primedLiveAlertTokenIds.add(tokenState.tokenId);
+        this.marketState.recordTick(marketInput);
+      } else {
+        const triggers = this.alertEngine.evaluateMarketTick(this.engineRules, marketInput);
+        this.persistAndEmitAlerts(triggers, {
+          source: alertSource,
+        });
+      }
+    } else {
+      // Seed market history from discovery/backfill snapshots without treating them as fresh alerts.
+      this.marketState.recordTick(marketInput);
+    }
+    this.maybeRunStartupRuleCheck(timestamp);
 
     const row = this.buildMarketRow(meta.marketId, undefined, timestamp);
     if (row) {
@@ -988,10 +1332,16 @@ export class WorkerRuntime {
     ]);
   }
 
-  private persistAndEmitAlerts(triggers: AlertTrigger[]): void {
+  private persistAndEmitAlerts(
+    triggers: AlertTrigger[],
+    options?: {
+      source?: EmittedAlertSource;
+    },
+  ): void {
     if (triggers.length === 0) {
       return;
     }
+    const source = options?.source ?? 'realtime';
     const ruleById = new Map(this.uiRules.map((rule) => [rule.id, rule]));
     const enriched = triggers.map((trigger) => {
       const marketSnapshot = trigger.marketId
@@ -1032,17 +1382,61 @@ export class WorkerRuntime {
         severity: severityToUi(trigger.severity),
         acknowledged: false,
         soundProfileId: ruleById.get(trigger.ruleId)?.soundProfileId ?? '',
+        source,
       });
     }
     this.queueDashboardTick();
   }
 
-  private runCurrentRuleCheck(maxAlerts = CURRENT_RULE_SCAN_ALERT_LIMIT): void {
+  private maybeRunStartupRuleCheck(nowMs = Date.now()): void {
+    if (this.startupRuleCheckCompleted || !this.serviceStarted || !this.hasSuccessfulDiscovery) {
+      return;
+    }
+
+    const hasEnabledMarketRules = this.engineRules.some(
+      (rule) => rule.enabled && rule.metric !== 'feed_stale',
+    );
+    const hasEnabledFeedRules = this.engineRules.some(
+      (rule) => rule.enabled && rule.metric === 'feed_stale',
+    );
+
+    if (!hasEnabledMarketRules && !hasEnabledFeedRules) {
+      this.startupRuleCheckCompleted = true;
+      return;
+    }
+
+    if (hasEnabledMarketRules) {
+      const hasFreshMarketState = Array.from(this.latestTokenStateById.values()).some(
+        (state) => nowMs - state.lastMessageAt <= STARTUP_RULE_SCAN_MAX_STATE_AGE_MS,
+      );
+      if (!hasFreshMarketState) {
+        return;
+      }
+    } else if (hasEnabledFeedRules && this.feedState.list().length === 0) {
+      return;
+    }
+
+    this.startupRuleCheckCompleted = true;
+    this.runCurrentRuleCheck(CURRENT_RULE_SCAN_ALERT_LIMIT, {
+      nowMs,
+      latestStateFilter: (state) => nowMs - state.lastMessageAt <= STARTUP_RULE_SCAN_MAX_STATE_AGE_MS,
+      source: 'startup-scan',
+    });
+  }
+
+  private runCurrentRuleCheck(
+    maxAlerts = CURRENT_RULE_SCAN_ALERT_LIMIT,
+    options?: {
+      nowMs?: number;
+      latestStateFilter?: (state: DbLatestTokenState) => boolean;
+      source?: EmittedAlertSource;
+    },
+  ): void {
     if (maxAlerts <= 0 || this.engineRules.every((rule) => !rule.enabled)) {
       return;
     }
 
-    const nowMs = Date.now();
+    const nowMs = options?.nowMs ?? Date.now();
     const triggers: AlertTrigger[] = [];
     const appendTriggers = (nextTriggers: AlertTrigger[]) => {
       const remaining = maxAlerts - triggers.length;
@@ -1061,6 +1455,9 @@ export class WorkerRuntime {
 
     if (triggers.length < maxAlerts) {
       for (const state of this.latestTokenStateById.values()) {
+        if (options?.latestStateFilter && !options.latestStateFilter(state)) {
+          continue;
+        }
         const meta = this.tokenMetaById.get(state.tokenId);
         if (!meta) {
           continue;
@@ -1095,15 +1492,18 @@ export class WorkerRuntime {
       }
     }
 
-    this.persistAndEmitAlerts(triggers);
+    this.persistAndEmitAlerts(triggers, {
+      source: options?.source ?? 'realtime',
+    });
   }
 
   private queryMarkets(query: MarketQuery | undefined): MarketQueryResult {
     const rows = this.buildMarketRows();
+    const today = getTodayDateKey();
     let filtered = rows;
 
     if (query?.cityKey) {
-      filtered = filtered.filter((row) => row.cityKey === query.cityKey);
+      filtered = filtered.filter((row) => marketRowMatchesSearch(row, query.cityKey ?? ''));
     }
     if (query?.eventDate) {
       filtered = filtered.filter((row) => row.eventDate === query.eventDate);
@@ -1117,9 +1517,21 @@ export class WorkerRuntime {
       );
     }
 
+    if (!query?.eventDate) {
+      const decisionUsefulRows = filtered.filter((row) => isDecisionUsefulMarketRow(row, today));
+      filtered =
+        decisionUsefulRows.length > 0
+          ? decisionUsefulRows
+          : filtered.filter((row) => row.status !== 'resolved' && row.eventDate >= today);
+    }
+
     const sortBy = query?.sortBy ?? 'updatedAt';
     const sortDir = query?.sortDir ?? 'desc';
     filtered = filtered.sort((left, right) => {
+      const lifecycleOrder = compareMarketLifecycle(left, right, today);
+      if (lifecycleOrder !== 0) {
+        return lifecycleOrder;
+      }
       const direction = sortDir === 'asc' ? 1 : -1;
       const toComparable = (row: MarketRow): number =>
         sortBy === 'volume24h'
@@ -1129,7 +1541,11 @@ export class WorkerRuntime {
             : sortBy === 'spread'
               ? row.spread ?? -1
               : Date.parse(row.updatedAt);
-      return (toComparable(left) - toComparable(right)) * direction;
+      const sortOrder = (toComparable(left) - toComparable(right)) * direction;
+      if (sortOrder !== 0) {
+        return sortOrder;
+      }
+      return left.marketId.localeCompare(right.marketId);
     });
 
     const limit = Math.max(1, Math.min(query?.limit ?? 2000, 2000));
@@ -1141,21 +1557,33 @@ export class WorkerRuntime {
 
   private queryDashboard(query: DashboardQuery | undefined): DashboardSnapshot {
     const rows = this.buildMarketRows();
+    const today = getTodayDateKey();
     const availableDates = Array.from(new Set(rows.map((row) => row.eventDate))).sort((left, right) =>
       right.localeCompare(left),
     );
+    const decisionUsefulDates = Array.from(
+      new Set(
+        rows
+          .filter((row) => isDecisionUsefulMarketRow(row, today))
+          .map((row) => row.eventDate),
+      ),
+    ).sort((left, right) => left.localeCompare(right));
+    const fallbackFutureDates = Array.from(
+      new Set(
+        rows
+          .filter((row) => row.status !== 'resolved' && row.eventDate >= today)
+          .map((row) => row.eventDate),
+      ),
+    ).sort((left, right) => left.localeCompare(right));
     const requestedDate = query?.eventDate?.trim() ?? '';
     const selectedDate = availableDates.includes(requestedDate)
       ? requestedDate
-      : (availableDates[0] ?? requestedDate);
+      : (decisionUsefulDates[0] ?? fallbackFutureDates[0] ?? requestedDate);
     const scope = query?.scope ?? 'risk';
     const rowsForDate = selectedDate
       ? rows.filter((row) => row.eventDate === selectedDate)
       : [];
-    const unackedAlerts = this.repository.queryAlertEvents({
-      acknowledged: false,
-      limit: 5000,
-    });
+    const unackedAlerts = this.queryAllAlertEventRows({ acknowledged: false });
     const unackedCountByMarketId = new Map<string, number>();
     const unackedCountByCityKey = new Map<string, number>();
     const alertsByMarketId = new Map<string, typeof unackedAlerts>();
@@ -1284,17 +1712,17 @@ export class WorkerRuntime {
     };
   }
 
-  private listAlerts(query: { limit?: number; acknowledged?: boolean } | undefined): {
-    rows: AlertEvent[];
-    total: number;
-  } {
-    const rows = this.repository.queryAlertEvents({
-      limit: query?.limit ?? 200,
+  private listAlerts(
+    query: WorkerInvokePayloadMap['alerts.list'],
+  ): AlertListResult {
+    const result = this.repository.queryAlertEvents({
+      limit: query?.limit ?? ALERT_EVENT_PAGE_LIMIT_DEFAULT,
       acknowledged: query?.acknowledged,
+      cursor: parseAlertListCursor(query?.cursor),
     });
     const ruleById = new Map(this.uiRules.map((rule) => [rule.id, rule]));
     return {
-      rows: rows.map((row) => ({
+      rows: result.rows.map((row) => ({
         id: row.id,
         ruleId: row.ruleId,
         builtinKey: (row.builtinKey as BuiltinRuleKey | null | undefined) ?? undefined,
@@ -1323,8 +1751,39 @@ export class WorkerRuntime {
         acknowledged: row.acknowledged,
         soundProfileId: ruleById.get(row.ruleId)?.soundProfileId ?? '',
       })),
-      total: rows.length,
+      total: result.total,
+      hasMore: result.hasMore,
+      nextCursor: toAlertListCursor(result.nextCursor),
     };
+  }
+
+  private queryAllAlertEventRows(
+    query: Omit<AlertEventQuery, 'cursor' | 'limit'> = {},
+  ): DbAlertEventRow[] {
+    const rows: DbAlertEventRow[] = [];
+    let cursor: AlertEventQuery['cursor'];
+    let previousCursorKey: string | undefined;
+
+    for (;;) {
+      const page = this.repository.queryAlertEvents({
+        ...query,
+        limit: ALERT_EVENT_PAGE_LIMIT_MAX,
+        cursor,
+      });
+      rows.push(...page.rows);
+
+      if (!page.hasMore || !page.nextCursor) {
+        return rows;
+      }
+
+      const nextCursorKey = `${page.nextCursor.triggeredAt}:${page.nextCursor.id}`;
+      if (nextCursorKey === previousCursorKey) {
+        return rows;
+      }
+
+      previousCursorKey = nextCursorKey;
+      cursor = page.nextCursor;
+    }
   }
 
   private ackAlerts(payload: WorkerInvokePayloadMap['alerts.ack']): { ok: true; updated: number } {
@@ -1425,7 +1884,9 @@ export class WorkerRuntime {
     this.uiRules = nextRules;
     this.engineRules = nextRules.map((rule) => mapUiRuleToEngine(rule));
     this.repository.upsertAlertRules(this.engineRules);
-    this.runCurrentRuleCheck();
+    this.runCurrentRuleCheck(CURRENT_RULE_SCAN_ALERT_LIMIT, {
+      source: 'rules-save-scan',
+    });
     this.recomputeBubbleScores();
     this.emitBubbleScoreTicks();
     this.queueDashboardTick();
@@ -1443,7 +1904,11 @@ export class WorkerRuntime {
       isBuiltin: profile.isBuiltin,
       isDefault: profile.id === settings.selectedSoundProfileId,
     }));
-    return { settings, soundProfiles };
+    return {
+      settings,
+      soundProfiles,
+      storageMaintenance: { ...this.maintenanceSummary },
+    };
   }
 
   private updateSettings(patch: Partial<AppSettings>): SettingsPayload {
@@ -1451,9 +1916,23 @@ export class WorkerRuntime {
     const nextSettings = {
       ...previousSettings,
       ...patch,
+      tickRetentionDays: normalizeTickRetentionDays(
+        patch.tickRetentionDays ?? previousSettings.tickRetentionDays,
+      ),
+      alertRetentionDays: normalizeAlertRetentionDays(
+        patch.alertRetentionDays ?? previousSettings.alertRetentionDays,
+      ),
     };
     this.writeSettings(nextSettings);
+    const retentionChanged =
+      nextSettings.tickRetentionDays !== previousSettings.tickRetentionDays ||
+      nextSettings.alertRetentionDays !== previousSettings.alertRetentionDays;
     this.refreshRulesSync();
+    if (retentionChanged) {
+      void this.runStorageMaintenance('settings-update', {
+        allowCompaction: true,
+      }).catch(() => undefined);
+    }
     return this.getSettingsPayload();
   }
 
@@ -1618,6 +2097,12 @@ export class WorkerRuntime {
         (read('reconnectPolicy', DEFAULT_SETTINGS.reconnectPolicy) as AppSettings['reconnectPolicy']) ??
         DEFAULT_SETTINGS.reconnectPolicy,
       pollIntervalSec: Number(read('pollIntervalSec', String(DEFAULT_SETTINGS.pollIntervalSec))),
+      tickRetentionDays: normalizeTickRetentionDays(
+        read('tickRetentionDays', String(DEFAULT_SETTINGS.tickRetentionDays)),
+      ),
+      alertRetentionDays: normalizeAlertRetentionDays(
+        read('alertRetentionDays', String(DEFAULT_SETTINGS.alertRetentionDays)),
+      ),
       selectedSoundProfileId: read(
         'selectedSoundProfileId',
         DEFAULT_SETTINGS.selectedSoundProfileId,
@@ -1646,6 +2131,16 @@ export class WorkerRuntime {
     this.repository.upsertAppSetting({
       key: APP_SETTING_KEYS.pollIntervalSec,
       value: String(settings.pollIntervalSec),
+      updatedAt: Date.now(),
+    });
+    this.repository.upsertAppSetting({
+      key: APP_SETTING_KEYS.tickRetentionDays,
+      value: String(normalizeTickRetentionDays(settings.tickRetentionDays)),
+      updatedAt: Date.now(),
+    });
+    this.repository.upsertAppSetting({
+      key: APP_SETTING_KEYS.alertRetentionDays,
+      value: String(normalizeAlertRetentionDays(settings.alertRetentionDays)),
       updatedAt: Date.now(),
     });
     this.repository.upsertAppSetting({
@@ -1752,6 +2247,7 @@ export class WorkerRuntime {
     }
     return {
       cityName: row.cityName,
+      airportCode: row.airportCode,
       eventDate: row.eventDate,
       temperatureBand: row.temperatureBand,
       yesPrice: row.yesPrice,
@@ -1959,18 +2455,221 @@ export class WorkerRuntime {
     this.repository.insertPriceTicks(batch);
   }
 
-    private startMaintenanceLoop(): void {
-      if (this.maintenanceTimer) {
-        return;
+  private runTickArchiveMaintenance(
+    retentionDays = this.readSettings().tickRetentionDays,
+    options?: { allowCompaction?: boolean },
+  ): TickArchiveMaintenanceRunSummary {
+    const normalizedRetentionDays = normalizeTickRetentionDays(retentionDays);
+    this.flushPriceTicks();
+
+    const archiveRepository = this.repository as TickArchiveMaintenanceRepository;
+    const archiveCutoffTimestamp =
+      Date.now() - normalizedRetentionDays * 24 * 60 * 60 * 1000;
+    const archiveTickHistory =
+      archiveRepository.archiveAndPrunePriceTicks ??
+      archiveRepository.maintainPriceTickArchive ??
+      archiveRepository.maintainPriceTicks;
+
+    let totalArchivedRows = 0;
+    let totalPrunedRows = 0;
+    let totalAggregateRows = 0;
+    let checkpointSuggested = false;
+    let compactSuggested = false;
+    let batchCount = 0;
+
+    let shouldContinue = true;
+    while (shouldContinue) {
+      const rawResult = archiveRepository.archivePriceTicks
+        ? archiveRepository.archivePriceTicks.call(this.repository, {
+            cutoffTimestamp: archiveCutoffTimestamp,
+            batchSize: TICK_ARCHIVE_BATCH_SIZE,
+          })
+        : archiveTickHistory
+          ? archiveTickHistory.call(this.repository, normalizedRetentionDays)
+          : this.repository.prunePriceTicks(normalizedRetentionDays);
+      const maintenanceResult = normalizeTickArchiveMaintenanceResult(rawResult);
+
+      totalArchivedRows += maintenanceResult.archivedRows;
+      totalPrunedRows += maintenanceResult.prunedRows;
+      totalAggregateRows += maintenanceResult.aggregateRows;
+      checkpointSuggested ||= maintenanceResult.checkpointSuggested;
+      compactSuggested ||= maintenanceResult.compactSuggested;
+      batchCount += 1;
+
+      shouldContinue =
+        maintenanceResult.hasMore &&
+        maintenanceResult.changedRows > 0 &&
+        batchCount < MAX_TICK_ARCHIVE_BATCHES_PER_RUN;
+    }
+
+    const changedRows = totalArchivedRows + totalPrunedRows + totalAggregateRows;
+    if (changedRows <= 0) {
+      return {
+        changedRows: 0,
+        archivedRows: 0,
+        prunedRows: 0,
+        aggregateRows: 0,
+        checkpointed: false,
+        compacted: false,
+      };
+    }
+
+    if (
+      compactSuggested ||
+      (options?.allowCompaction &&
+        totalPrunedRows >= STORAGE_COMPACTION_PRUNE_THRESHOLD)
+    ) {
+      this.repository.compactDatabase();
+      return {
+        changedRows,
+        archivedRows: totalArchivedRows,
+        prunedRows: totalPrunedRows,
+        aggregateRows: totalAggregateRows,
+        checkpointed: false,
+        compacted: true,
+      };
+    }
+
+    if (checkpointSuggested) {
+      this.repository.checkpointWal();
+      return {
+        changedRows,
+        archivedRows: totalArchivedRows,
+        prunedRows: totalPrunedRows,
+        aggregateRows: totalAggregateRows,
+        checkpointed: true,
+        compacted: false,
+      };
+    }
+
+    return {
+      changedRows,
+      archivedRows: totalArchivedRows,
+      prunedRows: totalPrunedRows,
+      aggregateRows: totalAggregateRows,
+      checkpointed: false,
+      compacted: false,
+    };
+  }
+
+  private pruneAlertHistory(
+    retentionDays = this.readSettings().alertRetentionDays,
+    options?: { allowCompaction?: boolean },
+  ): AlertHistoryMaintenanceRunSummary {
+    const prunedRows = this.repository.pruneAlertEvents(normalizeAlertRetentionDays(retentionDays));
+    if (prunedRows <= 0) {
+      return {
+        prunedRows: 0,
+        checkpointed: false,
+        compacted: false,
+      };
+    }
+
+    if (options?.allowCompaction && prunedRows >= STORAGE_COMPACTION_PRUNE_THRESHOLD) {
+      this.repository.compactDatabase();
+      return {
+        prunedRows,
+        checkpointed: false,
+        compacted: true,
+      };
+    }
+
+    this.repository.checkpointWal();
+    return {
+      prunedRows,
+      checkpointed: true,
+      compacted: false,
+    };
+  }
+
+  private runStorageMaintenance(
+    reason: Exclude<StorageMaintenanceSummary['lastReason'], null>,
+    options?: { allowCompaction?: boolean },
+  ): Promise<StorageMaintenanceResult> {
+    if (this.maintenanceInFlight) {
+      return this.maintenanceInFlight;
+    }
+
+    const startedAtMs = Date.now();
+    const startedAtIso = new Date(startedAtMs).toISOString();
+    this.maintenanceSummary = {
+      ...this.maintenanceSummary,
+      status: 'running',
+      lastRunAt: startedAtIso,
+      lastDurationMs: null,
+      lastReason: reason,
+      lastError: null,
+    };
+
+    this.maintenanceInFlight = (async () => {
+      try {
+        const tickSummary = this.runTickArchiveMaintenance(undefined, options);
+        const alertSummary = this.pruneAlertHistory(undefined, options);
+        const finishedAtIso = new Date().toISOString();
+        const didCheckpoint = tickSummary.checkpointed || alertSummary.checkpointed;
+        const didCompact = tickSummary.compacted || alertSummary.compacted;
+        this.maintenanceSummary = {
+          ...this.maintenanceSummary,
+          status: 'success',
+          lastRunAt: startedAtIso,
+          lastSuccessAt: finishedAtIso,
+          lastDurationMs: Date.now() - startedAtMs,
+          lastArchivedRows: tickSummary.archivedRows,
+          lastPrunedTickRows: tickSummary.prunedRows,
+          lastPrunedAlertRows: alertSummary.prunedRows,
+          lastCheckpointAt: didCheckpoint
+            ? finishedAtIso
+            : this.maintenanceSummary.lastCheckpointAt,
+          lastCompactionAt: didCompact
+            ? finishedAtIso
+            : this.maintenanceSummary.lastCompactionAt,
+          lastReason: reason,
+          lastError: null,
+        };
+        return {
+          summary: { ...this.maintenanceSummary },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.maintenanceSummary = {
+          ...this.maintenanceSummary,
+          status: 'error',
+          lastRunAt: startedAtIso,
+          lastDurationMs: Date.now() - startedAtMs,
+          lastReason: reason,
+          lastError: message,
+        };
+        throw error;
+      } finally {
+        this.maintenanceInFlight = null;
       }
-      this.maintenanceTimer = setInterval(() => {
-        const retentionSetting = this.repository.queryAppSetting('tickRetentionDays')?.value;
-        const retentionDays = Number(retentionSetting ?? '7');
-        const normalizedDays =
-          Number.isFinite(retentionDays) && retentionDays > 0 ? retentionDays : 7;
-        this.repository.prunePriceTicks(normalizedDays);
-      this.marketState.pruneOlderThan(Date.now() - 24 * 60 * 60 * 1000);
-      this.prunePriceWindows(Date.now() - PRICE_CHANGE_WINDOW_MS);
+    })();
+
+    return this.maintenanceInFlight;
+  }
+
+  private startMaintenanceLoop(): void {
+    if (this.maintenanceTimer) {
+      return;
+    }
+
+    if (this.startupMaintenanceTimer) {
+      clearTimeout(this.startupMaintenanceTimer);
+    }
+    this.startupMaintenanceTimer = setTimeout(() => {
+      this.startupMaintenanceTimer = undefined;
+      void this.runStorageMaintenance('startup').catch(() => undefined);
+    }, STARTUP_MAINTENANCE_DELAY_MS);
+    this.startupMaintenanceTimer.unref?.();
+
+    this.maintenanceTimer = setInterval(() => {
+      try {
+        this.marketState.pruneOlderThan(Date.now() - 24 * 60 * 60 * 1000);
+        this.prunePriceWindows(Date.now() - PRICE_CHANGE_WINDOW_MS);
+        void this.runStorageMaintenance('scheduled').catch(() => undefined);
+      } catch (error) {
+        console.error('[worker-runtime] scheduled maintenance failed', error);
+      }
     }, MAINTENANCE_INTERVAL_MS);
     this.maintenanceTimer.unref?.();
   }

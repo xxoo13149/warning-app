@@ -15,6 +15,10 @@ const hookInvokeChannels = [
   'alerts.ack',
   'rules.list',
   'rules.save',
+  'storage.clearCache',
+  'storage.createBackup',
+  'storage.createDiagnostics',
+  'storage.runMaintenance',
   'settings.get',
   'settings.update',
   'settings.importCityMap',
@@ -63,6 +67,18 @@ describe('ipc contract alignment', () => {
     });
 
     hookEventChannels.forEach((channel) => {
+      if (channel === 'app.health') {
+        const subscribePattern = new RegExp(`coreClient\\.on\\(\\s*'${escapeRegExp(channel)}'`);
+        const setHealthPattern = /setRuntimeHealth\(payload\)/;
+        const appShellEmitPattern = new RegExp(`emitEvent\\(\\s*'${escapeRegExp(channel)}'`);
+        const shellWiringPattern = /setRuntimeHealth:\s*setHealth/;
+        expect(subscribePattern.test(registerHandlerSource)).toBe(true);
+        expect(setHealthPattern.test(registerHandlerSource)).toBe(true);
+        expect(appShellEmitPattern.test(appShellSource)).toBe(true);
+        expect(shellWiringPattern.test(appShellSource)).toBe(true);
+        return;
+      }
+
       if (channel === 'app.controlState') {
         const pattern = new RegExp(`emitEvent\\(\\s*'${escapeRegExp(channel)}'`);
         expect(pattern.test(appShellSource)).toBe(true);

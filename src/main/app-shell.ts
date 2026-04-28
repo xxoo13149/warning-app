@@ -1,13 +1,15 @@
 import { app, BrowserWindow } from 'electron';
 import path from 'node:path';
 
-import { APP_NAME } from '../shared/constants';
-import type { AppControlState, StartupPhase } from '@/shared/contracts';
+import { APP_NAME, APP_USER_MODEL_ID } from '../shared/constants';
+import type { AppControlState } from '@/shared/contracts';
 import {
   DEFAULT_CONTROL_STATE,
   DEFAULT_HEALTH,
   DEFAULT_STARTUP_STATUS,
   EMPTY_SETTINGS_PAYLOAD,
+  type AppNavigateEvent,
+  type AlertTriggeredEvent,
   type EventChannel,
   type EventPayloadMap,
   type RuntimeState,
@@ -18,22 +20,55 @@ import {
   CORE_WORKER_HEALTH_INVOKE_TIMEOUT_MS,
   CoreWorkerClient,
 } from './services/core-worker-client';
+import { AlertDispatchPolicy } from './services/alert-dispatch-policy';
+import { resolveAlertSoundPlan } from './services/alert-sound';
 import { ElectronNotificationService } from './services/notification-service';
+import { ShutdownCoordinator } from './services/shutdown-coordinator';
 import { detectSystemProxyUrl } from './services/system-proxy';
 import { AppTray } from './services/tray-service';
+import { createRuntimeLogger } from './services/runtime-log';
+import { LifecycleRunGate } from './services/lifecycle-run-gate';
+import {
+  APPLICATION_QUITTING_REASON,
+  deriveStartupProgressPhase,
+  getRuntimeHealthReason,
+  markMonitorStoppedByUser,
+  markRuntimeFailed,
+  markRuntimeStarting,
+  markShutdownBegin,
+  markWorkerErrorFailed,
+  MONITOR_STOPPED_BY_USER_REASON,
+  syncControlStateWithHealth,
+} from './services/runtime-control-state';
+import type { RuntimePaths } from './services/runtime-paths';
+import { inspectRuntimeStorageSummary } from './services/runtime-storage';
 
 interface AppShellState {
-  isQuitting: boolean;
   mainWindow: BrowserWindow | null;
   runtime: RuntimeState;
 }
 
+type RendererNavigationRoute = AppNavigateEvent['target'];
+type RendererNavigationSource = 'notification-click' | 'tray';
+
+interface RendererNavigationPayload extends AppNavigateEvent {
+  source: RendererNavigationSource;
+  alertId?: string;
+  ruleId?: string;
+  severity?: AlertTriggeredEvent['severity'];
+  triggeredAt?: string;
+}
+
+const RENDERER_NAVIGATION_CHANNEL = 'app.navigate';
 const STARTUP_MAX_ATTEMPTS = 2;
 const STARTUP_POLL_INTERVAL_MS = 500;
 const STARTUP_RETRY_DELAY_MS = 800;
 const HEALTH_CHECK_TIMEOUT_MS = CORE_WORKER_HEALTH_INVOKE_TIMEOUT_MS + 500;
 const STARTUP_ATTEMPT_TIMEOUT_MS =
   (HEALTH_CHECK_TIMEOUT_MS + STARTUP_POLL_INTERVAL_MS) * 2 + STARTUP_RETRY_DELAY_MS;
+const ALERT_SOUND_TIMEOUT_MS = 1_500;
+const ALERT_NOTIFICATION_BURST_WINDOW_MS = 15_000;
+const ALERT_NOTIFICATION_BURST_LIMIT = 6;
 
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => {
@@ -123,51 +158,12 @@ const resolveBuiltinSoundDir = (): string =>
     ? path.join(process.resourcesPath, 'assets', 'sounds')
     : path.join(process.cwd(), 'assets', 'sounds');
 
-const parseClockTimeToMinutes = (value: string): number | null => {
-  const match = value.trim().match(/^(\d{1,2}):(\d{2})$/);
-  if (!match) {
-    return null;
-  }
-
-  const hours = Number(match[1]);
-  const minutes = Number(match[2]);
-  if (
-    !Number.isInteger(hours) ||
-    !Number.isInteger(minutes) ||
-    hours < 0 ||
-    hours > 23 ||
-    minutes < 0 ||
-    minutes > 59
-  ) {
-    return null;
-  }
-
-  return hours * 60 + minutes;
-};
-
-const isQuietHoursActive = (
-  settings: Pick<RuntimeState['settingsPayload']['settings'], 'quietHoursStart' | 'quietHoursEnd'>,
-): boolean => {
-  const start = parseClockTimeToMinutes(settings.quietHoursStart);
-  const end = parseClockTimeToMinutes(settings.quietHoursEnd);
-  if (start === null || end === null) {
-    return false;
-  }
-  if (start === end) {
-    return true;
-  }
-
-  const now = new Date();
-  const current = now.getHours() * 60 + now.getMinutes();
-  return start < end ? current >= start && current < end : current >= start || current < end;
-};
-
-export const bootstrapAppShell = async (): Promise<void> => {
+export const bootstrapAppShell = async (runtimePaths: RuntimePaths): Promise<void> => {
   app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
-  app.setAppUserModelId('com.polymarket.weather-monitor');
+  app.setName(APP_NAME);
+  app.setAppUserModelId(APP_USER_MODEL_ID);
 
   const shellState: AppShellState = {
-    isQuitting: false,
     mainWindow: null,
     runtime: {
       health: { ...DEFAULT_HEALTH },
@@ -175,25 +171,60 @@ export const bootstrapAppShell = async (): Promise<void> => {
         ...DEFAULT_CONTROL_STATE,
         startupStatus: { ...DEFAULT_STARTUP_STATUS },
       },
-      settingsPayload: { ...EMPTY_SETTINGS_PAYLOAD },
+      settingsPayload: {
+        ...EMPTY_SETTINGS_PAYLOAD,
+        storageSummary: inspectRuntimeStorageSummary(runtimePaths),
+      },
     },
   };
+  const logStartup = createRuntimeLogger('startup.log', runtimePaths.logsDir, 'app-shell');
+  const logNotification = createRuntimeLogger(
+    'notification.log',
+    runtimePaths.logsDir,
+    'notification',
+  );
 
   const audioWindow = new HiddenAudioWindow();
   const tray = new AppTray();
-  const notificationService = new ElectronNotificationService();
+  const notificationService = new ElectronNotificationService({
+    log: logNotification,
+  });
+  const alertDispatchPolicy = new AlertDispatchPolicy({
+    burstWindowMs: ALERT_NOTIFICATION_BURST_WINDOW_MS,
+    burstLimit: ALERT_NOTIFICATION_BURST_LIMIT,
+  });
   const proxyUrl = detectSystemProxyUrl();
   const coreClient = new CoreWorkerClient({
-    dbPath: path.join(app.getPath('userData'), 'polymarket-weather-monitor.sqlite'),
+    dbPath: runtimePaths.mainDbPath,
     proxyUrl,
     builtinSoundDir: resolveBuiltinSoundDir(),
   });
   let startupTask: Promise<AppControlState> | null = null;
+  const lifecycleRunGate = new LifecycleRunGate();
+  let shutdownCoordinator: ShutdownCoordinator<AppControlState> | null = null;
+  let detachRuntimeEventForwarders: (() => void) | null = null;
+  let focusMainWindowOnReady = false;
 
   const getState = (): RuntimeState => shellState.runtime;
   const setState = (updater: (prev: RuntimeState) => RuntimeState): void => {
     shellState.runtime = updater(shellState.runtime);
   };
+  const isShutdownRequested = (): boolean => {
+    const coordinator = shutdownCoordinator;
+    return lifecycleRunGate.isShutdownRequested() ||
+      (coordinator ? coordinator.isShuttingDown() || coordinator.canQuitApp() : false);
+  };
+  const nextLifecycleGeneration = (): number => lifecycleRunGate.beginRun();
+  const invalidateLifecycleGeneration = (
+    reason: string,
+    options?: { shutdown?: boolean },
+  ): number => {
+    const generation = lifecycleRunGate.invalidate(reason, options);
+    logStartup(`Lifecycle generation invalidated: ${reason}.`);
+    return generation;
+  };
+  const isLifecycleGenerationCurrent = (generation: number): boolean =>
+    lifecycleRunGate.isCurrent(generation) && !isShutdownRequested();
 
   const emitEvent = <C extends EventChannel>(channel: C, payload: EventPayloadMap[C]): void => {
     if (!shellState.mainWindow || shellState.mainWindow.isDestroyed()) {
@@ -201,6 +232,59 @@ export const bootstrapAppShell = async (): Promise<void> => {
     }
 
     shellState.mainWindow.webContents.send(channel, payload);
+  };
+
+  const emitRendererNavigation = (
+    window: BrowserWindow,
+    payload: RendererNavigationPayload,
+  ): void => {
+    const sendNavigation = (): void => {
+      if (window.isDestroyed() || window.webContents.isDestroyed()) {
+        return;
+      }
+      window.webContents.send(RENDERER_NAVIGATION_CHANNEL, payload);
+    };
+
+    if (window.webContents.isLoading()) {
+      window.webContents.once('did-finish-load', sendNavigation);
+      return;
+    }
+
+    sendNavigation();
+  };
+
+  const showMainWindowAndNavigate = (payload: RendererNavigationPayload): void => {
+    if (!shellState.mainWindow || shellState.mainWindow.isDestroyed()) {
+      shellState.mainWindow = createManagedMainWindow();
+    }
+
+    showWindow(shellState.mainWindow);
+    emitRendererNavigation(shellState.mainWindow, payload);
+  };
+
+  const showTrayRoute = (route: RendererNavigationRoute): void => {
+    showMainWindowAndNavigate({
+      target: route,
+      source: 'tray',
+    });
+  };
+
+  const emitRuntimeSnapshot = (): void => {
+    emitEvent('app.controlState', getState().controlState);
+    emitEvent('app.health', getState().health);
+  };
+
+  const runTrayRuntimeAction = async (
+    action: () => AppControlState | Promise<AppControlState>,
+  ): Promise<void> => {
+    try {
+      await action();
+    } catch (error) {
+      logStartup('Tray runtime action failed.', error);
+    } finally {
+      emitRuntimeSnapshot();
+      tray.refresh();
+    }
   };
 
   const updateControlState = (
@@ -213,114 +297,72 @@ export const bootstrapAppShell = async (): Promise<void> => {
     }));
     notificationService.setEnabled(nextState.notificationsEnabled);
     emitEvent('app.controlState', nextState);
+    tray.refresh();
     return nextState;
   };
 
-  const coerceStartupPhase = (
-    phase: AppControlState['startupStatus']['phase'] | 'connecting' | 'discovering',
-  ): AppControlState['startupStatus']['phase'] =>
-    phase as AppControlState['startupStatus']['phase'];
+  const logNotificationEvent = (
+    event: string,
+    details?: Record<string, unknown>,
+    error?: unknown,
+  ): void => {
+    logNotification(
+      JSON.stringify({
+        event,
+        ...(details ?? {}),
+      }),
+      error,
+    );
+  };
 
-  const isStartupTrackingPhase = (
-    phase: AppControlState['startupStatus']['phase'],
-  ): boolean =>
-    phase === 'starting' ||
-    phase === 'retrying' ||
-    phase === coerceStartupPhase('connecting') ||
-    phase === coerceStartupPhase('discovering');
+  const suspendAlertDispatch = (reason: string): void => {
+    const changed = alertDispatchPolicy.suspend(reason);
+    notificationService.closeAll();
+    if (changed) {
+      logNotificationEvent('alert.dispatch_gate', {
+        state: 'suspended',
+        reason,
+      });
+    }
+  };
 
-  const deriveStartupProgressPhase = (
+  const resumeAlertDispatch = (reason: string): void => {
+    if (!alertDispatchPolicy.resume()) {
+      return;
+    }
+    logNotificationEvent('alert.dispatch_gate', {
+      state: 'open',
+      reason,
+    });
+  };
+
+  const getWindowNotificationState = (): {
+    visible: boolean;
+    focused: boolean;
+  } => {
+    const mainWindow = shellState.mainWindow;
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      return {
+        visible: false,
+        focused: false,
+      };
+    }
+    return {
+      visible: mainWindow.isVisible(),
+      focused: mainWindow.isFocused(),
+    };
+  };
+
+  const patchHealth = (
     health: RuntimeState['health'],
-    fallbackPhase: AppControlState['startupStatus']['phase'],
-  ): AppControlState['startupStatus']['phase'] => {
-    if (!health.workerRunning) {
-      return fallbackPhase === 'stopped' ? 'stopped' : 'failed';
-    }
-
-    if (health.connected || health.startupPhase === 'running') {
-      return 'ready';
-    }
-
-    const service = health.serviceStatus;
-    if (service?.discovery === 'discovering' || service?.discovery === 'idle') {
-      return coerceStartupPhase('discovering');
-    }
-
-    if (
-      service?.websocket === 'connecting' ||
-      service?.websocket === 'partial' ||
-      service?.discovery === 'ready' ||
-      service?.discovery === 'empty'
-    ) {
-      return coerceStartupPhase('connecting');
-    }
-
-    if (fallbackPhase === 'retrying') {
-      return 'retrying';
-    }
-
-    return coerceStartupPhase('connecting');
-  };
-
-  const getHealthReason = (health: RuntimeState['health']): string | null => {
-    if (health.connected) {
-      return null;
-    }
-    const service = health.serviceStatus;
-    if (!health.workerRunning) {
-      return 'core-worker-not-running';
-    }
-    if (typeof service?.lastError === 'string' && service.lastError.trim()) {
-      return service.lastError.trim();
-    }
-    if (typeof health.diagnostic === 'string' && health.diagnostic.trim()) {
-      return health.diagnostic.trim();
-    }
-    if (service?.discovery === 'discovering') {
-      return 'discovering';
-    }
-    if (service?.discovery === 'empty') {
-      return 'discovery-empty';
-    }
-    if (service?.discovery === 'error') {
-      return 'discovery-failed';
-    }
-    if (service?.websocket === 'connecting') {
-      return 'connecting';
-    }
-    if (service?.websocket === 'partial') {
-      return 'partial-connectivity';
-    }
-    if (service?.websocket === 'disconnected') {
-      return service.discovery === 'ready'
-        ? 'websocket-disconnected'
-        : 'awaiting-websocket';
-    }
-    if (
-      typeof health.reason === 'string' &&
-      health.reason.trim() &&
-      health.reason !== 'not-started'
-    ) {
-      return health.reason;
-    }
-    if (health.shardTotal === 0) {
-      return 'awaiting-websocket-shards';
-    }
-    if (health.shardActive === 0) {
-      return 'no-active-shards';
-    }
-    return 'feed-degraded';
-  };
-
-const patchHealth = (
-  health: RuntimeState['health'],
-  overrides?: {
+    overrides?: {
       reason?: string | null;
       startupPhase?: RuntimeState['health']['startupPhase'];
       diagnostic?: string | null;
     },
   ): RuntimeState['health'] => {
-    const reason = overrides?.reason !== undefined ? overrides.reason : getHealthReason(health);
+    const reason =
+      overrides?.reason !== undefined ? overrides.reason : getRuntimeHealthReason(health);
     const startupPhase = overrides?.startupPhase ?? (
       coreClient.isRunning()
         ? health.connected
@@ -332,85 +374,22 @@ const patchHealth = (
       overrides?.diagnostic !== undefined
         ? overrides.diagnostic
         : reason ?? health.diagnostic ?? null;
-  return {
-    ...health,
-    reason,
-    workerRunning: coreClient.isRunning(),
-    startupPhase,
-    diagnostic,
-  };
-};
-
-  const resolveStartupHealthReason = (health: RuntimeState['health']): string | null => {
-    if (health.connected) {
-      return null;
-    }
-    if (typeof health.diagnostic === 'string' && health.diagnostic.trim()) {
-      return health.diagnostic.trim();
-    }
-    const inferred = getHealthReason(health);
-    if (inferred) {
-      return inferred;
-    }
-    return null;
+    return {
+      ...health,
+      reason,
+      workerRunning: coreClient.isRunning(),
+      startupPhase,
+      diagnostic,
+    };
   };
 
   const syncStartupStatusWithHealth = (health: RuntimeState['health']): void => {
-    updateControlState((previous) => {
-      const current = previous.startupStatus;
-      const shouldTrackStartup =
-        previous.coreProcessRunning ||
-        isStartupTrackingPhase(current.phase);
-
-      if (!shouldTrackStartup) {
-        return previous;
-      }
-
-      let nextCoreProcessRunning = previous.coreProcessRunning;
-      let nextPhase: StartupPhase = current.phase;
-      let nextReason = current.healthReason;
-      let nextLastError = current.lastError;
-
-      if (!health.workerRunning) {
-        const fallbackReason = resolveStartupHealthReason(health) ?? 'worker-not-running';
-        nextCoreProcessRunning = false;
-        nextPhase = current.phase === 'stopped' ? 'stopped' : 'failed';
-        nextReason = fallbackReason;
-        nextLastError = fallbackReason;
-      } else if (health.connected || health.startupPhase === 'running') {
-        nextCoreProcessRunning = true;
-        nextPhase = 'ready';
-        nextReason = null;
-        nextLastError = null;
-      } else {
-        nextCoreProcessRunning = true;
-        nextPhase = deriveStartupProgressPhase(health, current.phase);
-        nextReason = resolveStartupHealthReason(health);
-        nextLastError = null;
-      }
-
-      const changed =
-        previous.coreProcessRunning !== nextCoreProcessRunning ||
-        current.phase !== nextPhase ||
-        current.healthReason !== nextReason ||
-        current.lastError !== nextLastError;
-
-      if (!changed) {
-        return previous;
-      }
-
-      return {
-        ...previous,
-        coreProcessRunning: nextCoreProcessRunning,
-        startupStatus: {
-          ...current,
-          phase: nextPhase,
-          healthReason: nextReason,
-          lastError: nextLastError,
-          updatedAt: new Date().toISOString(),
-        },
-      };
-    });
+    updateControlState((previous) =>
+      syncControlStateWithHealth(previous, health, {
+        shutdownRequested: isShutdownRequested(),
+        updatedAt: new Date().toISOString(),
+      }),
+    );
   };
 
   const setHealth = (nextHealth: RuntimeState['health']): void => {
@@ -424,11 +403,16 @@ const patchHealth = (
 
   const updateStartupStatus = (
     updater: (previous: AppControlState['startupStatus']) => AppControlState['startupStatus'],
-  ): AppControlState =>
-    updateControlState((previous) => ({
+  ): AppControlState => {
+    if (isShutdownRequested()) {
+      return getState().controlState;
+    }
+
+    return updateControlState((previous) => ({
       ...previous,
       startupStatus: updater(previous.startupStatus),
     }));
+  };
 
   const markStartupStatus = (patch: Partial<AppControlState['startupStatus']>): AppControlState =>
     updateStartupStatus((previous) => ({
@@ -444,7 +428,7 @@ const patchHealth = (
       mode: 'degraded' as const,
       lastSyncAt: new Date().toISOString(),
       droppedEvents: (getState().health.droppedEvents ?? 0) + 1,
-      reason: reason ?? getHealthReason(getState().health) ?? 'feed-degraded',
+      reason: reason ?? getRuntimeHealthReason(getState().health) ?? 'feed-degraded',
     };
     const patched = patchHealth(degraded, {
       reason: degraded.reason,
@@ -455,8 +439,10 @@ const patchHealth = (
     return patched;
   };
 
-  const refreshWorkerSnapshot = async (): Promise<RuntimeState['health']> => {
-    const [settingsPayload, health] = await Promise.all([
+  const refreshWorkerSnapshot = async (
+    generation?: number,
+  ): Promise<RuntimeState['health']> => {
+    const [workerSettingsPayload, health] = await Promise.all([
       coreClient.invoke('settings.get'),
       withTimeout(
         coreClient.invoke('app.getHealth'),
@@ -464,8 +450,15 @@ const patchHealth = (
         'health-check-timeout',
       ),
     ]);
+    if (generation !== undefined && !isLifecycleGenerationCurrent(generation)) {
+      throw new Error('startup-cancelled');
+    }
+    const settingsPayload = {
+      ...workerSettingsPayload,
+      storageSummary: inspectRuntimeStorageSummary(runtimePaths),
+    };
     const patchedHealth = patchHealth(health, {
-      reason: health.connected ? null : getHealthReason(health),
+      reason: health.connected ? null : getRuntimeHealthReason(health),
     });
     setState((previous) => ({
       ...previous,
@@ -481,6 +474,7 @@ const patchHealth = (
   const waitForStartupReady = async (
     attempt: number,
     fallbackPhase: AppControlState['startupStatus']['phase'],
+    generation: number,
   ): Promise<
     | {
       ok: true;
@@ -489,23 +483,29 @@ const patchHealth = (
       phase: AppControlState['startupStatus']['phase'];
       reason: string | null;
     }
-    | { ok: false; reason: string }
+    | { ok: false; reason: string; cancelled?: boolean }
   > => {
     const deadline = Date.now() + STARTUP_ATTEMPT_TIMEOUT_MS;
     let lastReason = 'startup-pending';
 
     while (Date.now() < deadline) {
+      if (!isLifecycleGenerationCurrent(generation)) {
+        return { ok: false, reason: 'startup-cancelled', cancelled: true };
+      }
       try {
         const health = await withTimeout(
           coreClient.invoke('app.getHealth'),
           HEALTH_CHECK_TIMEOUT_MS,
           `health-check-timeout(attempt=${attempt})`,
         );
+        if (!isLifecycleGenerationCurrent(generation)) {
+          return { ok: false, reason: 'startup-cancelled', cancelled: true };
+        }
         const patchedHealth = patchHealth(health, {
-          reason: health.connected ? null : getHealthReason(health),
+          reason: health.connected ? null : getRuntimeHealthReason(health),
         });
         setHealth(patchedHealth);
-        const healthReason = getHealthReason(patchedHealth);
+        const healthReason = getRuntimeHealthReason(patchedHealth);
         const progressPhase = deriveStartupProgressPhase(patchedHealth, fallbackPhase);
         markStartupStatus({
           phase: progressPhase,
@@ -528,11 +528,14 @@ const patchHealth = (
             health: patchedHealth,
             feedReady: false,
             phase: progressPhase,
-            reason: healthReason ?? resolveStartupHealthReason(patchedHealth) ?? 'startup-pending',
+            reason: healthReason ?? 'startup-pending',
           };
         }
         lastReason = healthReason ?? 'startup-pending';
       } catch (error) {
+        if (!isLifecycleGenerationCurrent(generation)) {
+          return { ok: false, reason: 'startup-cancelled', cancelled: true };
+        }
         lastReason = `health-check-failed: ${toErrorMessage(error, 'unknown-error')}`;
         emitDegradedHealth(lastReason);
         markStartupStatus({
@@ -552,25 +555,25 @@ const patchHealth = (
     };
   };
 
-  const runStartMonitoring = async (): Promise<AppControlState> => {
+  const runStartMonitoring = async (generation: number): Promise<AppControlState> => {
     const startedAt = new Date().toISOString();
-    updateControlState((previous) => ({
-      ...previous,
-      coreProcessRunning: false,
-      startupStatus: {
-        ...previous.startupStatus,
-        phase: 'starting',
-        attempts: 0,
+    if (!isLifecycleGenerationCurrent(generation)) {
+      return getState().controlState;
+    }
+    updateControlState((previous) =>
+      markRuntimeStarting(previous, {
         maxAttempts: STARTUP_MAX_ATTEMPTS,
         startedAt,
         updatedAt: startedAt,
-        healthReason: 'startup-begin',
-        lastError: null,
-      },
-    }));
+      }),
+    );
 
     for (let attempt = 1; attempt <= STARTUP_MAX_ATTEMPTS; attempt += 1) {
+      if (!isLifecycleGenerationCurrent(generation)) {
+        return getState().controlState;
+      }
       const phase = attempt === 1 ? 'starting' : 'retrying';
+      logStartup(`Starting core worker attempt ${attempt}/${STARTUP_MAX_ATTEMPTS}.`);
       markStartupStatus({
         phase,
         attempts: attempt,
@@ -582,13 +585,27 @@ const patchHealth = (
       if (coreClient.isRunning()) {
         await coreClient.stop().catch(() => undefined);
       }
+      if (!isLifecycleGenerationCurrent(generation)) {
+        return getState().controlState;
+      }
       coreClient.start();
 
       const startupResult = await waitForStartupReady(
         attempt,
-        phase === 'starting' ? coerceStartupPhase('connecting') : phase,
+        phase === 'starting' ? 'connecting' : phase,
+        generation,
       );
+      if (
+        (!startupResult.ok && startupResult.cancelled) ||
+        !isLifecycleGenerationCurrent(generation)
+      ) {
+        logStartup(`Core worker startup attempt ${attempt} cancelled.`);
+        return getState().controlState;
+      }
       if (startupResult.ok) {
+        logStartup(
+          `Core worker startup attempt ${attempt} completed. feedReady=${String(startupResult.feedReady)} phase=${startupResult.phase} reason=${startupResult.reason ?? 'none'}`,
+        );
         const nextState = updateControlState((previous) => ({
           ...previous,
           coreProcessRunning: true,
@@ -603,8 +620,12 @@ const patchHealth = (
             lastError: null,
           },
         }));
-        void refreshWorkerSnapshot().catch((error) => {
+        void refreshWorkerSnapshot(generation).catch((error) => {
+          if (!isLifecycleGenerationCurrent(generation)) {
+            return;
+          }
           const reason = `snapshot-refresh-failed:${toErrorMessage(error, 'unknown-error')}`;
+          logStartup('Refreshing worker snapshot failed after startup.', error);
           emitDegradedHealth(reason);
           markStartupStatus({
             phase: 'ready',
@@ -615,7 +636,11 @@ const patchHealth = (
         return nextState;
       }
 
+      if (!isLifecycleGenerationCurrent(generation)) {
+        return getState().controlState;
+      }
       emitDegradedHealth(startupResult.reason);
+      logStartup(`Core worker startup attempt ${attempt} failed: ${startupResult.reason}`);
       markStartupStatus({
         phase: attempt < STARTUP_MAX_ATTEMPTS ? 'retrying' : 'failed',
         attempts: attempt,
@@ -632,23 +657,22 @@ const patchHealth = (
     }
 
     await coreClient.stop().catch(() => undefined);
+    if (!isLifecycleGenerationCurrent(generation)) {
+      return getState().controlState;
+    }
     const failedReason =
       getState().controlState.startupStatus.lastError ?? 'startup-failed-without-reason';
+    logStartup(`Core worker startup exhausted retries: ${failedReason}`);
     emitDegradedHealth(failedReason);
-    updateControlState((previous) => ({
-      ...previous,
-      coreProcessRunning: false,
-      startupStatus: {
-        ...previous.startupStatus,
-        phase: 'failed',
+    updateControlState((previous) =>
+      markRuntimeFailed(previous, {
         attempts: STARTUP_MAX_ATTEMPTS,
         maxAttempts: STARTUP_MAX_ATTEMPTS,
         startedAt: previous.startupStatus.startedAt ?? startedAt,
         updatedAt: new Date().toISOString(),
-        healthReason: failedReason,
-        lastError: failedReason,
-      },
-    }));
+        reason: failedReason,
+      }),
+    );
     throw new Error(`STARTUP_TIMEOUT: ${failedReason}`);
   };
 
@@ -659,64 +683,269 @@ const patchHealth = (
     }));
 
   const startMonitoring = async (): Promise<AppControlState> => {
+    if (isShutdownRequested()) {
+      return getState().controlState;
+    }
     if (startupTask) {
       return startupTask;
     }
-    startupTask = runStartMonitoring().finally(() => {
-      startupTask = null;
+    const generation = nextLifecycleGeneration();
+    resumeAlertDispatch('monitor-starting');
+    const task = runStartMonitoring(generation).finally(() => {
+      if (startupTask === task) {
+        startupTask = null;
+      }
     });
+    startupTask = task;
     return startupTask;
   };
 
   const stopMonitoring = async (): Promise<AppControlState> => {
-    await coreClient.stop();
-    emitDegradedHealth('monitor-stopped-by-user');
-    return updateControlState((previous) => ({
-      ...previous,
-      coreProcessRunning: false,
-      startupStatus: {
-        ...previous.startupStatus,
-        phase: 'stopped',
-        attempts: 0,
+    const stopGeneration = invalidateLifecycleGeneration('monitor-stopping');
+    startupTask = null;
+    suspendAlertDispatch('monitor-stopping');
+    const stoppedState = updateControlState((previous) =>
+      markMonitorStoppedByUser(previous, {
         maxAttempts: STARTUP_MAX_ATTEMPTS,
-        startedAt: null,
         updatedAt: new Date().toISOString(),
-        healthReason: 'monitor-stopped-by-user',
-        lastError: null,
-      },
-    }));
+      }),
+    );
+    await coreClient.stop();
+    if (!isLifecycleGenerationCurrent(stopGeneration)) {
+      return getState().controlState;
+    }
+    emitDegradedHealth(MONITOR_STOPPED_BY_USER_REASON);
+    return updateControlState((previous) =>
+      markMonitorStoppedByUser(previous, {
+        maxAttempts: STARTUP_MAX_ATTEMPTS,
+        updatedAt: new Date().toISOString(),
+      }),
+    ) ?? stoppedState;
   };
 
-  const quitApplication = (): AppControlState => {
-    const nextState = updateControlState((previous) => ({
-      ...previous,
-      coreProcessRunning: false,
-      startupStatus: {
-        ...previous.startupStatus,
-        phase: 'stopped',
-        attempts: 0,
-        maxAttempts: STARTUP_MAX_ATTEMPTS,
-        startedAt: null,
+  const handleCoreWorkerError = (error: Error): void => {
+    if (isShutdownRequested()) {
+      return;
+    }
+
+    suspendAlertDispatch('worker-error');
+    const errorMessage = toErrorMessage(error, 'unknown-error');
+    const reason = `worker-error:${errorMessage}`;
+    logStartup(`Core worker emitted fatal error: ${reason}`, error);
+    updateControlState((previous) =>
+      markWorkerErrorFailed(previous, {
         updatedAt: new Date().toISOString(),
-        healthReason: 'application-quitting',
-        lastError: null,
+        errorMessage,
+      }),
+    );
+    emitDegradedHealth(reason);
+    console.error('[core-worker]', error);
+  };
+
+  const handleIncomingAlert = async (alert: EventPayloadMap['alerts.new']): Promise<void> => {
+    const runtime = getState();
+    const windowState = getWindowNotificationState();
+    const shutdownRequested = isShutdownRequested();
+    const { initialDecision, toastDecision, quietHoursActive } = alertDispatchPolicy.resolve({
+      runtime,
+      alert,
+      windowState,
+      shutdownRequested,
+    });
+    logNotificationEvent('alert.received', {
+      alertId: alert.id,
+      ruleId: alert.ruleId,
+      source: alert.source ?? 'realtime',
+      severity: alert.severity,
+      triggeredAt: alert.triggeredAt,
+      decision: initialDecision.reason,
+      toastDecision: toastDecision.reason,
+      notificationsEnabled: runtime.controlState.notificationsEnabled,
+      quietHoursActive,
+      shutdownRequested,
+      windowVisible: windowState.visible,
+      windowFocused: windowState.focused,
+    });
+    if (!initialDecision.allowed) {
+      return;
+    }
+
+    const soundPlan = resolveAlertSoundPlan(runtime, alert);
+    const silentToast = soundPlan.notificationSilentByDefault || soundPlan.shouldAttemptPlayback;
+
+    if (!toastDecision.allowed) {
+      logNotificationEvent('alert.toast_suppressed', {
+        alertId: alert.id,
+        ruleId: alert.ruleId,
+        source: alert.source ?? 'realtime',
+        reason: toastDecision.reason,
+      });
+    } else {
+      notificationService.notifyAlert(alert, {
+        silent: silentToast,
+        alertId: alert.id,
+        source: alert.source,
+        onClick: ({ alert: clickedAlert, alertId }) => {
+          const targetAlert = clickedAlert ?? alert;
+          showMainWindowAndNavigate({
+            target: 'alerts',
+            source: 'notification-click',
+            alertId: alertId ?? targetAlert.id,
+            ruleId: targetAlert.ruleId,
+            severity: targetAlert.severity,
+            triggeredAt: targetAlert.triggeredAt,
+          });
+        },
+      });
+      alertDispatchPolicy.recordNotification();
+      logNotificationEvent('alert.notified', {
+        alertId: alert.id,
+        ruleId: alert.ruleId,
+        source: alert.source ?? 'realtime',
+        silent: silentToast,
+        notificationSilentByDefault: soundPlan.notificationSilentByDefault,
+        playbackRequested: soundPlan.shouldAttemptPlayback,
+      });
+    }
+
+    void (async () => {
+      if (!soundPlan.shouldAttemptPlayback) {
+        logNotificationEvent('alert.sound_result', {
+          alertId: alert.id,
+          source: alert.source ?? 'realtime',
+          attempted: false,
+          played: false,
+          timedOut: false,
+          gain: soundPlan.gain,
+          filePath: soundPlan.filePath,
+        });
+        return;
+      }
+
+      try {
+        const playedAlertSound = await withTimeout(
+          audioWindow.playFromPath(soundPlan.filePath, soundPlan.gain),
+          ALERT_SOUND_TIMEOUT_MS,
+          'alert-sound-timeout',
+        );
+        logNotificationEvent('alert.sound_result', {
+          alertId: alert.id,
+          source: alert.source ?? 'realtime',
+          attempted: true,
+          played: playedAlertSound,
+          timedOut: false,
+          gain: soundPlan.gain,
+          filePath: soundPlan.filePath,
+        });
+      } catch (error) {
+        logNotificationEvent(
+          'alert.sound_result',
+          {
+            alertId: alert.id,
+            source: alert.source ?? 'realtime',
+            attempted: true,
+            played: false,
+            timedOut: true,
+            gain: soundPlan.gain,
+            filePath: soundPlan.filePath,
+          },
+          error,
+        );
+      }
+    })();
+  };
+
+  const detachForegroundAlertSideEffects = (): void => {
+    coreClient.off('error', handleCoreWorkerError);
+    coreClient.off('alerts.new', handleIncomingAlert);
+    detachRuntimeEventForwarders?.();
+    detachRuntimeEventForwarders = null;
+  };
+
+  shutdownCoordinator = new ShutdownCoordinator<AppControlState>({
+    beginShutdown: () => {
+      invalidateLifecycleGeneration(APPLICATION_QUITTING_REASON, { shutdown: true });
+      startupTask = null;
+      suspendAlertDispatch('application-quitting');
+      logNotificationEvent('shutdown.begin', {
+        stage: 'preparing',
+      });
+      const nextState = updateControlState((previous) =>
+        markShutdownBegin(previous, {
+          maxAttempts: STARTUP_MAX_ATTEMPTS,
+          updatedAt: new Date().toISOString(),
+        }),
+      );
+
+      emitDegradedHealth(APPLICATION_QUITTING_REASON);
+      return nextState;
+    },
+    getSteps: () => [
+      {
+        name: 'detach-alert-side-effects',
+        run: () => {
+          logNotificationEvent('shutdown.step', {
+            step: 'detach-alert-side-effects',
+          });
+          detachForegroundAlertSideEffects();
+        },
       },
-    }));
-    shellState.isQuitting = true;
-    setTimeout(() => {
+      {
+        name: 'core-worker',
+        run: async () => {
+          logNotificationEvent('shutdown.step', {
+            step: 'core-worker',
+          });
+          await coreClient.stop().catch(() => undefined);
+        },
+      },
+      {
+        name: 'notifications',
+        run: () => {
+          logNotificationEvent('shutdown.step', {
+            step: 'notifications',
+          });
+          notificationService.destroy();
+        },
+      },
+      {
+        name: 'tray',
+        run: () => {
+          tray.destroy();
+        },
+      },
+      {
+        name: 'audio-window',
+        run: () => {
+          audioWindow.destroy();
+        },
+      },
+    ],
+    requestQuit: () => {
       app.quit();
-    }, 0);
-    return nextState;
+    },
+    forceExit: (exitCode) => {
+      app.exit(exitCode);
+    },
+  });
+  const requestAppShutdown = (): Promise<AppControlState> => {
+    invalidateLifecycleGeneration('shutdown-requested', { shutdown: true });
+    startupTask = null;
+    suspendAlertDispatch('shutdown-requested');
+    const coordinator = shutdownCoordinator;
+    return coordinator ? coordinator.requestShutdown() : Promise.resolve(getState().controlState);
   };
 
   const createManagedMainWindow = (): BrowserWindow => {
     const mainWindow = createMainWindow();
     mainWindow.on('close', (event) => {
-      if (shellState.isQuitting) {
+      if (isShutdownRequested()) {
         return;
       }
       event.preventDefault();
-      mainWindow.hide();
+      suspendAlertDispatch('main-window-close');
+      logStartup('Main window close requested full application shutdown.');
+      void requestAppShutdown();
     });
 
     mainWindow.on('closed', () => {
@@ -727,25 +956,12 @@ const patchHealth = (
   };
 
   const onReady = (): void => {
-    coreClient.on('error', (error) => {
-      const reason = `worker-error:${toErrorMessage(error, 'unknown-error')}`;
-      updateControlState((previous) => ({
-        ...previous,
-        coreProcessRunning: false,
-        startupStatus: {
-          ...previous.startupStatus,
-          phase: 'failed',
-          updatedAt: new Date().toISOString(),
-          healthReason: reason,
-          lastError: reason,
-        },
-      }));
-      emitDegradedHealth(reason);
-      console.error('[core-worker]', error);
-    });
+    coreClient.on('error', handleCoreWorkerError);
+    resumeAlertDispatch('app-ready');
 
     void startMonitoring().catch((error) => {
       const reason = `startup-on-ready-failed:${toErrorMessage(error, 'unknown-error')}`;
+      logStartup(`startMonitoring failed during app ready: ${reason}`, error);
       emitDegradedHealth(reason);
       markStartupStatus({
         phase: 'failed',
@@ -756,70 +972,93 @@ const patchHealth = (
       console.error('[startup]', error);
     });
 
-    shellState.mainWindow = createManagedMainWindow();
+    if (!shellState.mainWindow || shellState.mainWindow.isDestroyed()) {
+      shellState.mainWindow = createManagedMainWindow();
+    } else {
+      showWindow(shellState.mainWindow);
+    }
+    if (focusMainWindowOnReady) {
+      logStartup('Applying deferred main window reveal from second-instance request.');
+      showWindow(shellState.mainWindow);
+      focusMainWindowOnReady = false;
+    }
     audioWindow.create();
 
     tray.create({
-      showMainWindow: () => showWindow(shellState.mainWindow),
-      quitApp: () => {
-        quitApplication();
+      showDashboard: () => showTrayRoute('dashboard'),
+      showAlerts: () => showTrayRoute('alerts'),
+      showMarketOverview: () => showTrayRoute('explorer'),
+      showRulesSettings: () => showTrayRoute('rules'),
+      setNotificationsEnabled: (enabled) => {
+        void runTrayRuntimeAction(() => setNotificationsEnabled(enabled));
       },
+      startMonitoring: () => {
+        void runTrayRuntimeAction(startMonitoring);
+      },
+      stopMonitoring: () => {
+        void runTrayRuntimeAction(stopMonitoring);
+      },
+      quitApp: () => {
+        void requestAppShutdown();
+      },
+      getControlState: () => getState().controlState,
     });
 
-    registerIpcHandlers({
+    detachRuntimeEventForwarders = registerIpcHandlers({
       coreClient,
+      runtimePaths,
       getRuntimeState: getState,
       setRuntimeState: setState,
+      setRuntimeHealth: setHealth,
       emitEvent,
       getControlState: () => getState().controlState,
       setNotificationsEnabled,
       startMonitoring,
       stopMonitoring,
-      quitApplication,
-      previewSoundFromPath: (filePath, gain) => audioWindow.playFromPath(filePath, gain),
+      quitApplication: requestAppShutdown,
+      previewSoundFromPath: (filePath, gain) => audioWindow.previewFromPath(filePath, gain),
     });
 
-    coreClient.on('alerts.new', async (alert) => {
-      const runtime = getState();
-      if (!runtime.controlState.notificationsEnabled) {
-        return;
-      }
-      if (isQuietHoursActive(runtime.settingsPayload.settings)) {
-        return;
-      }
-
-      notificationService.notifyAlert(alert);
-      const selectedSoundId =
-        alert.soundProfileId?.trim() || runtime.settingsPayload.settings.selectedSoundProfileId;
-      const selectedSound = runtime.settingsPayload.soundProfiles.find(
-        (profile) => profile.id === selectedSoundId,
-      );
-      if (runtime.settingsPayload.settings.backgroundAudio && selectedSound?.filePath) {
-        await audioWindow.playFromPath(selectedSound.filePath, selectedSound.gain);
-      }
-    });
+    coreClient.on('alerts.new', handleIncomingAlert);
   };
 
-  app.on('before-quit', () => {
-    updateControlState((previous) => ({
-      ...previous,
-      coreProcessRunning: false,
-      startupStatus: {
-        ...previous.startupStatus,
-        phase: 'stopped',
-        attempts: 0,
-        maxAttempts: STARTUP_MAX_ATTEMPTS,
-        startedAt: null,
-        updatedAt: new Date().toISOString(),
-        healthReason: 'application-quitting',
-        lastError: null,
-      },
-    }));
-    emitDegradedHealth('application-quitting');
-    shellState.isQuitting = true;
+  app.on('before-quit', (event) => {
+    if (shutdownCoordinator?.canQuitApp()) {
+      return;
+    }
+    event.preventDefault();
+    void requestAppShutdown();
+  });
+
+  app.on('second-instance', () => {
+    if (isShutdownRequested()) {
+      logStartup('Second instance requested during shutdown; ignoring.');
+      return;
+    }
+
+    if (!app.isReady()) {
+      focusMainWindowOnReady = true;
+      logStartup('Second instance requested before app ready; deferring main window reveal.');
+      return;
+    }
+
+    if (!shellState.mainWindow || shellState.mainWindow.isDestroyed()) {
+      focusMainWindowOnReady = true;
+      logStartup('Second instance requested without an existing main window; creating one.');
+      shellState.mainWindow = createManagedMainWindow();
+      return;
+    }
+
+    focusMainWindowOnReady = false;
+    logStartup('Second instance requested; focusing existing main window.');
+    showWindow(shellState.mainWindow);
   });
 
   app.on('activate', () => {
+    if (isShutdownRequested()) {
+      return;
+    }
+
     if (!shellState.mainWindow || shellState.mainWindow.isDestroyed()) {
       shellState.mainWindow = createManagedMainWindow();
       return;
@@ -832,12 +1071,18 @@ const patchHealth = (
     if (process.platform === 'darwin') {
       return;
     }
+    if (shutdownCoordinator?.canQuitApp()) {
+      return;
+    }
+    logStartup('window-all-closed fired; requesting full application shutdown.');
+    void requestAppShutdown();
   });
 
   app.on('quit', () => {
-    tray.destroy();
-    audioWindow.destroy();
-    void coreClient.stop();
+    logNotificationEvent('shutdown.complete', {
+      stage: 'finished',
+    });
+    shutdownCoordinator?.markQuitComplete();
   });
 
   await app.whenReady();

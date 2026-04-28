@@ -10,7 +10,7 @@ const packageDir = path.resolve(
   projectRoot,
   '..',
   'warning-app-artifacts',
-  'Polymarket Weather Monitor-win32-x64',
+  '天气监控-win32-x64',
 );
 const targetExe = path.join(packageDir, 'PolymarketWeatherMonitor.exe');
 
@@ -28,22 +28,34 @@ const powershellScript = String.raw`
 $ErrorActionPreference = 'Stop'
 $targetExe = $env:WARNING_APP_SHORTCUT_TARGET
 $workingDir = $env:WARNING_APP_SHORTCUT_WORKDIR
-$description = '天气预警台'
+$description = '天气监控'
 
 $desktopDir = [Environment]::GetFolderPath('DesktopDirectory')
 $programsDir = [Environment]::GetFolderPath('Programs')
 
 $shortcuts = @()
+$legacyShortcuts = @()
 if ($desktopDir) {
   $shortcuts += [PSCustomObject]@{
-    Path = Join-Path $desktopDir '天气.lnk'
+    Path = Join-Path $desktopDir '天气监控.lnk'
     Label = '桌面快捷方式'
   }
+  $legacyShortcuts += (Join-Path $desktopDir '天气.lnk')
+  $legacyShortcuts += (Join-Path $desktopDir 'Electron.lnk')
+  $legacyShortcuts += (Join-Path $desktopDir 'Polymarket Weather Monitor.lnk')
 }
 if ($programsDir) {
   $shortcuts += [PSCustomObject]@{
-    Path = Join-Path $programsDir 'Polymarket Weather Monitor.lnk'
+    Path = Join-Path $programsDir '天气监控.lnk'
     Label = '开始菜单快捷方式'
+  }
+  $legacyShortcuts += (Join-Path $programsDir 'Electron.lnk')
+  $legacyShortcuts += (Join-Path $programsDir 'Polymarket Weather Monitor.lnk')
+}
+
+foreach ($legacyPath in $legacyShortcuts) {
+  if (Test-Path -LiteralPath $legacyPath) {
+    Remove-Item -LiteralPath $legacyPath -Force -ErrorAction SilentlyContinue
   }
 }
 

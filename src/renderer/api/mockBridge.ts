@@ -1,6 +1,8 @@
 import type { AppControlState, StartupStatus } from '@/shared/contracts';
 import type {
   AlertEvent,
+  AlertListQuery,
+  AlertListResult,
   AlertRule,
   AppHealth,
   AppSettings,
@@ -9,11 +11,25 @@ import type {
   MarketQueryResult,
   MarketRow,
   RegisterSoundPayload,
+  RuntimeDiagnosticsPackageResult,
+  StorageMaintenanceResult,
+  StorageMaintenanceSummary,
+  RuntimeStorageSummary,
   RulePreviewResult,
   SettingsPayload,
+  StorageBackupResult,
+  StorageCleanupResult,
   SoundProfile,
 } from '../types/contracts';
 import type { WarningApiBridge, BridgeListener } from '../types/bridge';
+import {
+  DEFAULT_ALERT_RETENTION_DAYS,
+  DEFAULT_TICK_RETENTION_DAYS,
+  MAX_ALERT_RETENTION_DAYS,
+  MAX_TICK_RETENTION_DAYS,
+  MIN_ALERT_RETENTION_DAYS,
+  MIN_TICK_RETENTION_DAYS,
+} from '../../shared/constants';
 import { BUILTIN_DEFAULT_SOUND_ID, BUILTIN_SOUND_LIBRARY } from '../../shared/sound-library';
 import {
   createBuiltinRuleTemplateMap,
@@ -26,6 +42,27 @@ type ListenerMap = Map<string, Set<BridgeListener<unknown>>>;
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 const createId = () => globalThis.crypto?.randomUUID?.() ?? `mock-${Date.now().toString(36)}`;
+const normalizeTickRetentionDays = (value: number | undefined): number => {
+  const parsed = typeof value === 'number' ? value : Number.NaN;
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_TICK_RETENTION_DAYS;
+  }
+  return Math.max(
+    MIN_TICK_RETENTION_DAYS,
+    Math.min(MAX_TICK_RETENTION_DAYS, Math.trunc(parsed)),
+  );
+};
+
+const normalizeAlertRetentionDays = (value: number | undefined): number => {
+  const parsed = typeof value === 'number' ? value : Number.NaN;
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_ALERT_RETENTION_DAYS;
+  }
+  return Math.max(
+    MIN_ALERT_RETENTION_DAYS,
+    Math.min(MAX_ALERT_RETENTION_DAYS, Math.trunc(parsed)),
+  );
+};
 
 const nowIso = () => new Date().toISOString();
 const today = () => nowIso().slice(0, 10);
@@ -174,6 +211,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   backgroundAudio: true,
   reconnectPolicy: 'balanced',
   pollIntervalSec: 60,
+  tickRetentionDays: DEFAULT_TICK_RETENTION_DAYS,
+  alertRetentionDays: DEFAULT_ALERT_RETENTION_DAYS,
   selectedSoundProfileId: BUILTIN_DEFAULT_SOUND_ID,
   quietHoursStart: '23:00',
   quietHoursEnd: '06:00',
@@ -223,6 +262,52 @@ const DEFAULT_CONTROL_STATE: AppControlState = {
   startupStatus: DEFAULT_STARTUP_STATUS,
 };
 
+const buildMockStorageSummary = (
+  alerts: AlertEvent[],
+  overrides: Partial<RuntimeStorageSummary> = {},
+): RuntimeStorageSummary => ({
+  dataRootDir: 'D:\\天气监控-data',
+  mainDbPath: 'D:\\天气监控-data\\db\\main.sqlite',
+  archiveDir: 'D:\\天气监控-data\\db\\archive',
+  backupDir: 'D:\\天气监控-data\\backup',
+  sessionDataDir: 'D:\\天气监控-data\\session-data',
+  logsDir: 'D:\\天气监控-data\\logs',
+  mainDbExists: true,
+  mainDbSizeBytes: 128 * 1024 * 1024,
+  totalSizeBytes: 216 * 1024 * 1024,
+  databaseSizeBytes: 128 * 1024 * 1024,
+  archiveSizeBytes: 36 * 1024 * 1024,
+  backupSizeBytes: 28 * 1024 * 1024,
+  sessionDataSizeBytes: 20 * 1024 * 1024,
+  logsSizeBytes: 4 * 1024 * 1024,
+  cleanableSizeBytes: 18 * 1024 * 1024,
+  cleanableEntryCount: 6,
+  sessionPersistentSizeBytes: 2 * 1024 * 1024,
+  archiveFileCount: 3,
+  backupFileCount: 2,
+  logFileCount: 5,
+  latestLogAt: nowIso(),
+  canClearCache: true,
+  lastCleanupAt: null,
+  priceTickCount: 54_913,
+  alertEventCount: alerts.length,
+  latestPriceTickAt: nowIso(),
+  latestAlertAt: alerts[0]?.triggeredAt ?? null,
+  lastActivityAt: alerts[0]?.triggeredAt ?? nowIso(),
+  latestMainBackupPath: 'D:\\天气监控-data\\backup\\main-backup-20260424-013500.sqlite',
+  latestMainBackupAt: nowIso(),
+  latestBackupPath: 'D:\\天气监控-data\\backup\\main-backup-20260424-013500.sqlite',
+  latestBackupAt: nowIso(),
+  ...overrides,
+});
+
+const buildMockStorageBackupResult = (
+  storageSummary: RuntimeStorageSummary,
+): StorageBackupResult => ({
+  backupPath: 'D:\\天气监控-data\\backup\\main-backup-20260424-013500.sqlite',
+  storageSummary,
+});
+
 const createMockSoundProfiles = (): SoundProfile[] =>
   BUILTIN_SOUND_LIBRARY.map((sound) => ({
     id: sound.id,
@@ -268,7 +353,7 @@ const matchesMarketQuery = (row: MarketRow, query: MarketQuery | undefined) => {
   if (!query) {
     return true;
   }
-  if (query.cityKey && row.cityKey !== query.cityKey) {
+  if (query.cityKey && !matchesMarketSearch(row, query.cityKey)) {
     return false;
   }
   if (query.eventDate && row.eventDate !== query.eventDate) {
@@ -281,6 +366,58 @@ const matchesMarketQuery = (row: MarketRow, query: MarketQuery | undefined) => {
     return false;
   }
   return true;
+};
+
+const MOCK_MARKET_SEARCH_ALIASES: Record<string, string[]> = {
+  guangzhou: ['can', '广州', '廣州', 'baiyun'],
+  shanghai: ['pvg', 'sha', '上海'],
+  tokyo: ['tyo', 'hnd', 'nrt', '东京', '東京'],
+  'new-york': ['nyc', 'jfk', 'lga', 'ewr', '纽约', '紐約'],
+  nyc: ['new-york', 'new york', 'jfk', 'lga', 'ewr', '纽约', '紐約'],
+};
+
+const normalizeMarketSearch = (value: string | null | undefined) =>
+  (value ?? '').trim().toLocaleLowerCase();
+
+const compactMarketSearch = (value: string) => normalizeMarketSearch(value).replace(/[\s_-]+/g, '');
+
+const matchesMarketField = (value: string | null | undefined, search: string, compactSearch: string) => {
+  const normalized = normalizeMarketSearch(value);
+  return Boolean(
+    normalized &&
+      (normalized.includes(search) || compactMarketSearch(normalized).includes(compactSearch)),
+  );
+};
+
+const matchesMarketSearch = (row: MarketRow, rawSearch: string) => {
+  const search = normalizeMarketSearch(rawSearch);
+  if (!search) {
+    return true;
+  }
+
+  const compactSearch = compactMarketSearch(search);
+  const aliases =
+    MOCK_MARKET_SEARCH_ALIASES[row.cityKey] ??
+    MOCK_MARKET_SEARCH_ALIASES[compactMarketSearch(row.cityKey)] ??
+    [];
+  return [row.cityKey, row.cityName, row.airportCode, row.marketId, row.temperatureBand, ...aliases].some(
+    (value) => matchesMarketField(value, search, compactSearch),
+  );
+};
+
+const isDecisionUsefulMarketRow = (row: MarketRow, today: string) =>
+  row.status === 'active' && row.eventDate >= today;
+
+const filterDecisionUsefulMarkets = (rows: MarketRow[], query: MarketQuery | undefined) => {
+  if (query?.eventDate) {
+    return rows;
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  const decisionUsefulRows = rows.filter((row) => isDecisionUsefulMarketRow(row, today));
+  return decisionUsefulRows.length > 0
+    ? decisionUsefulRows
+    : rows.filter((row) => row.status !== 'resolved' && row.eventDate >= today);
 };
 
 const sortMarketRows = (rows: MarketRow[], query: MarketQuery | undefined) => {
@@ -296,6 +433,55 @@ const sortMarketRows = (rows: MarketRow[], query: MarketQuery | undefined) => {
     }
     return leftValue > rightValue ? direction : -direction;
   });
+};
+
+const compareAlertsByNewest = (left: AlertEvent, right: AlertEvent) => {
+  const leftTime = Date.parse(left.triggeredAt);
+  const rightTime = Date.parse(right.triggeredAt);
+  if (leftTime !== rightTime) {
+    return rightTime - leftTime;
+  }
+  return right.id.localeCompare(left.id);
+};
+
+const buildAlertListResult = (
+  alerts: AlertEvent[],
+  query: AlertListQuery | undefined,
+): AlertListResult => {
+  const limit = Math.max(1, Math.min(query?.limit ?? 200, 500));
+  const filtered = alerts.filter((alert) =>
+    query?.acknowledged === undefined
+      ? true
+      : alert.acknowledged === query.acknowledged,
+  );
+  const ordered = [...filtered].sort(compareAlertsByNewest);
+  const cursorTriggeredAt = query?.cursor?.triggeredAt
+    ? Date.parse(query.cursor.triggeredAt)
+    : Number.NaN;
+  const cursorId = query?.cursor?.id ?? '';
+  const pageItems = Number.isFinite(cursorTriggeredAt) && cursorId
+    ? ordered.filter((alert) => {
+        const triggeredAt = Date.parse(alert.triggeredAt);
+        return (
+          triggeredAt < cursorTriggeredAt ||
+          (triggeredAt === cursorTriggeredAt && alert.id.localeCompare(cursorId) < 0)
+        );
+      })
+    : ordered;
+  const rows = pageItems.slice(0, limit);
+  const last = rows.at(-1);
+
+  return {
+    rows: clone(rows),
+    total: ordered.length,
+    hasMore: pageItems.length > limit,
+    nextCursor: last
+      ? {
+          triggeredAt: last.triggeredAt,
+          id: last.id,
+        }
+      : undefined,
+  };
 };
 
 const buildDashboardSnapshot = (
@@ -415,12 +601,16 @@ const buildPreview = (rule: AlertRule, markets: MarketRow[]): RulePreviewResult 
 const buildSettingsPayload = (
   settings: AppSettings,
   soundProfiles: SoundProfile[],
+  storageSummary: RuntimeStorageSummary,
+  storageMaintenance: StorageMaintenanceSummary,
 ): SettingsPayload => ({
   settings: clone(settings),
   soundProfiles: soundProfiles.map((profile) => ({
     ...profile,
     isDefault: profile.id === settings.selectedSoundProfileId,
   })),
+  storageSummary: clone(storageSummary),
+  storageMaintenance: clone(storageMaintenance),
 });
 
 export const createMockBridge = (): WarningApiBridge => {
@@ -433,6 +623,30 @@ export const createMockBridge = (): WarningApiBridge => {
   const markets = clone(MOCK_MARKETS);
   let alerts = clone(MOCK_ALERTS);
   let rules = createMockRules();
+  let storageCleanableBytes = 18 * 1024 * 1024;
+  let lastStorageCleanupAt: string | null = null;
+  let storageMaintenance: StorageMaintenanceSummary = {
+    status: 'idle',
+    lastRunAt: null,
+    lastSuccessAt: null,
+    lastDurationMs: null,
+    lastArchivedRows: 0,
+    lastPrunedTickRows: 0,
+    lastPrunedAlertRows: 0,
+    lastCheckpointAt: null,
+    lastCompactionAt: null,
+    lastReason: null,
+    lastError: null,
+  };
+
+  const getStorageSummary = (): RuntimeStorageSummary =>
+    buildMockStorageSummary(alerts, {
+      cleanableSizeBytes: storageCleanableBytes,
+      canClearCache: storageCleanableBytes > 0,
+      sessionDataSizeBytes: 2 * 1024 * 1024 + storageCleanableBytes,
+      totalSizeBytes: 198 * 1024 * 1024 + storageCleanableBytes,
+      lastCleanupAt: lastStorageCleanupAt,
+    });
 
   const emit = (channel: string, payload: unknown) => {
     const bucket = listeners.get(channel);
@@ -488,7 +702,12 @@ export const createMockBridge = (): WarningApiBridge => {
       setDefaultSound(soundId);
     }
 
-    return buildSettingsPayload(settings, soundProfiles);
+    return buildSettingsPayload(
+      settings,
+      soundProfiles,
+      getStorageSummary(),
+      storageMaintenance,
+    );
   };
 
   return {
@@ -558,7 +777,10 @@ export const createMockBridge = (): WarningApiBridge => {
         case 'markets.query': {
           const query = payload as MarketQuery | undefined;
           const filtered = sortMarketRows(
-            markets.filter((row) => matchesMarketQuery(row, query)),
+            filterDecisionUsefulMarkets(
+              markets.filter((row) => matchesMarketQuery(row, query)),
+              query,
+            ),
             query,
           );
           const limit = query?.limit ?? filtered.length;
@@ -569,16 +791,7 @@ export const createMockBridge = (): WarningApiBridge => {
           return result as T;
         }
         case 'alerts.list': {
-          const query = payload as { limit?: number; acknowledged?: boolean } | undefined;
-          const filtered = alerts.filter((alert) =>
-            query?.acknowledged === undefined
-              ? true
-              : alert.acknowledged === query.acknowledged,
-          );
-          return {
-            rows: clone(filtered.slice(0, query?.limit ?? 200)),
-            total: filtered.length,
-          } as T;
+          return buildAlertListResult(alerts, payload as AlertListQuery | undefined) as T;
         }
         case 'alerts.ack': {
           const ids = Array.isArray((payload as { ids?: string[] } | undefined)?.ids)
@@ -603,11 +816,93 @@ export const createMockBridge = (): WarningApiBridge => {
           return { rows: clone(rules) } as T;
         }
         case 'settings.get':
-          return buildSettingsPayload(settings, soundProfiles) as T;
+          return buildSettingsPayload(
+            settings,
+            soundProfiles,
+            getStorageSummary(),
+            storageMaintenance,
+          ) as T;
+        case 'storage.clearCache': {
+          const nextStorageSummary = getStorageSummary();
+          const reclaimedBytes = nextStorageSummary.cleanableSizeBytes;
+          storageCleanableBytes = 0;
+          lastStorageCleanupAt = nowIso();
+          return ({
+            reclaimedBytes,
+            deletedEntries: reclaimedBytes > 0 ? ['Code Cache', 'GPUCache', 'Network'] : [],
+            storageSummary: getStorageSummary(),
+          } satisfies StorageCleanupResult) as T;
+        }
+        case 'storage.createBackup':
+          return buildMockStorageBackupResult(getStorageSummary()) as T;
+        case 'storage.createDiagnostics':
+          return ({
+            packagePath: 'D:\\天气监控-data\\diagnostics\\runtime-diagnostics-mock.json',
+            diagnostics: {
+              version: 1,
+              generatedAt: nowIso(),
+              runtimePaths: {
+                dataRootDir: 'D:\\天气监控-data',
+                dbDir: 'D:\\天气监控-data\\db',
+                mainDbPath: 'D:\\天气监控-data\\db\\main.sqlite',
+                archiveDir: 'D:\\天气监控-data\\db\\archive',
+                backupDir: 'D:\\天气监控-data\\backup',
+                sessionDataDir: 'D:\\天气监控-data\\session-data',
+                logsDir: 'D:\\天气监控-data\\logs',
+              },
+              storageSummary: getStorageSummary(),
+              process: {
+                pid: 0,
+                platform: 'win32',
+                arch: 'x64',
+                nodeVersion: 'mock',
+                electronVersion: 'mock',
+              },
+              logs: {
+                directory: 'D:\\天气监控-data\\logs',
+                fileCount: 1,
+                includedFileCount: 1,
+                tailBytes: 0,
+                files: [],
+              },
+              privacy: {
+                format: 'json',
+                excludes: ['main.sqlite contents'],
+              },
+            },
+          } satisfies RuntimeDiagnosticsPackageResult) as T;
+        case 'storage.runMaintenance': {
+          const finishedAt = nowIso();
+          storageMaintenance = {
+            ...storageMaintenance,
+            status: 'success',
+            lastRunAt: finishedAt,
+            lastSuccessAt: finishedAt,
+            lastDurationMs: 320,
+            lastArchivedRows: 1200,
+            lastPrunedTickRows: 1200,
+            lastPrunedAlertRows: 18,
+            lastCheckpointAt: finishedAt,
+            lastReason: 'manual',
+            lastError: null,
+          };
+          return ({
+            summary: clone(storageMaintenance),
+            storageSummary: getStorageSummary(),
+          } satisfies StorageMaintenanceResult) as T;
+        }
         case 'settings.update': {
           settings = {
             ...settings,
             ...(payload as Partial<AppSettings> | undefined),
+            tickRetentionDays: normalizeTickRetentionDays(
+              (payload as Partial<AppSettings> | undefined)?.tickRetentionDays ??
+                settings.tickRetentionDays,
+            ),
+            alertRetentionDays: normalizeAlertRetentionDays(
+              (payload as Partial<AppSettings> | undefined)?.alertRetentionDays ??
+                settings.alertRetentionDays,
+            ),
           };
           if (
             !soundProfiles.some((profile) => profile.id === settings.selectedSoundProfileId)
@@ -616,13 +911,35 @@ export const createMockBridge = (): WarningApiBridge => {
           } else {
             setDefaultSound(settings.selectedSoundProfileId);
           }
-          return buildSettingsPayload(settings, soundProfiles) as T;
+          if (
+            (payload as Partial<AppSettings> | undefined)?.tickRetentionDays !== undefined ||
+            (payload as Partial<AppSettings> | undefined)?.alertRetentionDays !== undefined
+          ) {
+            storageMaintenance = {
+              ...storageMaintenance,
+              status: 'running',
+              lastRunAt: nowIso(),
+              lastReason: 'settings-update',
+              lastError: null,
+            };
+          }
+          return buildSettingsPayload(
+            settings,
+            soundProfiles,
+            getStorageSummary(),
+            storageMaintenance,
+          ) as T;
         }
         case 'settings.pickSound': {
           const soundId = (payload as { id?: string } | undefined)?.id;
           if (soundId && soundProfiles.some((profile) => profile.id === soundId)) {
             setDefaultSound(soundId);
-            return buildSettingsPayload(settings, soundProfiles) as T;
+            return buildSettingsPayload(
+              settings,
+              soundProfiles,
+              getStorageSummary(),
+              storageMaintenance,
+            ) as T;
           }
           return registerSound({
             name: '导入提示音',

@@ -4,6 +4,7 @@ import type {
   AlertMessageParams,
   BuiltinRuleKey,
 } from './alert-display';
+import { DEFAULT_CITY_CONFIGS } from './city-seeds';
 
 export type AlertPresentationSeverity = 'info' | 'warning' | 'critical';
 
@@ -31,6 +32,7 @@ export interface AlertFact {
 }
 
 export interface AlertPresentation {
+  alertLabel: string;
   cityLabel: string;
   ruleLabel: string;
   title: string;
@@ -96,6 +98,10 @@ const CITY_LABELS: Record<string, string> = {
   wuhan: '武汉',
 };
 
+const CITY_ENGLISH_LABELS: Record<string, string> = Object.fromEntries(
+  DEFAULT_CITY_CONFIGS.map((city) => [city.cityKey.toLowerCase(), city.displayName]),
+);
+
 const RULE_LABELS: Record<string, string> = {
   price_threshold: '价格阈值',
   price_change_pct: '短时异动',
@@ -122,8 +128,15 @@ const OPERATOR_LABELS: Record<string, string> = {
 };
 
 const cleanText = (value?: string | null) => value?.replace(/\s+/g, ' ').trim() ?? '';
+const joinText = (...parts: Array<string | null | undefined>) =>
+  parts
+    .map((part) => cleanText(part))
+    .filter(Boolean)
+    .join(' · ');
 
 const normalizeKey = (value?: string | null) => cleanText(value).replace(/-/g, '_').toLowerCase();
+
+const normalizeCityKey = (value?: string | null) => cleanText(value).toLowerCase().replace(/\s+/g, '-');
 
 const hasValue = (value: number | null | undefined): value is number =>
   typeof value === 'number' && Number.isFinite(value);
@@ -270,7 +283,7 @@ const getRuleLabel = (alert: AlertPresentationSource) => {
 
 export const getAlertRuleLabel = getRuleLabel;
 
-export const getAlertCityLabel = (alert: AlertPresentationSource) => {
+const getLegacyAlertCityLabel = (alert: AlertPresentationSource) => {
   const cityKey = cleanText(alert.cityKey).toLowerCase();
   if (cityKey && CITY_LABELS[cityKey]) {
     return CITY_LABELS[cityKey];
@@ -287,6 +300,56 @@ export const getAlertCityLabel = (alert: AlertPresentationSource) => {
   }
 
   return '未知城市';
+};
+
+const getAlertCityDescriptor = (alert: AlertPresentationSource) => {
+  const cityKey = normalizeCityKey(alert.cityKey);
+  const snapshotCity = cleanText(alert.marketSnapshot?.cityName);
+  const snapshotAirportCode = cleanText(alert.marketSnapshot?.airportCode).toUpperCase();
+  const normalizedSnapshotCity = normalizeCityKey(snapshotCity);
+
+  const chineseLabel =
+    (cityKey && CITY_LABELS[cityKey]) ||
+    (normalizedSnapshotCity && CITY_LABELS[normalizedSnapshotCity]) ||
+    '';
+  const englishLabel =
+    snapshotCity ||
+    (cityKey && CITY_ENGLISH_LABELS[cityKey]) ||
+    (normalizedSnapshotCity && CITY_ENGLISH_LABELS[normalizedSnapshotCity]) ||
+    '';
+
+  if (!chineseLabel && !englishLabel && !cleanText(alert.marketId)) {
+    return {
+      label: '系统',
+      isSystem: true,
+    };
+  }
+
+  const baseLabel = chineseLabel || englishLabel || getLegacyAlertCityLabel(alert);
+  const parts = [baseLabel];
+
+  if (snapshotAirportCode) {
+    parts.push(snapshotAirportCode);
+  }
+
+  if (chineseLabel && englishLabel) {
+    parts.push(englishLabel);
+  }
+
+  return {
+    label: Array.from(new Set(parts.filter(Boolean))).join(' · '),
+    isSystem: false,
+  };
+};
+
+export const getAlertCityLabel = (alert: AlertPresentationSource) => getAlertCityDescriptor(alert).label;
+
+const withAlertCityPrefix = (alert: AlertPresentationSource, text: string) => {
+  const descriptor = getAlertCityDescriptor(alert);
+  if (descriptor.isSystem) {
+    return text;
+  }
+  return `${descriptor.label}：${text}`;
 };
 
 const getPrimaryActual = (alert: AlertPresentationSource) => {
@@ -321,47 +384,60 @@ const getLiquiditySide = (alert: AlertPresentationSource) => {
   return '盘口';
 };
 
-const buildSummary = (alert: AlertPresentationSource) => {
-  const key = getAlertKey(alert);
+const buildLocationLine = (alert: AlertPresentationSource) => {
   const cityLabel = getAlertCityLabel(alert);
+  if (cityLabel === '系统') {
+    return '系统告警';
+  }
+
+  return joinText(cityLabel, compactTemperatureBand(alert.marketSnapshot?.temperatureBand));
+};
+
+const buildReasonText = (alert: AlertPresentationSource) => {
+  const key = getAlertKey(alert);
   const actual = getPrimaryActual(alert);
   const previous = getPrevious(alert);
   const threshold = getThreshold(alert);
-  const operatorLabel = OPERATOR_LABELS[getOperator(alert)] ?? '达到';
   const windowLabel = formatDuration(alert.messageParams?.windowSec);
 
   switch (key) {
     case 'spread_threshold':
       if (hasValue(actual) && hasValue(threshold)) {
-        return `${cityLabel}价差扩大到 ${formatCents(actual)}，已${operatorLabel}阈值 ${formatCents(threshold)}`;
+        return `价差扩大到 ${formatCents(actual)}，阈值 ${formatCents(threshold)}`;
       }
-      return `${cityLabel}盘口价差明显扩大，需要关注成交成本`;
+      return '盘口价差明显扩大';
     case 'liquidity_kill':
       if (hasValue(previous) && hasValue(actual)) {
-        return `${cityLabel}${getLiquiditySide(alert)}从 ${formatCents(previous)} 降到 ${formatCents(actual)}，流动性明显变弱`;
+        return `${getLiquiditySide(alert)}从 ${formatCents(previous)}降到 ${formatCents(actual)}`;
       }
-      return `${cityLabel}${getLiquiditySide(alert)}突然变弱，可能不好成交`;
+      return `${getLiquiditySide(alert)}突然变弱`;
     case 'price_change_pct':
     case 'price_change_5m':
       if (hasValue(actual)) {
-        return `${cityLabel}${windowLabel ?? '短时间'}内波动 ${formatPercent(actual)}，价格变化明显`;
+        return `${windowLabel ?? '短时间'}内波动 ${formatPercent(actual)}`;
       }
-      return `${cityLabel}短时价格波动明显，需要关注`;
+      return '短时价格波动明显';
     case 'price_threshold':
       if (hasValue(actual) && hasValue(threshold)) {
-        return `${cityLabel}价格到 ${formatCents(actual)}，已${operatorLabel}阈值 ${formatCents(threshold)}`;
+        return `价格到 ${formatCents(actual)}，阈值 ${formatCents(threshold)}`;
       }
-      return `${cityLabel}价格触发了设定条件`;
+      return '价格触发设定条件';
     case 'feed_stale': {
       const lag = formatDuration(alert.messageParams?.lagSec);
-      return lag ? `数据流已 ${lag} 没有更新，行情可能不是最新` : '数据流停止更新，行情可能不是最新';
+      return lag ? `${lag}未更新` : '数据流暂停更新';
     }
     case 'system_error':
-      return '系统运行异常，监控链路可能受影响';
+      return '监控链路出现异常';
     default:
-      return `${cityLabel}${getRuleLabel(alert)}已触发`;
+      return '触发了监控规则';
   }
 };
+
+const buildLegacySummary = (alert: AlertPresentationSource) =>
+  withAlertCityPrefix(alert, buildReasonText(alert));
+
+const buildSummary = (alert: AlertPresentationSource) =>
+  withAlertCityPrefix(alert, buildReasonText(alert));
 
 const buildDetail = (alert: AlertPresentationSource) => {
   const parts: string[] = [];
@@ -437,7 +513,29 @@ const compactTemperatureBand = (value?: string | null) => {
   return formatted;
 };
 
-const buildNotificationValue = (alert: AlertPresentationSource) => {
+const buildReadableSummary = (alert: AlertPresentationSource) =>
+  `${getRuleLabel(alert)}：${buildReasonText(alert)}`;
+
+const buildReadableDetail = (alert: AlertPresentationSource) => {
+  const parts: string[] = [];
+  const snapshot = alert.marketSnapshot;
+  const append = (label: string, value: string | null) => {
+    if (!value || value === '--') {
+      return;
+    }
+    parts.push(`${label} ${value}`);
+  };
+
+  append('当前价格', formatCents(snapshot?.yesPrice));
+  append('买一', formatCents(snapshot?.bestBid));
+  append('卖一', formatCents(snapshot?.bestAsk));
+  append('价差', formatCents(snapshot?.spread));
+  append('5分钟变化', formatPercent(snapshot?.change5m));
+
+  return parts.length > 0 ? parts.join(' · ') : null;
+};
+
+const buildNotificationValueParts = (alert: AlertPresentationSource) => {
   const key = getAlertKey(alert);
   const actual = getPrimaryActual(alert);
   const previous = getPrevious(alert);
@@ -445,82 +543,96 @@ const buildNotificationValue = (alert: AlertPresentationSource) => {
   const lag = formatDuration(alert.messageParams?.lagSec);
 
   switch (key) {
-    case 'liquidity_kill':
+    case 'liquidity_kill': {
       if (hasValue(previous) && hasValue(actual)) {
-        return `${getLiquiditySide(alert)} ${formatCents(previous)} → ${formatCents(actual)}`;
+        return [`${getLiquiditySide(alert)} ${formatCents(previous)} → ${formatCents(actual)}`];
       }
       if (hasValue(actual)) {
-        return `${getLiquiditySide(alert)} ${formatCents(actual)}`;
+        return [`${getLiquiditySide(alert)} ${formatCents(actual)}`];
       }
-      return null;
-    case 'spread_threshold':
-      if (hasValue(actual) && hasValue(threshold)) {
-        return `价差 ${formatCents(actual)} · 阈值 ${formatCents(threshold)}`;
-      }
+      return [];
+    }
+    case 'spread_threshold': {
+      const parts: string[] = [];
       if (hasValue(actual)) {
-        return `价差 ${formatCents(actual)}`;
+        parts.push(`价差 ${formatCents(actual)}`);
       }
-      return null;
-    case 'price_threshold':
-      if (hasValue(actual) && hasValue(threshold)) {
-        return `价格 ${formatCents(actual)} · 阈值 ${formatCents(threshold)}`;
+      if (hasValue(threshold)) {
+        parts.push(`阈值 ${formatCents(threshold)}`);
       }
+      return parts;
+    }
+    case 'price_threshold': {
+      const parts: string[] = [];
       if (hasValue(actual)) {
-        return `价格 ${formatCents(actual)}`;
+        parts.push(`价格 ${formatCents(actual)}`);
       }
-      return null;
+      if (hasValue(threshold)) {
+        parts.push(`阈值 ${formatCents(threshold)}`);
+      }
+      return parts;
+    }
     case 'price_change_pct':
     case 'price_change_5m':
-      return hasValue(actual) ? `波动 ${formatPercent(actual)}` : null;
+      return hasValue(actual) ? [`波动 ${formatPercent(actual)}`] : [];
     case 'feed_stale':
-      return lag ? `${lag}未更新` : '行情未更新';
+      return [lag ? `${lag}未更新` : '行情未更新'];
     case 'system_error':
-      return '监控链路异常';
+      return ['监控链路异常'];
     default: {
       const fact = buildFacts(alert)[0];
-      return fact ? `${fact.label} ${fact.value}` : null;
+      return fact ? [`${fact.label} ${fact.value}`] : [];
     }
   }
+};
+
+const buildNotificationSnapshotValue = (alert: AlertPresentationSource) => {
+  const snapshot = alert.marketSnapshot;
+  const key = getAlertKey(alert);
+
+  if (key === 'price_threshold' && hasValue(snapshot?.spread)) {
+    return `当前价差 ${formatCents(snapshot.spread)}`;
+  }
+
+  if (hasValue(snapshot?.yesPrice)) {
+    return `当前价格 ${formatCents(snapshot?.yesPrice)}`;
+  }
+  if (hasValue(snapshot?.spread)) {
+    return `当前价差 ${formatCents(snapshot?.spread)}`;
+  }
+  return null;
 };
 
 export const buildAlertNotificationContent = (
   alert: AlertPresentationSource,
 ): AlertNotificationContent => {
-  const cityLabel = getAlertCityLabel(alert);
   const ruleLabel = getRuleLabel(alert);
-  const temperatureBand = compactTemperatureBand(alert.marketSnapshot?.temperatureBand);
-  const title =
-    cityLabel === '系统'
-      ? '系统告警'
-      : [cityLabel, temperatureBand].filter((value): value is string => Boolean(value)).join(' · ');
-  const body = [ruleLabel, buildNotificationValue(alert)]
+  const title = buildLocationLine(alert);
+  const body = [ruleLabel, ...buildNotificationValueParts(alert), buildNotificationSnapshotValue(alert)]
     .filter((value): value is string => Boolean(value))
     .join(' · ');
 
   return {
     title: title || ruleLabel,
-    body: body || buildSummary(alert),
+    body: body || buildReadableSummary(alert),
   };
 };
 
-export const buildAlertSummary = buildSummary;
+export const buildAlertSummary = buildReadableSummary;
 
-export const buildAlertDetail = buildDetail;
+export const buildAlertDetail = buildReadableDetail;
 
-export const buildAlertTitle = (alert: AlertPresentationSource) => {
-  const cityLabel = getAlertCityLabel(alert);
-  const ruleLabel = getRuleLabel(alert);
-  return cityLabel === '系统' ? ruleLabel : `${cityLabel} · ${ruleLabel}`;
-};
+export const buildAlertTitle = (alert: AlertPresentationSource) => buildLocationLine(alert);
 
 export const buildAlertHeadline = buildAlertTitle;
 
 export const buildAlertPresentation = (alert: AlertPresentationSource): AlertPresentation => ({
+  alertLabel: '告警',
   cityLabel: getAlertCityLabel(alert),
   ruleLabel: getRuleLabel(alert),
   title: buildAlertTitle(alert),
-  summary: buildSummary(alert),
-  detail: buildDetail(alert),
+  summary: buildReadableSummary(alert),
+  detail: buildReadableDetail(alert),
   facts: buildFacts(alert),
   context: buildContext(alert),
 });

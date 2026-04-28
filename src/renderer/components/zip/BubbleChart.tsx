@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import Matter from 'matter-js';
 
 import { cn } from '../../lib/tailwind-utils';
@@ -111,30 +111,42 @@ type BubbleLayoutPlacement = {
   driftRangeY: number;
 };
 
-const buildBubbleLayout = (
+interface BubbleLayoutOptions {
+  collisionPadding?: number;
+  layoutKey?: string;
+}
+
+export const buildBubbleLayout = (
   rows: PhysicsBubbleCityData[],
   width: number,
   height: number,
+  options: BubbleLayoutOptions = {},
 ): Map<string, BubbleLayoutPlacement> => {
   const layout = new Map<string, BubbleLayoutPlacement>();
-  if (rows.length === 0) {
+  const safeRows = rows.filter((row) => Number.isFinite(row.visualRadius) && row.visualRadius > 0);
+  if (safeRows.length === 0) {
     return layout;
   }
 
-  const maxRadius = rows.reduce((current, row) => Math.max(current, row.visualRadius), 0);
+  const collisionPadding = Math.max(0, options.collisionPadding ?? 0);
+  const maxRadius = safeRows.reduce(
+    (current, row) => Math.max(current, row.visualRadius + collisionPadding),
+    0,
+  );
   const edgeInset = Math.max(maxRadius + 32, 86);
   const usableWidth = Math.max(width - edgeInset * 2, width * 0.42);
   const usableHeight = Math.max(height - edgeInset * 2, height * 0.42);
   const centerX = width / 2;
   const centerY = height / 2;
   const spreadRadius = Math.max(usableWidth, usableHeight, 1);
-  const slotSeed = rows
-    .map((row) => row.id)
+  const slotSeed = safeRows
+    .map((row) => `${row.id}:${(row.visualRadius + collisionPadding).toFixed(2)}`)
     .slice()
     .sort((left, right) => left.localeCompare(right))
     .join('|');
+  const layoutSeed = `${options.layoutKey ?? ''}|${slotSeed}`;
 
-  const orderedRows = [...rows].sort((left, right) => {
+  const orderedRows = [...safeRows].sort((left, right) => {
     const radiusDelta = right.visualRadius - left.visualRadius;
     if (radiusDelta !== 0) {
       return radiusDelta;
@@ -143,21 +155,23 @@ const buildBubbleLayout = (
   });
 
   const placed: Array<{ id: string; x: number; y: number; radius: number }> = [];
-  const attemptsPerBubble = Math.max(64, Math.min(140, rows.length * 5 + 48));
-  const baseDriftX = Math.max(20, Math.min(54, usableWidth / Math.max(6, Math.sqrt(rows.length) * 2.1)));
-  const baseDriftY = Math.max(18, Math.min(48, usableHeight / Math.max(6, Math.sqrt(rows.length) * 2.1)));
+  const attemptsPerBubble = Math.max(64, Math.min(140, safeRows.length * 5 + 48));
+  const baseDriftX = Math.max(20, Math.min(54, usableWidth / Math.max(6, Math.sqrt(safeRows.length) * 2.1)));
+  const baseDriftY = Math.max(18, Math.min(48, usableHeight / Math.max(6, Math.sqrt(safeRows.length) * 2.1)));
 
   const resolveCandidate = (row: PhysicsBubbleCityData, rowIndex: number) => {
-    const inset = row.visualRadius + 18;
+    const collisionRadius = row.visualRadius + collisionPadding;
+    const inset = collisionRadius + 18;
     const minX = inset;
     const maxX = Math.max(inset, width - inset);
     const minY = inset;
     const maxY = Math.max(inset, height - inset);
 
     let best: { x: number; y: number; score: number } | null = null;
+    let bestNonOverlapping: { x: number; y: number; score: number } | null = null;
 
     for (let attemptIndex = 0; attemptIndex < attemptsPerBubble; attemptIndex += 1) {
-      const key = `${slotSeed}:${row.id}:${attemptIndex}`;
+      const key = `${layoutSeed}:${row.id}:${attemptIndex}`;
       const randomX = seededBetween(key, 'x', minX, maxX);
       const randomY = seededBetween(key, 'y', minY, maxY);
       const orbitAngle = seededBetween(key, 'angle', 0, Math.PI * 2);
@@ -179,7 +193,7 @@ const buildBubbleLayout = (
       let minClearance =
         placed.length === 0 ? Math.min(maxX - minX, maxY - minY) * 0.45 : Number.POSITIVE_INFINITY;
       for (const other of placed) {
-        const requiredGap = row.visualRadius + other.radius + 24;
+        const requiredGap = collisionRadius + other.radius + 24;
         const distance = Math.hypot(x - other.x, y - other.y);
         minClearance = Math.min(minClearance, distance - requiredGap);
       }
@@ -197,9 +211,13 @@ const buildBubbleLayout = (
       if (!best || score > best.score) {
         best = { x, y, score };
       }
+      if (minClearance >= 0 && (!bestNonOverlapping || score > bestNonOverlapping.score)) {
+        bestNonOverlapping = { x, y, score };
+      }
     }
 
     return (
+      bestNonOverlapping ??
       best ?? {
         x: clamp(centerX, minX, maxX),
         y: clamp(centerY, minY, maxY),
@@ -211,7 +229,13 @@ const buildBubbleLayout = (
   for (let index = 0; index < orderedRows.length; index += 1) {
     const row = orderedRows[index];
     const candidate = resolveCandidate(row, index);
-    placed.push({ id: row.id, x: candidate.x, y: candidate.y, radius: row.visualRadius });
+    const collisionRadius = row.visualRadius + collisionPadding;
+    placed.push({
+      id: row.id,
+      x: candidate.x,
+      y: candidate.y,
+      radius: collisionRadius,
+    });
 
     layout.set(row.id, {
       x: candidate.x,
@@ -220,8 +244,28 @@ const buildBubbleLayout = (
       anchorY: candidate.y,
       anchorVelocityX: seededBetween(row.id, 'anchor-vx', -0.18, 0.18),
       anchorVelocityY: seededBetween(row.id, 'anchor-vy', -0.15, 0.15),
-      driftRangeX: Math.min(baseDriftX, Math.max(18, row.visualRadius * 0.58)),
-      driftRangeY: Math.min(baseDriftY, Math.max(16, row.visualRadius * 0.5)),
+      driftRangeX: Math.min(
+        baseDriftX,
+        Math.max(18, row.visualRadius * 0.58),
+        Math.max(
+          0,
+          Math.min(
+            candidate.x - (collisionRadius + 16),
+            width - (collisionRadius + 16) - candidate.x,
+          ),
+        ),
+      ),
+      driftRangeY: Math.min(
+        baseDriftY,
+        Math.max(16, row.visualRadius * 0.5),
+        Math.max(
+          0,
+          Math.min(
+            candidate.y - (collisionRadius + 16),
+            height - (collisionRadius + 16) - candidate.y,
+          ),
+        ),
+      ),
     });
   }
 
@@ -230,7 +274,29 @@ const buildBubbleLayout = (
 
 const getBubblePlugin = (body: Matter.Body) => body.plugin as BubbleBodyPlugin;
 
-const getCollisionPadding = (bubblePadding: number) => Math.min(2, Math.max(0, bubblePadding) * 0.2);
+const getCollisionPadding = (bubblePadding: number) =>
+  Math.min(24, Math.max(0, bubblePadding) / 2);
+
+const MAX_BODY_SPEED = 7.5;
+const MAX_DRAG_BODY_SPEED = 9.5;
+const DRAG_EFFECT_SETTLE_MS = 220;
+const TOOLTIP_WIDTH = 292;
+const TOOLTIP_HEIGHT = 216;
+const TOOLTIP_EDGE_GAP = 14;
+const TOOLTIP_TARGET_GAP = 18;
+
+const limitBodyVelocity = (body: Matter.Body, maxSpeed: number) => {
+  const speed = Math.hypot(body.velocity.x, body.velocity.y);
+  if (!Number.isFinite(speed) || speed <= maxSpeed) {
+    return;
+  }
+
+  const scale = maxSpeed / speed;
+  Matter.Body.setVelocity(body, {
+    x: body.velocity.x * scale,
+    y: body.velocity.y * scale,
+  });
+};
 
 const getRegionGlow = (region: DashboardBubbleCityData['region']) => {
   switch (region) {
@@ -306,6 +372,52 @@ const getRiskTextColor = (city: DashboardBubbleCityData) => {
 
 const getStrengthLabel = (city: DashboardBubbleCityData) => STRENGTH_LABELS[city.status_level];
 
+type TooltipSide = 'top' | 'bottom';
+
+const buildTooltipLayout = (
+  point: { x: number; y: number },
+  width: number,
+  height: number,
+): {
+  side: TooltipSide;
+  style: CSSProperties;
+} => {
+  const safeWidth = Math.max(width, TOOLTIP_WIDTH + TOOLTIP_EDGE_GAP * 2);
+  const safeHeight = Math.max(height, TOOLTIP_HEIGHT + TOOLTIP_EDGE_GAP * 2);
+  const tooltipWidth = Math.min(TOOLTIP_WIDTH, safeWidth - TOOLTIP_EDGE_GAP * 2);
+  const tooltipHeight = Math.min(TOOLTIP_HEIGHT, safeHeight - TOOLTIP_EDGE_GAP * 2);
+  const spaceAbove = point.y - TOOLTIP_EDGE_GAP - TOOLTIP_TARGET_GAP;
+  const spaceBelow = safeHeight - point.y - TOOLTIP_EDGE_GAP - TOOLTIP_TARGET_GAP;
+  const side: TooltipSide =
+    spaceAbove >= tooltipHeight || spaceAbove >= spaceBelow ? 'top' : 'bottom';
+  const left = clamp(
+    point.x - tooltipWidth / 2,
+    TOOLTIP_EDGE_GAP,
+    Math.max(TOOLTIP_EDGE_GAP, safeWidth - tooltipWidth - TOOLTIP_EDGE_GAP),
+  );
+  const preferredTop =
+    side === 'top'
+      ? point.y - tooltipHeight - TOOLTIP_TARGET_GAP
+      : point.y + TOOLTIP_TARGET_GAP;
+  const top = clamp(
+    preferredTop,
+    TOOLTIP_EDGE_GAP,
+    Math.max(TOOLTIP_EDGE_GAP, safeHeight - tooltipHeight - TOOLTIP_EDGE_GAP),
+  );
+  const arrowX = clamp(point.x - left, 18, tooltipWidth - 18);
+
+  return {
+    side,
+    style: {
+      left,
+      top,
+      width: tooltipWidth,
+      maxHeight: tooltipHeight,
+      '--bubble-tooltip-arrow-x': `${arrowX}px`,
+    } as CSSProperties,
+  };
+};
+
 export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: BubbleChartProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const engineRef = useRef<Matter.Engine | null>(null);
@@ -317,6 +429,9 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
   const visiblePhysicsDataRef = useRef<PhysicsBubbleCityData[]>([]);
   const onOpenCityRef = useRef(onOpenCity);
   const floatSpeedRef = useRef(useSettingsStore.getState().floatSpeed);
+  const dragSettleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const tooltipFrameRef = useRef<number | null>(null);
+  const pendingTooltipPosRef = useRef<{ x: number; y: number } | null>(null);
 
   const [hoveredCityId, setHoveredCityId] = useState<string | null>(null);
   const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
@@ -353,14 +468,20 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
     [filteredVisualIds, physicsData],
   );
 
+  const visiblePhysicsDataById = useMemo(
+    () => new Map(visiblePhysicsData.map((city) => [city.id, city])),
+    [visiblePhysicsData],
+  );
+
   const physicsSignature = useMemo(
     () =>
       buildBubblePhysicsSignature(visiblePhysicsData, {
         layoutKey,
         filterMode,
         regionFilter,
+        bubblePadding,
       }),
-    [filterMode, layoutKey, regionFilter, visiblePhysicsData],
+    [bubblePadding, filterMode, layoutKey, regionFilter, visiblePhysicsData],
   );
 
   const hoveredCity = hoveredCityId ? visualDataById.get(hoveredCityId) ?? null : null;
@@ -387,8 +508,10 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
     }
   }, [filteredVisualIds, hoveredCityId]);
 
-  useEffect(() => {
-    if (!containerRef.current || visiblePhysicsDataRef.current.length === 0) {
+  useLayoutEffect(() => {
+    visiblePhysicsDataRef.current = visiblePhysicsData;
+
+    if (!containerRef.current || visiblePhysicsData.length === 0) {
       bodiesRef.current = {};
       return;
     }
@@ -415,19 +538,21 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
       friction: 0.02,
       restitution: 0.02,
     };
+    let horizontalWallWidth = currentWidth * 3;
+    let verticalWallHeight = currentHeight * 3;
 
     const walls = [
       Matter.Bodies.rectangle(
         currentWidth / 2,
         -wallThickness / 2,
-        currentWidth * 3,
+        horizontalWallWidth,
         wallThickness,
         wallOptions,
       ),
       Matter.Bodies.rectangle(
         currentWidth / 2,
         currentHeight + wallThickness / 2,
-        currentWidth * 3,
+        horizontalWallWidth,
         wallThickness,
         wallOptions,
       ),
@@ -435,14 +560,14 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
         -wallThickness / 2,
         currentHeight / 2,
         wallThickness,
-        currentHeight * 3,
+        verticalWallHeight,
         wallOptions,
       ),
       Matter.Bodies.rectangle(
         currentWidth + wallThickness / 2,
         currentHeight / 2,
         wallThickness,
-        currentHeight * 3,
+        verticalWallHeight,
         wallOptions,
       ),
     ];
@@ -450,9 +575,44 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
 
     const newBodies: Record<string, Matter.Body> = {};
     const collisionPadding = getCollisionPadding(bubblePadding);
-    const layout = buildBubbleLayout(visiblePhysicsDataRef.current, currentWidth, currentHeight);
+    const applyLayout = (nextWidth: number, nextHeight: number, repositionBodies: boolean) => {
+      const nextLayout = buildBubbleLayout(visiblePhysicsDataRef.current, nextWidth, nextHeight, {
+        collisionPadding,
+        layoutKey,
+      });
 
-    for (const city of visiblePhysicsDataRef.current) {
+      for (const city of visiblePhysicsDataRef.current) {
+        const placement = nextLayout.get(city.id);
+        const body = bodiesRef.current[city.id];
+        if (!placement || !body) {
+          continue;
+        }
+
+        const plugin = getBubblePlugin(body);
+        plugin.anchorX = placement.anchorX;
+        plugin.anchorY = placement.anchorY;
+        plugin.anchorVelocityX = placement.anchorVelocityX;
+        plugin.anchorVelocityY = placement.anchorVelocityY;
+        plugin.driftRangeX = placement.driftRangeX;
+        plugin.driftRangeY = placement.driftRangeY;
+
+        if (!repositionBodies) {
+          continue;
+        }
+
+        Matter.Body.setPosition(body, {
+          x: placement.x,
+          y: placement.y,
+        });
+        Matter.Body.setVelocity(body, { x: 0, y: 0 });
+      }
+    };
+    const layout = buildBubbleLayout(visiblePhysicsData, currentWidth, currentHeight, {
+      collisionPadding,
+      layoutKey,
+    });
+
+    for (const city of visiblePhysicsData) {
       const placement = layout.get(city.id);
       if (!placement) {
         continue;
@@ -495,6 +655,19 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
     bodiesRef.current = newBodies;
     Matter.World.add(world, Object.values(newBodies));
 
+    // Write the first stable transform before paint so the chart does not flash from (0, 0).
+    for (const body of Object.values(newBodies)) {
+      const plugin = getBubblePlugin(body);
+      const element = domRefs.current[plugin.cityId];
+      if (!element) {
+        continue;
+      }
+
+      element.style.transform = `translate3d(${body.position.x - plugin.visualRadius}px, ${
+        body.position.y - plugin.visualRadius
+      }px, 0)`;
+    }
+
     const mouseElement = document.createElement('div');
     mouseElement.style.position = 'absolute';
     mouseElement.style.inset = '0';
@@ -520,8 +693,50 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
     };
 
     let currentHoveredId: string | null = null;
+    let draggingBodyId: number | null = null;
+
+    const scheduleTooltipPosition = (position: { x: number; y: number }) => {
+      pendingTooltipPosRef.current = position;
+      if (tooltipFrameRef.current !== null) {
+        return;
+      }
+
+      tooltipFrameRef.current = requestAnimationFrame(() => {
+        tooltipFrameRef.current = null;
+        const nextPosition = pendingTooltipPosRef.current;
+        if (nextPosition) {
+          setTooltipPos(nextPosition);
+        }
+      });
+    };
+
+    const setDraggingVisualMode = (dragging: boolean) => {
+      if (dragSettleTimerRef.current) {
+        clearTimeout(dragSettleTimerRef.current);
+        dragSettleTimerRef.current = null;
+      }
+
+      if (dragging) {
+        container.classList.add('bubble-chart--dragging');
+        return;
+      }
+
+      dragSettleTimerRef.current = setTimeout(() => {
+        container.classList.remove('bubble-chart--dragging');
+        dragSettleTimerRef.current = null;
+      }, DRAG_EFFECT_SETTLE_MS);
+    };
 
     Matter.Events.on(mouseConstraint, 'mousemove', (event) => {
+      if (draggingBodyId !== null || mouseConstraint.body) {
+        if (currentHoveredId !== null) {
+          currentHoveredId = null;
+          setHoveredCityId(null);
+        }
+        mouseElement.style.cursor = 'grabbing';
+        return;
+      }
+
       const cityId = getPointedCityId(event.mouse.position);
       if (cityId) {
         if (currentHoveredId !== cityId) {
@@ -529,7 +744,7 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
           setHoveredCityId(cityId);
           mouseElement.style.cursor = 'grab';
         }
-        setTooltipPos({ x: event.mouse.position.x, y: event.mouse.position.y });
+        scheduleTooltipPosition({ x: event.mouse.position.x, y: event.mouse.position.y });
       } else if (currentHoveredId !== null) {
         currentHoveredId = null;
         setHoveredCityId(null);
@@ -556,6 +771,9 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
       mouseElement.style.cursor = 'grabbing';
       setHoveredCityId(null);
       if (dragEvent.body) {
+        currentHoveredId = null;
+        draggingBodyId = dragEvent.body.id;
+        setDraggingVisualMode(true);
         Matter.Sleeping.set(dragEvent.body, false);
       }
     });
@@ -564,35 +782,41 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
       const dragEvent = event as Matter.IEvent<Matter.MouseConstraint> & { body?: Matter.Body };
       mouseElement.style.cursor = 'grab';
       if (!dragEvent.body) {
+        draggingBodyId = null;
+        setDraggingVisualMode(false);
         return;
       }
 
+      limitBodyVelocity(dragEvent.body, MAX_DRAG_BODY_SPEED);
       const plugin = getBubblePlugin(dragEvent.body);
-      const inset = plugin.visualRadius + 16;
+      const inset = plugin.collisionRadius + 16;
       plugin.anchorX = clamp(
-        dragEvent.body.position.x + dragEvent.body.velocity.x * 34,
+        dragEvent.body.position.x + dragEvent.body.velocity.x * 18,
         inset,
         Math.max(inset, currentWidth - inset),
       );
       plugin.anchorY = clamp(
-        dragEvent.body.position.y + dragEvent.body.velocity.y * 34,
+        dragEvent.body.position.y + dragEvent.body.velocity.y * 18,
         inset,
         Math.max(inset, currentHeight - inset),
       );
       plugin.anchorVelocityX = clamp(
-        plugin.anchorVelocityX * 0.35 + dragEvent.body.velocity.x * 0.06,
+        plugin.anchorVelocityX * 0.25 + dragEvent.body.velocity.x * 0.035,
         -0.22,
         0.22,
       );
       plugin.anchorVelocityY = clamp(
-        plugin.anchorVelocityY * 0.35 + dragEvent.body.velocity.y * 0.06,
+        plugin.anchorVelocityY * 0.25 + dragEvent.body.velocity.y * 0.035,
         -0.18,
         0.18,
       );
       Matter.Body.setVelocity(dragEvent.body, {
-        x: dragEvent.body.velocity.x * 0.72,
-        y: dragEvent.body.velocity.y * 0.72,
+        x: dragEvent.body.velocity.x * 0.42,
+        y: dragEvent.body.velocity.y * 0.42,
       });
+      limitBodyVelocity(dragEvent.body, MAX_BODY_SPEED);
+      draggingBodyId = null;
+      setDraggingVisualMode(false);
     });
 
     Matter.Events.on(engine, 'beforeUpdate', () => {
@@ -604,7 +828,10 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
 
       for (const body of Object.values(bodiesRef.current)) {
         const plugin = getBubblePlugin(body);
-        const inset = plugin.visualRadius + 16;
+        const isDragging = mouseConstraint.body?.id === body.id;
+        limitBodyVelocity(body, isDragging ? MAX_DRAG_BODY_SPEED : MAX_BODY_SPEED);
+
+        const inset = plugin.collisionRadius + 16;
         plugin.anchorX += plugin.anchorVelocityX * deltaFactor * anchorSpeedScale;
         plugin.anchorY += plugin.anchorVelocityY * deltaFactor * anchorSpeedScale;
 
@@ -617,15 +844,20 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
           plugin.anchorY = clamp(plugin.anchorY, inset, Math.max(inset, currentHeight - inset));
         }
 
-        const targetX =
+        const targetX = clamp(
           plugin.anchorX +
-          Math.sin(timestamp * plugin.driftFreqX + plugin.driftPhaseX) * plugin.driftRangeX;
-        const targetY =
+            Math.sin(timestamp * plugin.driftFreqX + plugin.driftPhaseX) * plugin.driftRangeX,
+          inset,
+          Math.max(inset, currentWidth - inset),
+        );
+        const targetY = clamp(
           plugin.anchorY +
-          Math.cos(timestamp * plugin.driftFreqY + plugin.driftPhaseY) * plugin.driftRangeY;
+            Math.cos(timestamp * plugin.driftFreqY + plugin.driftPhaseY) * plugin.driftRangeY,
+          inset,
+          Math.max(inset, currentHeight - inset),
+        );
         const dx = targetX - body.position.x;
         const dy = targetY - body.position.y;
-        const isDragging = mouseConstraint.body?.id === body.id;
 
         if (!isDragging) {
           Matter.Body.applyForce(body, body.position, {
@@ -642,10 +874,13 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
           x: Math.sin(timestamp * plugin.driftFreqX + plugin.driftPhaseX) * driftForce * body.mass,
           y: Math.cos(timestamp * plugin.driftFreqY + plugin.driftPhaseY) * driftForce * body.mass,
         });
+        limitBodyVelocity(body, MAX_BODY_SPEED);
       }
     });
 
     const render = () => {
+      Matter.Engine.update(engine, 1000 / 60);
+
       for (const body of Object.values(bodiesRef.current)) {
         const plugin = getBubblePlugin(body);
         const element = domRefs.current[plugin.cityId];
@@ -657,7 +892,6 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
         element.style.transform = `translate3d(${x - plugin.visualRadius}px, ${y - plugin.visualRadius}px, 0)`;
       }
 
-      Matter.Engine.update(engine, 1000 / 60);
       renderRef.current = requestAnimationFrame(render);
     };
 
@@ -670,8 +904,26 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
 
       const nextWidth = Math.max(containerRef.current.clientWidth, 1);
       const nextHeight = Math.max(containerRef.current.clientHeight, 1);
+      const previousWidth = currentWidth;
+      const previousHeight = currentHeight;
       currentWidth = nextWidth;
       currentHeight = nextHeight;
+
+      const nextHorizontalWallWidth = nextWidth * 3;
+      if (Math.abs(nextHorizontalWallWidth - horizontalWallWidth) > 0.5) {
+        const scaleX = nextHorizontalWallWidth / Math.max(horizontalWallWidth, 1);
+        Matter.Body.scale(walls[0], scaleX, 1);
+        Matter.Body.scale(walls[1], scaleX, 1);
+        horizontalWallWidth = nextHorizontalWallWidth;
+      }
+
+      const nextVerticalWallHeight = nextHeight * 3;
+      if (Math.abs(nextVerticalWallHeight - verticalWallHeight) > 0.5) {
+        const scaleY = nextVerticalWallHeight / Math.max(verticalWallHeight, 1);
+        Matter.Body.scale(walls[2], 1, scaleY);
+        Matter.Body.scale(walls[3], 1, scaleY);
+        verticalWallHeight = nextVerticalWallHeight;
+      }
 
       Matter.Body.setPosition(walls[0], { x: nextWidth / 2, y: -wallThickness / 2 });
       Matter.Body.setPosition(walls[1], {
@@ -684,9 +936,16 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
         y: nextHeight / 2,
       });
 
+      const shouldRelayout =
+        previousWidth <= 1 ||
+        previousHeight <= 1 ||
+        Math.abs(nextWidth - previousWidth) > 32 ||
+        Math.abs(nextHeight - previousHeight) > 32;
+      applyLayout(nextWidth, nextHeight, shouldRelayout);
+
       for (const body of Object.values(bodiesRef.current)) {
         const plugin = getBubblePlugin(body);
-        const inset = plugin.visualRadius + 16;
+        const inset = plugin.collisionRadius + 16;
         plugin.anchorX = clamp(plugin.anchorX, inset, Math.max(inset, nextWidth - inset));
         plugin.anchorY = clamp(plugin.anchorY, inset, Math.max(inset, nextHeight - inset));
 
@@ -705,16 +964,38 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
       }
     };
 
-    window.addEventListener('resize', handleResize);
+    let resizeObserver: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      resizeObserver = new ResizeObserver(() => {
+        handleResize();
+      });
+      resizeObserver.observe(container);
+    } else {
+      window.addEventListener('resize', handleResize);
+    }
+    handleResize();
 
     return () => {
-      window.removeEventListener('resize', handleResize);
+      resizeObserver?.disconnect();
+      if (!resizeObserver) {
+        window.removeEventListener('resize', handleResize);
+      }
       mouseElement.removeEventListener('dblclick', handleDoubleClick);
       setHoveredCityId(null);
       if (renderRef.current) {
         cancelAnimationFrame(renderRef.current);
         renderRef.current = null;
       }
+      if (dragSettleTimerRef.current) {
+        clearTimeout(dragSettleTimerRef.current);
+        dragSettleTimerRef.current = null;
+      }
+      if (tooltipFrameRef.current !== null) {
+        cancelAnimationFrame(tooltipFrameRef.current);
+        tooltipFrameRef.current = null;
+      }
+      pendingTooltipPosRef.current = null;
+      container.classList.remove('bubble-chart--dragging');
       Matter.World.clear(world, false);
       Matter.Engine.clear(engine);
       bodiesRef.current = {};
@@ -729,19 +1010,33 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
   useEffect(() => {
     for (const body of Object.values(bodiesRef.current)) {
       const plugin = getBubblePlugin(body);
+      const physicsCity = visiblePhysicsDataById.get(plugin.cityId);
       plugin.visualData = visualDataById.get(plugin.cityId);
 
-      const nextCollisionRadius = plugin.visualRadius + getCollisionPadding(bubblePadding);
+      const nextVisualRadius = physicsCity?.visualRadius ?? plugin.visualRadius;
+      const nextCollisionRadius = nextVisualRadius + getCollisionPadding(bubblePadding);
       if (Math.abs(nextCollisionRadius - plugin.collisionRadius) > 0.05) {
         const scale = nextCollisionRadius / plugin.collisionRadius;
         Matter.Body.scale(body, scale, scale);
         plugin.collisionRadius = nextCollisionRadius;
+        plugin.visualRadius = nextVisualRadius;
       }
     }
-  }, [bubblePadding, visualDataById]);
+  }, [bubblePadding, visiblePhysicsDataById, visualDataById]);
+
+  const tooltipLayout = hoveredCity
+    ? buildTooltipLayout(
+        tooltipPos,
+        containerRef.current?.clientWidth ?? TOOLTIP_WIDTH + TOOLTIP_EDGE_GAP * 2,
+        containerRef.current?.clientHeight ?? TOOLTIP_HEIGHT + TOOLTIP_EDGE_GAP * 2,
+      )
+    : null;
 
   return (
-    <div className="relative h-full w-full overflow-hidden bg-[#0D0F14]" ref={containerRef}>
+    <div
+      className="bubble-chart relative h-full w-full overflow-hidden bg-[#0D0F14]"
+      ref={containerRef}
+    >
       <div
         className="pointer-events-none absolute inset-0 opacity-20"
         style={{
@@ -803,7 +1098,7 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
             ref={(element) => {
               domRefs.current[city.id] = element;
             }}
-            className="absolute left-0 top-0 flex rounded-full transition-opacity duration-500"
+            className="bubble-chart__bubble absolute left-0 top-0 flex rounded-full transition-opacity duration-500"
             style={{
               width: size,
               height: size,
@@ -860,15 +1155,12 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
         );
       })}
 
-      {hoveredCity ? (
+      {hoveredCity && tooltipLayout ? (
         <div
-          className="pointer-events-none absolute z-50 min-w-[220px] -translate-x-1/2 -translate-y-full rounded border border-[#2D2D3A] bg-[#16161E]/95 p-4 text-[#E4E4E7] shadow-2xl backdrop-blur-md"
-          style={{
-            left: clamp(tooltipPos.x, 130, Math.max(130, (containerRef.current?.clientWidth ?? 260) - 130)),
-            top: clamp(tooltipPos.y - 24, 120, Math.max(120, (containerRef.current?.clientHeight ?? 240) - 80)),
-          }}
+          className={`bubble-tooltip bubble-tooltip--${tooltipLayout.side} pointer-events-none absolute z-50 rounded border border-[#2D2D3A] bg-[#16161E]/95 p-4 text-[#E4E4E7] shadow-2xl backdrop-blur-md`}
+          style={tooltipLayout.style}
         >
-          <div className="absolute -bottom-2 left-1/2 h-4 w-4 -translate-x-1/2 rotate-45 border-b border-r border-[#2D2D3A] bg-[#16161E]/95" />
+          <div className="bubble-tooltip__arrow" />
 
           <div className="relative z-10">
             <div className="mb-2 flex items-center justify-between gap-4">

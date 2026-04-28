@@ -12,6 +12,58 @@
   }
 }
 
+.bubble-chart__bubble {
+  contain: layout paint style;
+  transform-origin: center;
+  transition:
+    width 260ms ease,
+    height 260ms ease,
+    border-color 220ms ease,
+    box-shadow 220ms ease,
+    opacity 220ms ease;
+}
+
+.bubble-chart--dragging .bubble-chart__bubble {
+  transition: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  box-shadow: none !important;
+}
+
+.bubble-chart--dragging .animate-radar-sweep {
+  animation-play-state: paused;
+}
+
+.bubble-tooltip {
+  min-width: 220px;
+  overflow: auto;
+  contain: layout paint style;
+}
+
+.bubble-tooltip__arrow {
+  position: absolute;
+  left: var(--bubble-tooltip-arrow-x, 50%);
+  width: 14px;
+  height: 14px;
+  border-color: #2d2d3a;
+  border-style: solid;
+  border-width: 0;
+  background: rgba(22, 22, 30, 0.95);
+  transform: translateX(-50%) rotate(45deg);
+}
+
+.bubble-tooltip--top .bubble-tooltip__arrow {
+  bottom: -7px;
+  border-right-width: 1px;
+  border-bottom-width: 1px;
+}
+
+.bubble-tooltip--bottom .bubble-tooltip__arrow {
+  top: -7px;
+  border-left-width: 1px;
+  border-top-width: 1px;
+}
+
 @keyframes radar-sweep {
   from {
     transform: rotate(0deg);

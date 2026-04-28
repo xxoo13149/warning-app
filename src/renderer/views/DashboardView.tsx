@@ -49,6 +49,44 @@ const sortAlerts = (alerts: AlertEvent[]) =>
     return Date.parse(right.triggeredAt) - Date.parse(left.triggeredAt);
   });
 
+const BUBBLE_ALERT_SAMPLE_INTERVAL_MS = 5_000;
+const BUBBLE_ALERT_LOOKBACK_MS = 180_000;
+const BUBBLE_ALERT_MAX_CITIES = 96;
+
+const selectDashboardBubbleAlerts = (
+  alerts: AlertEvent[],
+  rows: DashboardSnapshot['rows'],
+  nowMs: number,
+) => {
+  if (alerts.length === 0 || rows.length === 0) {
+    return [];
+  }
+
+  const cityKeys = new Set(rows.map((row) => row.cityKey).filter(Boolean));
+  const cutoffMs = nowMs - BUBBLE_ALERT_LOOKBACK_MS;
+  const latestByCity = new Map<string, AlertEvent>();
+
+  for (const alert of alerts) {
+    if (!alert.cityKey || !cityKeys.has(alert.cityKey)) {
+      continue;
+    }
+
+    const triggeredAtMs = Date.parse(alert.triggeredAt);
+    if (!Number.isFinite(triggeredAtMs) || triggeredAtMs < cutoffMs) {
+      continue;
+    }
+
+    const current = latestByCity.get(alert.cityKey);
+    if (!current || triggeredAtMs > Date.parse(current.triggeredAt)) {
+      latestByCity.set(alert.cityKey, alert);
+    }
+  }
+
+  return [...latestByCity.values()]
+    .sort((left, right) => Date.parse(right.triggeredAt) - Date.parse(left.triggeredAt))
+    .slice(0, BUBBLE_ALERT_MAX_CITIES);
+};
+
 const isReadableChineseText = (value?: string | null) => {
   const text = value?.trim() ?? '';
   return /[\u3400-\u9fff]/.test(text) && !/[A-Za-z]/.test(text);
@@ -108,19 +146,19 @@ export const DashboardView = ({ health, alerts, onOpenExplorer }: DashboardViewP
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [bubbleAlertFrame, setBubbleAlertFrame] = useState<{
+    alerts: AlertEvent[];
+    nowMs: number;
+  }>(() => ({ alerts: [], nowMs: Date.now() }));
   const [lockedPhysicsData, setLockedPhysicsData] = useState<PhysicsBubbleCityData[]>([]);
   const [lockedPhysicsSignature, setLockedPhysicsSignature] = useState('');
+  const latestAlertsRef = useRef<AlertEvent[]>(alerts);
   const requestSerialRef = useRef(0);
   const tickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    const timer = setInterval(() => {
-      setNowMs(Date.now());
-    }, 1000);
-
-    return () => clearInterval(timer);
-  }, []);
+    latestAlertsRef.current = alerts;
+  }, [alerts]);
 
   const loadSnapshot = useCallback(async (override?: Partial<DashboardQuery>) => {
     const serial = requestSerialRef.current + 1;
@@ -179,9 +217,23 @@ export const DashboardView = ({ health, alerts, onOpenExplorer }: DashboardViewP
     [],
   );
 
+  useEffect(() => {
+    const sampleBubbleAlerts = () => {
+      const sampleNowMs = Date.now();
+      setBubbleAlertFrame({
+        alerts: selectDashboardBubbleAlerts(latestAlertsRef.current, snapshot.rows, sampleNowMs),
+        nowMs: sampleNowMs,
+      });
+    };
+
+    sampleBubbleAlerts();
+    const timer = setInterval(sampleBubbleAlerts, BUBBLE_ALERT_SAMPLE_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [snapshot.rows]);
+
   const visualData = useMemo(
-    () => buildDashboardBubbleData(snapshot.rows, alerts, nowMs),
-    [alerts, nowMs, snapshot.rows],
+    () => buildDashboardBubbleData(snapshot.rows, bubbleAlertFrame.alerts, bubbleAlertFrame.nowMs),
+    [bubbleAlertFrame.alerts, bubbleAlertFrame.nowMs, snapshot.rows],
   );
 
   const incomingPhysicsData = useMemo(
@@ -198,12 +250,10 @@ export const DashboardView = ({ health, alerts, onOpenExplorer }: DashboardViewP
   );
 
   useEffect(() => {
-    if (incomingPhysicsSignature === lockedPhysicsSignature) {
-      return;
-    }
-
     setLockedPhysicsData(incomingPhysicsData);
-    setLockedPhysicsSignature(incomingPhysicsSignature);
+    if (incomingPhysicsSignature !== lockedPhysicsSignature) {
+      setLockedPhysicsSignature(incomingPhysicsSignature);
+    }
   }, [incomingPhysicsData, incomingPhysicsSignature, lockedPhysicsSignature]);
 
   const stats = useMemo(

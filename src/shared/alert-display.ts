@@ -29,6 +29,7 @@ export type MarketSideKey = 'YES' | 'NO' | 'BOTH';
 
 export interface AlertMarketSnapshot {
   cityName?: string | null;
+  airportCode?: string | null;
   eventDate?: string | null;
   temperatureBand?: string | null;
   yesPrice?: number | null;

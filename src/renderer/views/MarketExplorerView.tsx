@@ -58,6 +58,9 @@ const MARKET_SIDE_LABELS: Record<MarketSideFilter, string> = {
 
 const DEFAULT_SORT_BY: NonNullable<MarketQuery['sortBy']> = 'volume24h';
 const DEFAULT_SORT_DIR: NonNullable<MarketQuery['sortDir']> = 'desc';
+const OVERVIEW_CITY_GROUP_LIMIT = 8;
+const OVERVIEW_MARKETS_PER_CITY_LIMIT = 6;
+const PRECISION_TABLE_ROW_LIMIT = 80;
 const SEVERITY_WEIGHT: Record<MarketRow['bubbleSeverity'], number> = {
   critical: 3,
   warning: 2,
@@ -232,6 +235,14 @@ export const MarketExplorerView = ({
 
   const deferredCityKey = useDeferredValue(cityKey);
   const cityGroups = useMemo(() => groupMarketsByCity(rows), [rows]);
+  const visibleCityGroups = useMemo(
+    () => cityGroups.slice(0, OVERVIEW_CITY_GROUP_LIMIT),
+    [cityGroups],
+  );
+  const visiblePrecisionRows = useMemo(
+    () => rows.slice(0, PRECISION_TABLE_ROW_LIMIT),
+    [rows],
+  );
   const selectedMarket = useMemo(
     () => rows.find((row) => row.marketId === selectedMarketId) ?? rows[0] ?? null,
     [rows, selectedMarketId],
@@ -242,8 +253,15 @@ export const MarketExplorerView = ({
   const riskCount = rows.filter(
     (row) => row.bubbleSeverity === 'critical' || row.bubbleSeverity === 'warning',
   ).length;
+  const visibleOverviewMarketCount = visibleCityGroups.reduce(
+    (sum, group) => sum + Math.min(group.rows.length, OVERVIEW_MARKETS_PER_CITY_LIMIT),
+    0,
+  );
+  const hiddenOverviewMarketCount = Math.max(0, rows.length - visibleOverviewMarketCount);
+  const hiddenPrecisionRowCount = Math.max(0, rows.length - visiblePrecisionRows.length);
+  const hasSearchTerm = cityKey.trim().length > 0;
   const activeFilterLabels = [
-    cityKey.trim() ? `城市：${cityKey.trim()}` : '城市：全部',
+    hasSearchTerm ? `搜索：${cityKey.trim()}` : '搜索：全部城市/机场',
     eventDate ? `日期：${eventDate}` : '日期：全部',
     `方向：${MARKET_SIDE_LABELS[sideFilter]}`,
     watchlistOnly ? '仅关注盘口' : '全部盘口',
@@ -343,7 +361,7 @@ export const MarketExplorerView = ({
               <input
                 value={cityKey}
                 onChange={(event) => setCityKey(event.target.value)}
-                placeholder={copy.explorer.cityPlaceholder}
+                placeholder="输入城市、机场代码或中文名"
               />
             </label>
 
@@ -464,23 +482,76 @@ export const MarketExplorerView = ({
             {viewMode === 'overview' ? (
               <div className="market-city-groups">
                 {cityGroups.length > 0 ? (
-                  cityGroups.map((group) => (
-                    <section className="market-city-group" key={group.key}>
-                      <header className="market-city-group__header">
-                        <div>
-                          <strong>{group.cityName}</strong>
-                          <span>
-                            {group.rows.length} 个盘口 · 最新更新 {formatTime(group.latestUpdatedAt)}
-                          </span>
-                        </div>
-                        <div className="market-city-group__stats">
-                          <span>{group.riskCount} 个重点风险</span>
-                          <span>{group.watchlistedCount} 个关注</span>
-                        </div>
-                      </header>
-                      <div className="market-band-grid">
-                        {group.rows.map((row) => (
-                          <MarketBand
+                  <>
+                    {visibleCityGroups.map((group) => {
+                      const visibleRows = group.rows.slice(0, OVERVIEW_MARKETS_PER_CITY_LIMIT);
+                      const hiddenGroupRowCount = group.rows.length - visibleRows.length;
+                      return (
+                        <section className="market-city-group" key={group.key}>
+                          <header className="market-city-group__header">
+                            <div>
+                              <strong>{group.cityName}</strong>
+                              <span>
+                                {group.rows.length} 个盘口 · 最新更新 {formatTime(group.latestUpdatedAt)}
+                              </span>
+                            </div>
+                            <div className="market-city-group__stats">
+                              <span>{group.riskCount} 个重点风险</span>
+                              <span>{group.watchlistedCount} 个关注</span>
+                            </div>
+                          </header>
+                          <div className="market-band-grid">
+                            {visibleRows.map((row) => (
+                              <MarketBand
+                                key={row.marketId}
+                                row={row}
+                                formatTime={formatTime}
+                                language={language}
+                                selected={row.marketId === selectedMarket?.marketId}
+                                onSelect={setSelectedMarketId}
+                              />
+                            ))}
+                          </div>
+                          {hiddenGroupRowCount > 0 ? (
+                            <div className="market-explorer-limit-hint">
+                              该城市还有 {hiddenGroupRowCount} 个盘口，输入日期或温度区间可继续收窄。
+                            </div>
+                          ) : null}
+                        </section>
+                      );
+                    })}
+                    {hiddenOverviewMarketCount > 0 ? (
+                      <div className="market-explorer-limit-hint" role="note">
+                        首屏仅展示 {visibleCityGroups.length} 个城市、{visibleOverviewMarketCount}{' '}
+                        个最有决策价值的盘口；输入城市、机场代码或中文名继续筛选。
+                      </div>
+                    ) : null}
+                  </>
+                ) : (
+                  <div className="market-explorer-empty">{copy.explorer.noRows}</div>
+                )}
+              </div>
+            ) : (
+              rows.length > 0 ? (
+                <>
+                  <div className="table-wrapper market-precision-table">
+                    <table className="dense-table dense-table--scrollable">
+                      <thead>
+                        <tr>
+                          <th>{copy.common.city}</th>
+                          <th>{copy.common.date}</th>
+                          <th>{copy.dashboard.temperatureBand}</th>
+                          <th>{copy.dashboard.yesPrice}</th>
+                          <th>{copy.dashboard.bid}</th>
+                          <th>{copy.dashboard.ask}</th>
+                          <th>{copy.dashboard.spread}</th>
+                          <th>{copy.dashboard.change5m}</th>
+                          <th>{copy.common.updated}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {visiblePrecisionRows.map((row) => (
+                          <MarketExplorerRow
                             key={row.marketId}
                             row={row}
                             formatTime={formatTime}
@@ -489,44 +560,15 @@ export const MarketExplorerView = ({
                             onSelect={setSelectedMarketId}
                           />
                         ))}
-                      </div>
-                    </section>
-                  ))
-                ) : (
-                  <div className="market-explorer-empty">{copy.explorer.noRows}</div>
-                )}
-              </div>
-            ) : (
-              rows.length > 0 ? (
-                <div className="table-wrapper market-precision-table">
-                  <table className="dense-table dense-table--scrollable">
-                    <thead>
-                      <tr>
-                        <th>{copy.common.city}</th>
-                        <th>{copy.common.date}</th>
-                        <th>{copy.dashboard.temperatureBand}</th>
-                        <th>{copy.dashboard.yesPrice}</th>
-                        <th>{copy.dashboard.bid}</th>
-                        <th>{copy.dashboard.ask}</th>
-                        <th>{copy.dashboard.spread}</th>
-                        <th>{copy.dashboard.change5m}</th>
-                        <th>{copy.common.updated}</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {rows.map((row) => (
-                        <MarketExplorerRow
-                          key={row.marketId}
-                          row={row}
-                          formatTime={formatTime}
-                          language={language}
-                          selected={row.marketId === selectedMarket?.marketId}
-                          onSelect={setSelectedMarketId}
-                        />
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                      </tbody>
+                    </table>
+                  </div>
+                  {hiddenPrecisionRowCount > 0 ? (
+                    <div className="market-explorer-limit-hint" role="note">
+                      精确列表已限制展示前 {visiblePrecisionRows.length} 行；请用城市、机场、日期或关注筛选定位。
+                    </div>
+                  ) : null}
+                </>
               ) : (
                 <div className="market-explorer-empty">{copy.explorer.noRows}</div>
               )

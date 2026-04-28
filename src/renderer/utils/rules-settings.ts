@@ -148,6 +148,10 @@ export const DEFAULT_RULE_DRAFT_SORT: RuleDraftSortOptions = {
   direction: 'asc',
 };
 
+const UNIFIED_RULE_SEVERITY: AlertRule['severity'] = 'warning';
+const UNIFIED_RULE_SEVERITY_KEY = 'alert';
+const UNIFIED_RULE_SEVERITY_LABEL = '告警';
+
 const RULE_SCOPE_EMPTY_LABEL = '未限定范围，监控全部市场';
 const RULE_SCOPE_GLOBAL_QUIET_HOURS_LABEL = '使用全局静音时段';
 const DEFAULT_CUSTOM_RULE_NAME = '新建规则';
@@ -179,9 +183,9 @@ export const RULE_METRIC_LABELS: Record<AlertRule['metric'], string> = {
 };
 
 export const RULE_SEVERITY_LABELS: Record<AlertRule['severity'], string> = {
-  critical: '告警',
-  warning: '告警',
-  info: '告警',
+  critical: UNIFIED_RULE_SEVERITY_LABEL,
+  warning: UNIFIED_RULE_SEVERITY_LABEL,
+  info: UNIFIED_RULE_SEVERITY_LABEL,
 };
 
 export const RULE_OPERATOR_LABELS: Record<AlertRule['operator'], string> = {
@@ -190,12 +194,6 @@ export const RULE_OPERATOR_LABELS: Record<AlertRule['operator'], string> = {
   '>=': '不低于',
   '<=': '不高于',
   crosses: '达到或穿过',
-};
-
-const RULE_SEVERITY_ORDER: Record<AlertRule['severity'], number> = {
-  critical: 0,
-  warning: 1,
-  info: 2,
 };
 
 const RULE_TEMPLATE_DEFINITIONS = [
@@ -411,6 +409,7 @@ export const normalizeRuleDraft = (rule: AlertRule): AlertRule => {
       ? Math.max(0, Math.trunc(rule.dedupeWindowSec))
       : 30,
     bubbleWeight: Number.isFinite(rule.bubbleWeight) ? Math.max(0, rule.bubbleWeight) : 60,
+    severity: UNIFIED_RULE_SEVERITY,
     soundProfileId: cleanText(rule.soundProfileId),
     scope: normalizeScope(rule.scope),
   };
@@ -508,7 +507,7 @@ export const createCustomRule = (
 export const formatRuleMetricLabel = (metric: AlertRule['metric']) => RULE_METRIC_LABELS[metric];
 
 export const formatRuleSeverityLabel = (severity: AlertRule['severity']) =>
-  RULE_SEVERITY_LABELS[severity];
+  RULE_SEVERITY_LABELS[severity] ?? UNIFIED_RULE_SEVERITY_LABEL;
 
 export const formatRuleOperatorLabel = (operator: AlertRule['operator']) =>
   RULE_OPERATOR_LABELS[operator];
@@ -1021,7 +1020,7 @@ const compareRuleValues = (
     case 'metric':
       return compareText(RULE_METRIC_LABELS[left.metric], RULE_METRIC_LABELS[right.metric]);
     case 'severity':
-      return RULE_SEVERITY_ORDER[left.severity] - RULE_SEVERITY_ORDER[right.severity];
+      return 0;
     case 'threshold':
       return left.threshold - right.threshold;
     case 'windowSec':
@@ -1055,7 +1054,7 @@ const buildRuleScopeGroupMeta = (rule: AlertRule) => {
 const RULE_GROUP_ORDER: Record<RuleDraftGroupKey, readonly string[]> = {
   source: ['builtin', 'custom'],
   enabled: ['enabled', 'disabled'],
-  severity: ['critical', 'warning', 'info'],
+  severity: [UNIFIED_RULE_SEVERITY_KEY],
   metric: [
     'price',
     'change5m',
@@ -1079,7 +1078,7 @@ const resolveRuleGroup = (
         ? { key: 'enabled', label: DEFAULT_ENABLED_RULE_GROUP_LABEL }
         : { key: 'disabled', label: DEFAULT_DISABLED_RULE_GROUP_LABEL };
     case 'severity':
-      return { key: rule.severity, label: RULE_SEVERITY_LABELS[rule.severity] };
+      return { key: UNIFIED_RULE_SEVERITY_KEY, label: UNIFIED_RULE_SEVERITY_LABEL };
     case 'metric':
       return { key: rule.metric, label: RULE_METRIC_LABELS[rule.metric] };
     case 'scope':
@@ -1118,9 +1117,6 @@ export const filterRuleDrafts = (
       return false;
     }
     if (filter.metric && rule.metric !== filter.metric) {
-      return false;
-    }
-    if (filter.severity && rule.severity !== filter.severity) {
       return false;
     }
     if (cleanText(filter.soundProfileId) && rule.soundProfileId !== cleanText(filter.soundProfileId)) {

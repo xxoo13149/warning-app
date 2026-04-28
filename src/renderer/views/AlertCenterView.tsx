@@ -2,10 +2,20 @@ import { useEffect, useMemo, useState } from 'react';
 
 import { useI18n } from '../i18n';
 import type { AlertEvent } from '../types/contracts';
-import { buildAlertPresentation, type AlertPresentation } from '../utils/alert-summary';
+import {
+  buildAlertNotificationContent,
+  buildAlertPresentation,
+  type AlertPresentation,
+} from '../utils/alert-summary';
 
 interface AlertCenterViewProps {
   alerts: AlertEvent[];
+  focusAlertId?: string | null;
+  total: number;
+  hasMore: boolean;
+  loadingMore: boolean;
+  onLoadMore: () => void;
+  loadMoreError?: string | null;
 }
 
 interface AlertViewModel {
@@ -31,38 +41,48 @@ interface AlertCenterPersistedState {
 
 const pageText = {
   title: '告警中心',
-  rowsInFilter: (count: number) => `当前显示 ${count} 条`,
-  eyebrow: '告警工作台',
-  headline: '按城市和规则看清触发点',
-  hint: '这里不展示无关状态，只保留城市、规则、温度区间和盘口数值，方便快速判断是否需要行动。',
-  total: '告警记录',
-  cityCount: '涉及城市',
-  ruleCount: '规则类型',
-  latest: '最近触发',
+  rowsInFilter: (count: number) => `当前筛选 ${count} 条`,
+  eyebrow: '统一告警流',
+  headline: '先看地点，再看规则，再看盘面上下文',
+  hint:
+    '这里展示最新告警时间线。支持按城市、规则和排序方式快速筛选，并可以逐页继续加载更早的历史。',
+  total: '告警总数',
+  cityCount: '已载入城市',
+  ruleCount: '已载入规则',
+  latest: '最新触发',
   all: '全部',
+  any: '不限',
   currentScope: '当前范围',
   allAlerts: '全部告警',
-  clearFilters: '清空筛选',
-  clearSearch: '清空搜索',
-  currentSelected: '当前',
+  clearFilters: '恢复全部',
+  clearSearch: '清空',
+  selected: '已选',
+  unlimited: '未限制',
+  resultBadge: (count: number) => `结果 ${count} 条`,
   sortLabel: '排序方式',
   sortLatest: '最近触发',
   sortCity: '按城市',
   sortRule: '按规则',
-  ruleFilter: '按规则查看',
-  cityFilter: '按城市查看',
+  ruleFilter: '按规则筛选',
+  cityFilter: '按城市筛选',
   citySearchPlaceholder: '搜索城市',
   ruleSearchPlaceholder: '搜索规则',
   noMatches: '没有匹配项',
-  facts: '当前盘口',
-  context: '快速定位',
-  happenedAt: '触发时间',
+  facts: '关键数值',
+  context: '定位信息',
   city: '城市',
   rule: '规则',
   band: '温度区间',
   marketId: '盘口编号',
   empty: '当前筛选下没有告警。',
+  emptyCanLoadMore: '当前筛选下还没有命中已加载告警，可以继续加载更早历史。',
+  emptyCanLoadMoreUnfiltered: '当前还没有载入告警，可以继续加载更早历史。',
   noLatest: '暂无',
+  loadedSummary: (loaded: number, total: number) =>
+    total > loaded ? `已载入 ${loaded} / ${total}` : `已载入 ${loaded}`,
+  loadMore: '加载更多',
+  loadingMore: '加载中...',
+  allLoaded: '已加载全部',
 };
 
 const MAX_FILTER_OPTIONS = 8;
@@ -96,7 +116,10 @@ const toFilterOptions = (counts: Map<string, number>) =>
       label,
       count,
     }))
-    .sort((left, right) => right.count - left.count || left.label.localeCompare(right.label, 'zh-CN'));
+    .sort(
+      (left, right) =>
+        right.count - left.count || left.label.localeCompare(right.label, 'zh-CN'),
+    );
 
 const normalizeSearchText = (value: string) => value.trim().toLowerCase();
 
@@ -147,11 +170,17 @@ const compareAlertTime = (left: AlertViewModel, right: AlertViewModel) =>
 const sortAlertModels = (items: AlertViewModel[], sortBy: AlertSortKey) =>
   [...items].sort((left, right) => {
     if (sortBy === 'city') {
-      const byCity = left.presentation.cityLabel.localeCompare(right.presentation.cityLabel, 'zh-CN');
+      const byCity = left.presentation.cityLabel.localeCompare(
+        right.presentation.cityLabel,
+        'zh-CN',
+      );
       if (byCity !== 0) {
         return byCity;
       }
-      const byRule = left.presentation.ruleLabel.localeCompare(right.presentation.ruleLabel, 'zh-CN');
+      const byRule = left.presentation.ruleLabel.localeCompare(
+        right.presentation.ruleLabel,
+        'zh-CN',
+      );
       if (byRule !== 0) {
         return byRule;
       }
@@ -159,11 +188,17 @@ const sortAlertModels = (items: AlertViewModel[], sortBy: AlertSortKey) =>
     }
 
     if (sortBy === 'rule') {
-      const byRule = left.presentation.ruleLabel.localeCompare(right.presentation.ruleLabel, 'zh-CN');
+      const byRule = left.presentation.ruleLabel.localeCompare(
+        right.presentation.ruleLabel,
+        'zh-CN',
+      );
       if (byRule !== 0) {
         return byRule;
       }
-      const byCity = left.presentation.cityLabel.localeCompare(right.presentation.cityLabel, 'zh-CN');
+      const byCity = left.presentation.cityLabel.localeCompare(
+        right.presentation.cityLabel,
+        'zh-CN',
+      );
       if (byCity !== 0) {
         return byCity;
       }
@@ -176,7 +211,7 @@ const sortAlertModels = (items: AlertViewModel[], sortBy: AlertSortKey) =>
 const getPresentationContextValue = (presentation: AlertPresentation, label: string) =>
   presentation.context.find((item) => item.label === label)?.value ?? '';
 
-const sanitizeCardDetail = (detail: string | null) => {
+const sanitizeCardDetail = (detail: string | null, notificationBody: string) => {
   if (!detail) {
     return null;
   }
@@ -187,7 +222,10 @@ const sanitizeCardDetail = (detail: string | null) => {
     .filter(
       (part) =>
         part.length > 0 &&
+        !notificationBody.includes(part) &&
+        !part.startsWith(`${pageText.band}:`) &&
         !part.startsWith(`${pageText.band}：`) &&
+        !part.startsWith(`${pageText.marketId}:`) &&
         !part.startsWith(`${pageText.marketId}：`),
     );
 
@@ -207,10 +245,14 @@ const renderFilterChips = (
 ) => (
   <div className="alert-center-filter-group">
     <div className="alert-center-filter-group__head">
-      <span>{label}</span>
-      <strong>
-        {pageText.currentSelected}：{selectedValue === 'all' ? pageText.all : selectedLabel}
-      </strong>
+      <div className="alert-center-filter-group__title">
+        <span>{label}</span>
+        <small>
+          {selectedValue === 'all'
+            ? pageText.unlimited
+            : `${pageText.selected}: ${selectedLabel}`}
+        </small>
+      </div>
     </div>
     <div className="alert-center-filter-group__search">
       <label className="alert-center-filter-search">
@@ -238,7 +280,7 @@ const renderFilterChips = (
         aria-pressed={selectedValue === 'all'}
         onClick={() => onSelect('all')}
       >
-        <span>{pageText.all}</span>
+        <span>{pageText.any}</span>
         <strong>{allCount}</strong>
       </button>
       {options.map((option) => (
@@ -256,20 +298,22 @@ const renderFilterChips = (
     </div>
     {searchValue && options.length === 0 ? (
       <div className="alert-center-filter-empty">
-        {searchPlaceholder}：{pageText.noMatches}
+        {searchPlaceholder}: {pageText.noMatches}
       </div>
     ) : null}
   </div>
 );
 
 const renderSortChips = (selectedValue: AlertSortKey, onSelect: (value: AlertSortKey) => void) => (
-  <div className="alert-center-filter-group">
+  <div className="alert-center-filter-group alert-center-filter-group--compact">
     <div className="alert-center-filter-group__head">
-      <span>{pageText.sortLabel}</span>
-      <strong>
-        {pageText.currentSelected}：
-        {ALERT_SORT_OPTIONS.find((option) => option.value === selectedValue)?.label ?? pageText.sortLatest}
-      </strong>
+      <div className="alert-center-filter-group__title">
+        <span>{pageText.sortLabel}</span>
+        <small>
+          {ALERT_SORT_OPTIONS.find((option) => option.value === selectedValue)?.label ??
+            pageText.sortLatest}
+        </small>
+      </div>
     </div>
     <div className="alert-center-chip-row">
       {ALERT_SORT_OPTIONS.map((option) => (
@@ -287,7 +331,15 @@ const renderSortChips = (selectedValue: AlertSortKey, onSelect: (value: AlertSor
   </div>
 );
 
-export const AlertCenterView = ({ alerts }: AlertCenterViewProps) => {
+export const AlertCenterView = ({
+  alerts,
+  focusAlertId = null,
+  total,
+  hasMore,
+  loadingMore,
+  onLoadMore,
+  loadMoreError = null,
+}: AlertCenterViewProps) => {
   const { formatDateTime } = useI18n();
   const persistedState = useMemo(readPersistedAlertCenterState, []);
   const [ruleFilter, setRuleFilter] = useState(persistedState.ruleFilter);
@@ -295,6 +347,7 @@ export const AlertCenterView = ({ alerts }: AlertCenterViewProps) => {
   const [ruleSearch, setRuleSearch] = useState(persistedState.ruleSearch);
   const [citySearch, setCitySearch] = useState(persistedState.citySearch);
   const [sortBy, setSortBy] = useState<AlertSortKey>(persistedState.sortBy);
+  const [highlightedAlertId, setHighlightedAlertId] = useState<string | null>(null);
 
   const alertModels = useMemo<AlertViewModel[]>(
     () =>
@@ -320,9 +373,9 @@ export const AlertCenterView = ({ alerts }: AlertCenterViewProps) => {
     () =>
       sortAlertModels(
         alertModels.filter(
-        (item) =>
-          (ruleFilter === 'all' || item.presentation.ruleLabel === ruleFilter) &&
-          (cityFilter === 'all' || item.presentation.cityLabel === cityFilter),
+          (item) =>
+            (ruleFilter === 'all' || item.presentation.ruleLabel === ruleFilter) &&
+            (cityFilter === 'all' || item.presentation.cityLabel === cityFilter),
         ),
         sortBy,
       ),
@@ -332,12 +385,13 @@ export const AlertCenterView = ({ alerts }: AlertCenterViewProps) => {
   const stats = useMemo(() => {
     const latestTime = getLatestAlertTime(alertModels);
     return {
-      total: alertModels.length,
+      total,
       cityCount: countBy(alertModels, (item) => item.presentation.cityLabel).size,
       ruleCount: countBy(alertModels, (item) => item.presentation.ruleLabel).size,
-      latest: latestTime > 0 ? formatDateTime(new Date(latestTime).toISOString()) : pageText.noLatest,
+      latest:
+        latestTime > 0 ? formatDateTime(new Date(latestTime).toISOString()) : pageText.noLatest,
     };
-  }, [alertModels, formatDateTime]);
+  }, [alertModels, formatDateTime, total]);
 
   const selectedRuleLabel =
     ruleFilter === 'all'
@@ -359,9 +413,19 @@ export const AlertCenterView = ({ alerts }: AlertCenterViewProps) => {
   const selectedSortLabel =
     ALERT_SORT_OPTIONS.find((option) => option.value === sortBy)?.label ?? pageText.sortLatest;
   const scopeBadges = [
-    ...(hasActiveFilters ? [`城市 · ${selectedCityLabel}`, `规则 · ${selectedRuleLabel}`] : [pageText.allAlerts]),
-    `排序 · ${selectedSortLabel}`,
+    pageText.resultBadge(visibleAlerts.length),
+    ...(hasActiveFilters ? [] : [`范围: ${pageText.allAlerts}`]),
+    ...(cityFilter !== 'all' ? [`城市: ${selectedCityLabel}`] : []),
+    ...(ruleFilter !== 'all' ? [`规则: ${selectedRuleLabel}`] : []),
+    `排序: ${selectedSortLabel}`,
   ];
+  const emptyStateText = hasMore
+    ? hasActiveFilters || alerts.length > 0
+      ? pageText.emptyCanLoadMore
+      : pageText.emptyCanLoadMoreUnfiltered
+    : pageText.empty;
+  const shouldShowPagination =
+    hasMore || alerts.length > 0 || total > 0 || Boolean(loadMoreError);
 
   useEffect(() => {
     if (ruleFilter !== 'all' && !ruleOptions.some((option) => option.value === ruleFilter)) {
@@ -391,6 +455,39 @@ export const AlertCenterView = ({ alerts }: AlertCenterViewProps) => {
       } satisfies AlertCenterPersistedState),
     );
   }, [cityFilter, citySearch, ruleFilter, ruleSearch, sortBy]);
+
+  useEffect(() => {
+    if (!focusAlertId) {
+      return;
+    }
+
+    setCityFilter('all');
+    setRuleFilter('all');
+    setCitySearch('');
+    setRuleSearch('');
+    setSortBy('latest');
+    setHighlightedAlertId(focusAlertId);
+  }, [focusAlertId]);
+
+  useEffect(() => {
+    if (!highlightedAlertId || !visibleAlerts.some((item) => item.alert.id === highlightedAlertId)) {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      const target = document.getElementById(`alert-center-card-${highlightedAlertId}`);
+      target?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      target?.focus({ preventScroll: true });
+    });
+    const timeout = window.setTimeout(() => {
+      setHighlightedAlertId((current) => (current === highlightedAlertId ? null : current));
+    }, 4_500);
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.clearTimeout(timeout);
+    };
+  }, [highlightedAlertId, visibleAlerts]);
 
   return (
     <section className="workspace">
@@ -456,81 +553,95 @@ export const AlertCenterView = ({ alerts }: AlertCenterViewProps) => {
                 </button>
               ) : null}
             </div>
-            {renderFilterChips(
-              pageText.cityFilter,
-              visibleCityOptions,
-              cityFilter,
-              selectedCityLabel,
-              stats.cityCount,
-              citySearch,
-              pageText.citySearchPlaceholder,
-              setCityFilter,
-              setCitySearch,
-            )}
-            {renderFilterChips(
-              pageText.ruleFilter,
-              visibleRuleOptions,
-              ruleFilter,
-              selectedRuleLabel,
-              stats.ruleCount,
-              ruleSearch,
-              pageText.ruleSearchPlaceholder,
-              setRuleFilter,
-              setRuleSearch,
-            )}
+
+            <div className="alert-center-filter-layout">
+              {renderFilterChips(
+                pageText.cityFilter,
+                visibleCityOptions,
+                cityFilter,
+                selectedCityLabel,
+                stats.cityCount,
+                citySearch,
+                pageText.citySearchPlaceholder,
+                setCityFilter,
+                setCitySearch,
+              )}
+              {renderFilterChips(
+                pageText.ruleFilter,
+                visibleRuleOptions,
+                ruleFilter,
+                selectedRuleLabel,
+                stats.ruleCount,
+                ruleSearch,
+                pageText.ruleSearchPlaceholder,
+                setRuleFilter,
+                setRuleSearch,
+              )}
+            </div>
+
             {renderSortChips(sortBy, setSortBy)}
           </div>
 
           {visibleAlerts.length > 0 ? (
             <div className="alert-center-list">
-              {visibleAlerts.map(({ alert, presentation }) => (
-                (() => {
-                  const temperatureBand = getPresentationContextValue(presentation, pageText.band);
-                  const marketId = getPresentationContextValue(presentation, pageText.marketId);
-                  const detailText = sanitizeCardDetail(presentation.detail);
-                  const badges = [
-                    `${pageText.city} · ${presentation.cityLabel}`,
-                    `${pageText.rule} · ${presentation.ruleLabel}`,
-                    ...(temperatureBand ? [`温区 · ${temperatureBand}`] : []),
-                  ];
-                  const quickFacts = [
-                    { label: pageText.city, value: presentation.cityLabel },
-                    ...(temperatureBand ? [{ label: pageText.band, value: temperatureBand }] : []),
-                    ...(marketId ? [{ label: pageText.marketId, value: marketId }] : []),
-                    { label: pageText.happenedAt, value: formatDateTime(alert.triggeredAt) },
-                  ];
+              {visibleAlerts.map(({ alert, presentation }) => {
+                const notificationContent = buildAlertNotificationContent(alert);
+                const temperatureBand = getPresentationContextValue(presentation, pageText.band);
+                const marketId = getPresentationContextValue(presentation, pageText.marketId);
+                const detailText = sanitizeCardDetail(
+                  presentation.detail,
+                  notificationContent.body,
+                );
+                const badges = [
+                  presentation.alertLabel,
+                  ...(temperatureBand ? [`温区: ${temperatureBand}`] : []),
+                ];
+                const visibleFacts = presentation.facts
+                  .filter((fact) => !notificationContent.body.includes(fact.value))
+                  .slice(0, 4);
+                const quickFacts = [
+                  { label: pageText.city, value: presentation.cityLabel },
+                  ...(temperatureBand ? [{ label: pageText.band, value: temperatureBand }] : []),
+                  { label: pageText.rule, value: presentation.ruleLabel },
+                  ...(marketId ? [{ label: pageText.marketId, value: marketId }] : []),
+                ];
 
-                  return (
-                    <article key={alert.id} className="alert-center-card">
-                      <div className="alert-center-card__main">
-                        <div className="alert-center-card__top">
-                          <div className="alert-center-card__header-copy">
-                            <div className="alert-center-card__badges">
-                              {badges.map((badge) => (
-                                <span
-                                  key={`${alert.id}-${badge}`}
-                                  className="alert-center-card__status"
-                                >
-                                  {badge}
-                                </span>
-                              ))}
-                            </div>
-                            <h3>{presentation.summary}</h3>
+                return (
+                  <article
+                    key={alert.id}
+                    id={`alert-center-card-${alert.id}`}
+                    className={`alert-center-card ${
+                      highlightedAlertId === alert.id ? 'alert-center-card--focused' : ''
+                    }`}
+                    tabIndex={highlightedAlertId === alert.id ? -1 : undefined}
+                  >
+                    <div className="alert-center-card__main">
+                      <div className="alert-center-card__top">
+                        <div className="alert-center-card__header-copy">
+                          <div className="alert-center-card__badges">
+                            {badges.map((badge) => (
+                              <span key={`${alert.id}-${badge}`} className="alert-center-card__status">
+                                {badge}
+                              </span>
+                            ))}
                           </div>
-                          <time
-                            className="alert-center-card__time"
-                            dateTime={alert.triggeredAt}
-                          >
-                            {formatDateTime(alert.triggeredAt)}
-                          </time>
+                          <h3>{notificationContent.title}</h3>
+                          <p className="alert-center-card__summary alert-center-card__summary--lead">
+                            {notificationContent.body}
+                          </p>
                         </div>
+                        <time className="alert-center-card__time" dateTime={alert.triggeredAt}>
+                          {formatDateTime(alert.triggeredAt)}
+                        </time>
+                      </div>
 
-                        {detailText ? (
-                          <p className="alert-center-card__detail">{detailText}</p>
-                        ) : null}
+                      {detailText ? (
+                        <p className="alert-center-card__detail">{detailText}</p>
+                      ) : null}
 
+                      {visibleFacts.length > 0 ? (
                         <div className="alert-center-card__facts" aria-label={pageText.facts}>
-                          {presentation.facts.map((fact, index) => (
+                          {visibleFacts.map((fact, index) => (
                             <div
                               key={`${alert.id}-${fact.label}-${fact.value}`}
                               className={`alert-center-fact ${index === 0 ? 'is-primary' : ''} ${
@@ -542,25 +653,50 @@ export const AlertCenterView = ({ alerts }: AlertCenterViewProps) => {
                             </div>
                           ))}
                         </div>
-                      </div>
+                      ) : null}
+                    </div>
 
-                      <aside className="alert-center-card__context" aria-label={pageText.context}>
-                        <span>{pageText.context}</span>
-                        {quickFacts.map((item) => (
-                          <div key={`${alert.id}-${item.label}`}>
-                            <small>{item.label}</small>
-                            <strong>{item.value}</strong>
-                          </div>
-                        ))}
-                      </aside>
-                    </article>
-                  );
-                })()
-              ))}
+                    <aside className="alert-center-card__context" aria-label={pageText.context}>
+                      <span>{pageText.context}</span>
+                      {quickFacts.map((item) => (
+                        <div key={`${alert.id}-${item.label}`}>
+                          <small>{item.label}</small>
+                          <strong>{item.value}</strong>
+                        </div>
+                      ))}
+                    </aside>
+                  </article>
+                );
+              })}
             </div>
           ) : (
-            <div className="alert-center-empty">{pageText.empty}</div>
+            <div className="alert-center-empty">{emptyStateText}</div>
           )}
+
+          {shouldShowPagination ? (
+            <div className="alert-center-pagination">
+              <span className="alert-center-pagination__summary">
+                {pageText.loadedSummary(alerts.length, total)}
+              </span>
+              {hasMore ? (
+                <button
+                  type="button"
+                  className="ghost-button"
+                  disabled={loadingMore}
+                  onClick={onLoadMore}
+                >
+                  {loadingMore ? pageText.loadingMore : pageText.loadMore}
+                </button>
+              ) : (
+                <span className="alert-center-pagination__status">{pageText.allLoaded}</span>
+              )}
+              {loadMoreError ? (
+                <p className="alert-center-pagination__error" role="alert">
+                  {loadMoreError}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
         </section>
       </section>
     </section>

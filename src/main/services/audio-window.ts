@@ -1,8 +1,13 @@
-import { BrowserWindow } from 'electron';
+import { BrowserWindow, shell } from 'electron';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { BUILTIN_SOUND_PATH_PREFIX } from '../../shared/sound-library';
+
+export interface PreviewSoundPlaybackResult {
+  played: boolean;
+  fallback?: 'system-beep';
+}
 
 const AUDIO_WINDOW_HTML = `<!doctype html>
 <html>
@@ -171,8 +176,16 @@ export class HiddenAudioWindow {
   }
 
   public async playFromPath(filePath: string, gain = 1): Promise<boolean> {
+    const result = await this.previewFromPath(filePath, gain);
+    return result.played;
+  }
+
+  public async previewFromPath(
+    filePath: string,
+    gain = 1,
+  ): Promise<PreviewSoundPlaybackResult> {
     if (!filePath) {
-      return false;
+      return { played: false };
     }
 
     const audioWindow = this.create();
@@ -187,9 +200,12 @@ export class HiddenAudioWindow {
 
     try {
       const played = await audioWindow.webContents.executeJavaScript(invocation, true);
-      return Boolean(played);
+      if (played) {
+        return { played: true };
+      }
+      return this.playSystemBeepFallback();
     } catch {
-      return false;
+      return this.playSystemBeepFallback();
     }
   }
 
@@ -221,5 +237,17 @@ export class HiddenAudioWindow {
 
       audioWindow.webContents.once('did-finish-load', listener);
     });
+  }
+
+  private playSystemBeepFallback(): PreviewSoundPlaybackResult {
+    try {
+      shell.beep();
+      return {
+        played: true,
+        fallback: 'system-beep',
+      };
+    } catch {
+      return { played: false };
+    }
   }
 }

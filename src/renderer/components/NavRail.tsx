@@ -12,24 +12,24 @@ export const NavRail = ({ active, onChange, alertCount }: NavRailProps) => {
   const copy =
     language === 'zh-CN'
       ? {
-          brandTitle: '预警中心',
-          brandSubtitle: '天气监控',
+          brandTitle: '天气监控',
+          brandSubtitle: '盘口与告警',
           workspaceAria: '工作区导航',
           items: {
             dashboard: { label: '监控总览', alias: '风险看板', hint: '集中查看重点风险和最新变化' },
             explorer: { label: '市场总览', alias: '盘口检索', hint: '按条件筛选并查看全部监控项' },
-            alerts: { label: '告警中心', alias: '待办处置', hint: '只显示需要人工处理的告警' },
-            rules: { label: '规则管理', alias: '条件与通知', hint: '快速调整监控条件、级别和提醒方式' },
+            alerts: { label: '告警中心', alias: '触发记录', hint: '按城市和规则查看最新触发的告警' },
+            rules: { label: '规则管理', alias: '条件与通知', hint: '快速调整监控条件和提醒方式' },
           },
         }
       : {
-          brandTitle: 'Polymarket',
-          brandSubtitle: 'Weather Monitor',
+          brandTitle: '天气监控',
+          brandSubtitle: '盘口与告警',
           workspaceAria: 'workspace navigation',
           items: {
             dashboard: { label: 'Bubble Board', alias: '监控总览', hint: 'City risk homepage' },
             explorer: { label: 'Market Explorer', alias: '市场探索', hint: 'Browse full markets' },
-            alerts: { label: 'Alert Center', alias: '告警中心', hint: 'Review alerts' },
+            alerts: { label: 'Alert Center', alias: '告警中心', hint: 'Review recent alerts' },
             rules: { label: 'Rules & Settings', alias: '规则设置', hint: 'Rules, sound, runtime' },
           },
         };

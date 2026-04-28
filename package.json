@@ -1,8 +1,8 @@
 {
   "name": "polymarket-weather-monitor",
-  "productName": "Polymarket Weather Monitor",
+  "productName": "天气监控",
   "version": "0.1.0",
-  "description": "Windows desktop monitor for Polymarket weather markets.",
+  "description": "天气监控桌面应用。",
   "main": ".vite/build/main.js",
   "private": true,
   "scripts": {
@@ -19,6 +19,8 @@
     "lint": "eslint --ext .ts,.tsx src tests forge.config.ts vite.*.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:startup-smoke": "node scripts/verify-startup-smoke.mjs",
+    "test:product-readiness": "node scripts/verify-product-readiness.mjs",
     "test:watch": "vitest",
     "rebuild:sqlite": "electron-rebuild -f -w better-sqlite3"
   },
@@ -28,11 +30,16 @@
     "weather",
     "monitor"
   ],
-  "author": {
-    "name": "yyx",
-    "email": "3236064212@qq.com"
-  },
+  "author": "Warning App Contributors",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xxoo13149/warning-app.git"
+  },
+  "bugs": {
+    "url": "https://github.com/xxoo13149/warning-app/issues"
+  },
+  "homepage": "https://github.com/xxoo13149/warning-app#readme",
   "devDependencies": {
     "@electron-forge/cli": "^7.11.1",
     "@electron-forge/maker-deb": "^7.11.1",

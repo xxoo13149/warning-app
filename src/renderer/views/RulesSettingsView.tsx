@@ -1,17 +1,32 @@
 import { useEffect, useMemo, useState } from 'react';
 
 import { QuickControlPanel } from '../components/QuickControlPanel';
+import type { MonitorRuntimeIssue } from '../hooks/useMonitorConsole';
 import { useI18n } from '../i18n';
+import {
+  DEFAULT_ALERT_RETENTION_DAYS,
+  DEFAULT_TICK_RETENTION_DAYS,
+  MAX_ALERT_RETENTION_DAYS,
+  MAX_TICK_RETENTION_DAYS,
+  MIN_ALERT_RETENTION_DAYS,
+  MIN_TICK_RETENTION_DAYS,
+} from '../../shared/constants';
 import type {
-  AlertEvent,
   AlertRule,
   AppControlState,
   AppHealth,
   AppSettings,
   MarketRow,
   PreviewSoundPayload,
+  PreviewSoundResult,
   RegisterSoundPayload,
+  RuntimeDiagnosticsPackageResult,
+  RuntimeStorageSummary,
   RulePreviewResult,
+  StorageMaintenanceResult,
+  StorageMaintenanceSummary,
+  StorageBackupResult,
+  StorageCleanupResult,
   RuntimeActionFeedback,
   SoundProfile,
 } from '../types/contracts';
@@ -88,18 +103,25 @@ interface RuleListSignal {
 interface RulesSettingsViewProps {
   rules: AlertRule[];
   marketRows: MarketRow[];
-  alerts: AlertEvent[];
+  latestAlertAtByRuleId: Record<string, string | undefined>;
   health: AppHealth;
   settings: AppSettings;
+  storageSummary: RuntimeStorageSummary | null;
+  storageMaintenance: StorageMaintenanceSummary | null;
   controlState: AppControlState;
   runtimeAction: RuntimeActionFeedback;
+  runtimeIssues?: MonitorRuntimeIssue[];
   soundProfiles: SoundProfile[];
   onPreviewRule: (rule: AlertRule) => Promise<RulePreviewResult>;
   onSaveRules: (nextRules: AlertRule[]) => void;
   onUpdateSettings: (patch: Partial<AppSettings>) => Promise<void> | void;
   onPickSound: (id: string) => Promise<void> | void;
   onRegisterSound: (payload?: RegisterSoundPayload) => Promise<void> | void;
-  onPreviewSound: (payload: PreviewSoundPayload) => Promise<boolean>;
+  onClearStorageCache: () => Promise<StorageCleanupResult>;
+  onCreateStorageBackup: () => Promise<StorageBackupResult>;
+  onCreateDiagnosticsPackage: () => Promise<RuntimeDiagnosticsPackageResult>;
+  onRunStorageMaintenance: () => Promise<StorageMaintenanceResult>;
+  onPreviewSound: (payload: PreviewSoundPayload) => Promise<PreviewSoundResult>;
   onImportCityMap: (lines: string[]) => Promise<number> | number;
   onSetNotificationsEnabled: (enabled: boolean) => void;
   onStopMonitor: () => void;
@@ -230,6 +252,8 @@ const RULE_ACTION_PANEL_TEXT = {
   restoreDraft: '恢复后台值',
 };
 
+const STORAGE_CLEAR_RECOMMENDATION_HIGH_BYTES = 512 * 1024 * 1024;
+
 type SourceFilter = (typeof SOURCE_FILTERS)[number]['value'];
 type EnabledFilter = (typeof ENABLED_FILTERS)[number]['value'];
 type ScopeFilter = (typeof SCOPE_FILTERS)[number]['value'];
@@ -353,6 +377,35 @@ const formatDateTimeText = (value: string) => {
     minute: '2-digit',
     hour12: false,
   }).format(new Date(timestamp));
+};
+
+const formatOptionalDateTimeText = (value: string | null | undefined) =>
+  value ? formatDateTimeText(value) : '暂无';
+
+const formatOptionalDurationText = (value: number | null | undefined) => {
+  if (!hasNumber(value) || value <= 0) {
+    return '暂无';
+  }
+  if (value < 1_000) {
+    return `${Math.round(value)} ms`;
+  }
+  return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)} s`;
+};
+
+const formatFileSizeText = (value: number | null | undefined) => {
+  if (!hasNumber(value) || value <= 0) {
+    return '0 B';
+  }
+
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let size = value;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  const digits = size >= 100 || unitIndex === 0 ? 0 : size >= 10 ? 1 : 2;
+  return `${size.toFixed(digits)} ${units[unitIndex]}`;
 };
 
 const compareRuleValue = (
@@ -480,15 +533,10 @@ const formatRuleValue = (rule: AlertRule, value: number | null | undefined) => {
   }
 };
 
-const getLatestAlertForRule = (alerts: AlertEvent[], ruleId: string) =>
-  alerts
-    .filter((alert) => alert.ruleId === ruleId)
-    .sort((left, right) => Date.parse(right.triggeredAt) - Date.parse(left.triggeredAt))[0] ?? null;
-
 const buildRuleDiagnostic = ({
   rule,
   marketRows,
-  alerts,
+  latestAlertAtByRuleId,
   health,
   hasUnsavedChanges,
   isQuietHoursActive,
@@ -496,7 +544,7 @@ const buildRuleDiagnostic = ({
 }: {
   rule: AlertRule | null;
   marketRows: MarketRow[];
-  alerts: AlertEvent[];
+  latestAlertAtByRuleId: Record<string, string | undefined>;
   health: AppHealth;
   hasUnsavedChanges: boolean;
   isQuietHoursActive: boolean;
@@ -513,7 +561,7 @@ const buildRuleDiagnostic = ({
     };
   }
 
-  const latestAlert = getLatestAlertForRule(alerts, rule.id);
+  const latestAlertAt = latestAlertAtByRuleId[rule.id] ?? null;
   const scopedRows = getRowsForRuleScope(rule, marketRows);
   const triggeredRows = scopedRows.filter((row) =>
     compareRuleValue(getRuleCurrentValue(rule, row), rule.operator, rule.threshold),
@@ -588,9 +636,9 @@ const buildRuleDiagnostic = ({
       },
       {
         label: '最近告警',
-        value: latestAlert ? formatDateTimeText(latestAlert.triggeredAt) : '暂无',
-        hint: latestAlert ? '这是当前列表里这条规则最近一次写入时间。' : '最近 200 条告警里还没有这条规则的记录。',
-        tone: latestAlert ? 'success' : 'muted',
+        value: latestAlertAt ? formatDateTimeText(latestAlertAt) : '暂无',
+        hint: latestAlertAt ? '这是当前列表里这条规则最近一次写入时间。' : '当前已加载的告警里还没有这条规则的记录。',
+        tone: latestAlertAt ? 'success' : 'muted',
       },
       {
         label: '提醒方式',
@@ -849,17 +897,24 @@ const createEmptyScopeFilters = (): RuleScopeFilters => ({
 export const RulesSettingsView = ({
   rules,
   marketRows,
-  alerts,
+  latestAlertAtByRuleId,
   health,
   settings,
+  storageSummary,
+  storageMaintenance,
   controlState,
   runtimeAction,
+  runtimeIssues = [],
   soundProfiles,
   onPreviewRule,
   onSaveRules,
   onUpdateSettings,
   onPickSound,
   onRegisterSound,
+  onClearStorageCache,
+  onCreateStorageBackup,
+  onCreateDiagnosticsPackage,
+  onRunStorageMaintenance,
   onPreviewSound,
   onImportCityMap,
   onSetNotificationsEnabled,
@@ -867,7 +922,11 @@ export const RulesSettingsView = ({
   onStartMonitor,
   onQuitApp,
 }: RulesSettingsViewProps) => {
-  const { copy, policyLabel } = useI18n();
+  const { copy, language, policyLabel } = useI18n();
+  const storageDefaultFeedbackText =
+    language === 'en-US'
+      ? 'Use Free Space for temporary content, save data copies before big changes, and let automatic space saving handle older records.'
+      : '用“释放空间”处理临时内容，大调整前保存数据副本，较早记录会自动节省空间。';
   const initialRules = normalizeRuleDrafts(rules);
   const [draftRules, setDraftRules] = useState<AlertRule[]>(() => initialRules);
   const [query, setQuery] = useState('');
@@ -886,6 +945,11 @@ export const RulesSettingsView = ({
   const [cityMapFeedbackText, setCityMapFeedbackText] = useState('城市映射待导入。');
   const [cityMapFeedbackTone, setCityMapFeedbackTone] = useState<SettingsFeedbackTone>('muted');
   const [cityMapBusy, setCityMapBusy] = useState(false);
+  const [storageFeedbackText, setStorageFeedbackText] = useState(storageDefaultFeedbackText);
+  const [storageFeedbackTone, setStorageFeedbackTone] =
+    useState<SettingsFeedbackTone>('muted');
+  const [storageBusyAction, setStorageBusyAction] =
+    useState<'backup' | 'clear-cache' | 'diagnostics' | 'maintenance' | null>(null);
   const [persistedRulesKey, setPersistedRulesKey] = useState(() => JSON.stringify(initialRules));
   const isQuietHoursActive = isCurrentTimeInQuietHours(
     settings.quietHoursStart,
@@ -1010,7 +1074,7 @@ export const RulesSettingsView = ({
   const ruleDiagnostic = buildRuleDiagnostic({
     rule: selectedRule,
     marketRows,
-    alerts,
+    latestAlertAtByRuleId,
     health,
     hasUnsavedChanges,
     isQuietHoursActive,
@@ -1085,6 +1149,272 @@ export const RulesSettingsView = ({
         : '请先选择一个提示音，否则真实告警无法播放声音。',
     },
   ] as const;
+  const latestMainBackupAt =
+    storageSummary?.latestMainBackupAt ?? storageSummary?.latestBackupAt ?? null;
+  const latestMainBackupPath =
+    storageSummary?.latestMainBackupPath ?? storageSummary?.latestBackupPath ?? null;
+  const isMainDbMissing = storageSummary?.mainDbExists === false;
+  const storageRecordCountFormatter = new Intl.NumberFormat(language === 'en-US' ? 'en-US' : 'zh-CN');
+  const storageText =
+    language === 'en-US'
+      ? {
+          coreReady: 'Saved data is ready',
+          coreMissing: 'Saved data has not been created yet',
+          coreMissingHint:
+            'Start the app once and the saved-data status will appear here.',
+          coreDataHint: (activityText: string, protectedText: string) =>
+            `About ${protectedText} is saved. Recent activity: ${activityText}.`,
+          cleanupValue: (sizeText: string) => `Free about ${sizeText}`,
+          cleanupEmpty: 'No space to free right now',
+          cleanupHint: (entryCount: number | null) =>
+            entryCount && entryCount > 0
+              ? `This removes ${entryCount} temporary items without deleting saved monitoring data.`
+              : copy.settings.storageCanClearHint,
+          backupValue: (timeText: string) => `Last saved copy: ${timeText}`,
+          backupEmpty: 'No saved copy yet',
+          backupHint: (count: number | null) =>
+            count && count > 0
+              ? `${count} saved copies are available. Save a fresh copy before upgrades or big changes.`
+              : 'Save a data copy before upgrades, migrations, or major changes.',
+          autoMaintenanceValue: (tickDays: number, alertDays: number) =>
+            `Saving ${tickDays}/${alertDays} days`,
+          autoMaintenanceHint: (lastRunText: string, durationText: string) =>
+            `Last space-saving pass: ${lastRunText}. Duration: ${durationText}. Older records are handled automatically in the background.`,
+          autoMaintenanceError: (errorText: string) => `Last space-saving pass failed: ${errorText}`,
+          locationHint:
+            'Saved data, long-term records, backups, temporary files, and logs are all kept here.',
+          maintenanceIdle: 'Idle',
+          maintenanceRunning: 'Saving space',
+          maintenanceSuccess: 'Completed',
+          maintenanceError: 'Failed',
+          cleanupSuccess: (sizeText: string) => `Space freed. Reclaimed about ${sizeText}.`,
+          backupSuccess: 'A new data copy has been saved. You can view its location in troubleshooting info.',
+          diagnosticsBusy: 'Creating troubleshooting file...',
+          diagnosticsButton: 'Create troubleshooting file',
+          diagnosticsSuccess: (filePath: string) => `Troubleshooting file created: ${filePath}`,
+          diagnosticsFailed: 'Troubleshooting file creation failed. Please retry.',
+          maintenanceBusy: 'Saving space...',
+          maintenanceButton: 'Save space now',
+          maintenanceDone: 'Space-saving pass complete. Older records were handled using the active save settings.',
+          maintenanceNoop: 'Storage is already tidy. Nothing needed this time.',
+          maintenanceFailed: 'Space-saving pass failed. Please retry.',
+          technicalCleanableEntries: 'Temporary items',
+          technicalSessionData: 'Saved temporary data',
+          technicalBackupFiles: 'Saved copies',
+          technicalLogFiles: 'Log files',
+          technicalLatestLog: 'Latest log write',
+        }
+      : {
+          coreReady: '保存的数据已就绪',
+          coreMissing: '保存的数据尚未生成',
+          coreMissingHint: '启动一次应用后，这里会显示保存数据的状态。',
+          coreDataHint: (activityText: string, protectedText: string) =>
+            `已保存约 ${protectedText}；最近活动：${activityText}。`,
+          cleanupValue: (sizeText: string) => `可释放约 ${sizeText}`,
+          cleanupEmpty: '当前没有可释放空间',
+          cleanupHint: (entryCount: number | null) =>
+            entryCount && entryCount > 0
+              ? `将清理 ${entryCount} 项临时内容，不会删除已保存的监控数据。`
+              : copy.settings.storageCanClearHint,
+          backupValue: (timeText: string) => `最近保存副本：${timeText}`,
+          backupEmpty: '尚未保存副本',
+          backupHint: (count: number | null) =>
+            count && count > 0
+              ? `当前已有 ${count} 份数据副本，升级或大调整前建议再保存一次。`
+              : '建议在升级、迁移或大调整前先保存一份数据副本。',
+          autoMaintenanceValue: (tickDays: number, alertDays: number) =>
+            `保存 ${tickDays}/${alertDays} 天`,
+          autoMaintenanceHint: (lastRunText: string, durationText: string) =>
+            `最近节省空间：${lastRunText}；耗时：${durationText}。较早记录会在后台按保存天数自动处理。`,
+          autoMaintenanceError: (errorText: string) => `最近节省空间失败：${errorText}`,
+          locationHint: '已保存数据、长期记录、备份、临时内容和日志都会统一放在这里。',
+          maintenanceIdle: '待机',
+          maintenanceRunning: '节省空间中',
+          maintenanceSuccess: '已完成',
+          maintenanceError: '失败',
+          cleanupSuccess: (sizeText: string) => `释放空间完成，已释放约 ${sizeText}。`,
+          backupSuccess: '已保存新的数据副本，可在排查信息中查看位置。',
+          diagnosticsBusy: '正在生成排查文件...',
+          diagnosticsButton: '生成排查文件',
+          diagnosticsSuccess: (filePath: string) => `排查文件已生成：${filePath}`,
+          diagnosticsFailed: '排查文件生成失败，请稍后重试。',
+          maintenanceBusy: '正在节省空间，请稍候...',
+          maintenanceButton: '立即节省空间',
+          maintenanceDone: '节省空间完成，较早记录已按保存设置处理。',
+          maintenanceNoop: '当前数据已经是最新状态。',
+          maintenanceFailed: '节省空间失败，请稍后重试。',
+          technicalCleanableEntries: '临时内容项',
+          technicalSessionData: '保留的临时数据',
+          technicalBackupFiles: '数据副本数',
+          technicalLogFiles: '日志文件数',
+          technicalLatestLog: '最近日志写入',
+        };
+  const storageMaintenanceStatusText = !storageMaintenance
+    ? storageText.maintenanceIdle
+    : storageMaintenance.status === 'running'
+      ? storageText.maintenanceRunning
+      : storageMaintenance.status === 'success'
+        ? storageText.maintenanceSuccess
+        : storageMaintenance.status === 'error'
+          ? storageText.maintenanceError
+          : storageText.maintenanceIdle;
+  const storageMaintenanceTone =
+    storageMaintenance?.status === 'error'
+      ? ('danger' as const)
+      : storageMaintenance?.status === 'running'
+        ? ('warning' as const)
+      : storageMaintenance?.lastSuccessAt
+          ? ('success' as const)
+          : ('muted' as const);
+  const storageMaintenanceHint =
+    storageMaintenance?.status === 'error'
+      ? storageText.autoMaintenanceError(storageMaintenance.lastError ?? 'unknown')
+      : storageText.autoMaintenanceHint(
+          formatOptionalDateTimeText(storageMaintenance?.lastRunAt),
+          formatOptionalDurationText(storageMaintenance?.lastDurationMs),
+        );
+  const sessionPersistentSizeBytes = storageSummary
+    ? storageSummary.sessionPersistentSizeBytes ??
+      Math.max(0, storageSummary.sessionDataSizeBytes - storageSummary.cleanableSizeBytes)
+    : 0;
+  const protectedStorageSizeBytes = storageSummary
+    ? (storageSummary.databaseSizeBytes || storageSummary.mainDbSizeBytes) +
+      storageSummary.archiveSizeBytes +
+      storageSummary.backupSizeBytes +
+      sessionPersistentSizeBytes
+    : 0;
+  const storageBackupDisabledReason = isMainDbMissing
+    ? copy.settings.storageCreateBackupMissingMainDb(
+        storageSummary?.mainDbPath ?? copy.settings.storageMissing,
+      )
+    : null;
+  const storageClearDisabledReason =
+    !storageSummary || !storageSummary.canClearCache ? copy.settings.storageClearCacheEmpty : null;
+  const resolvedStorageFeedbackText =
+    storageBackupDisabledReason ?? storageFeedbackText;
+  const resolvedStorageFeedbackTone = isMainDbMissing
+    ? ('warning' as const)
+    : storageFeedbackTone;
+  const storageCleanupTone = !storageSummary
+    ? ('warning' as const)
+    : !storageSummary.canClearCache
+      ? ('success' as const)
+      : storageSummary.cleanableSizeBytes >= STORAGE_CLEAR_RECOMMENDATION_HIGH_BYTES
+        ? ('warning' as const)
+        : ('muted' as const);
+  const storageOverviewItems = storageSummary
+    ? [
+        {
+          label: copy.settings.storageCanClear,
+          value: storageSummary.canClearCache
+            ? storageText.cleanupValue(formatFileSizeText(storageSummary.cleanableSizeBytes))
+            : storageText.cleanupEmpty,
+          tone: storageCleanupTone,
+          hint: storageSummary.canClearCache
+            ? storageText.cleanupHint(storageSummary.cleanableEntryCount ?? null)
+            : copy.settings.storageCanClearHint,
+        },
+        {
+          label: copy.settings.storageProtectedData,
+          value: storageSummary.mainDbExists ? storageText.coreReady : storageText.coreMissing,
+          tone: storageSummary.mainDbExists ? ('success' as const) : ('warning' as const),
+          hint: storageSummary.mainDbExists
+            ? storageText.coreDataHint(
+                formatOptionalDateTimeText(storageSummary.lastActivityAt),
+                formatFileSizeText(protectedStorageSizeBytes),
+              )
+            : storageText.coreMissingHint,
+        },
+        {
+          label: copy.settings.storageBackupProtection,
+          value: latestMainBackupAt
+            ? storageText.backupValue(formatOptionalDateTimeText(latestMainBackupAt))
+            : storageText.backupEmpty,
+          tone: latestMainBackupAt ? ('success' as const) : ('warning' as const),
+          hint: storageText.backupHint(storageSummary.backupFileCount ?? null),
+        },
+        {
+          label: copy.settings.storageAutoMaintenance,
+          value: storageText.autoMaintenanceValue(
+            settings.tickRetentionDays,
+            settings.alertRetentionDays,
+          ),
+          tone: storageMaintenanceTone,
+          hint: `${storageMaintenanceStatusText} · ${storageMaintenanceHint}`,
+        },
+      ]
+    : [
+        {
+          label: copy.settings.storageProtectedData,
+          value: storageText.coreMissing,
+          tone: 'warning' as const,
+          hint: storageText.coreMissingHint,
+        },
+      ];
+  const storageTechnicalItems = storageSummary
+    ? [
+        {
+          label: copy.settings.storageDataRoot,
+          value: storageSummary.dataRootDir,
+        },
+        {
+          label: copy.settings.storageDetailMainDbPath,
+          value: storageSummary.mainDbPath,
+        },
+        {
+          label: copy.settings.storageDetailArchiveDir,
+          value: storageSummary.archiveDir,
+        },
+        {
+          label: copy.settings.storageDetailBackupDir,
+          value: storageSummary.backupDir,
+        },
+        {
+          label: copy.settings.storageDetailSessionDir,
+          value: storageSummary.sessionDataDir,
+        },
+        {
+          label: copy.settings.storageDetailLogsDir,
+          value: storageSummary.logsDir,
+        },
+        {
+          label: copy.settings.storageDetailLastActivity,
+          value: formatOptionalDateTimeText(storageSummary.lastActivityAt),
+        },
+        {
+          label: copy.settings.storageDetailLastCleanup,
+          value: formatOptionalDateTimeText(storageSummary.lastCleanupAt),
+        },
+        {
+          label: storageText.technicalCleanableEntries,
+          value: storageRecordCountFormatter.format(storageSummary.cleanableEntryCount ?? 0),
+        },
+        {
+          label: storageText.technicalSessionData,
+          value: formatFileSizeText(sessionPersistentSizeBytes),
+        },
+        {
+          label: storageText.technicalBackupFiles,
+          value: storageRecordCountFormatter.format(storageSummary.backupFileCount ?? 0),
+        },
+        {
+          label: storageText.technicalLogFiles,
+          value: storageRecordCountFormatter.format(storageSummary.logFileCount ?? 0),
+        },
+        {
+          label: storageText.technicalLatestLog,
+          value: formatOptionalDateTimeText(storageSummary.latestLogAt),
+        },
+        {
+          label: copy.settings.storageDetailMarketHistory,
+          value: `${storageRecordCountFormatter.format(storageSummary.priceTickCount)} ${copy.settings.storageDetailCountSuffix}`,
+        },
+        {
+          label: copy.settings.storageDetailAlertHistory,
+          value: `${storageRecordCountFormatter.format(storageSummary.alertEventCount)} ${copy.settings.storageDetailCountSuffix}`,
+        },
+      ]
+    : [];
   const activeFilterBadges = [
     cleanText(query) ? `关键词：${query}` : '',
     sourceFilter !== 'all'
@@ -1116,17 +1446,25 @@ export const RulesSettingsView = ({
     setSoundFeedbackText('正在试听提示音...');
     setSoundFeedbackTone('muted');
     try {
-      const played = await onPreviewSound({
+      const result = await onPreviewSound({
         id: selectedSoundProfile.id,
         gain: selectedSoundProfile.gain,
       });
-      if (played) {
+      if (result.played) {
         setSoundFeedbackText(
-          settings.backgroundAudio
-            ? `提示音已播放：${selectedSoundProfile.name}`
-            : `提示音已播放：${selectedSoundProfile.name}。但后台播放提示音当前关闭，真实告警不会自动响铃。`,
+          result.fallback === 'system-beep'
+            ? `当前提示音没有直接播放成功，已改用系统提示音确认：${selectedSoundProfile.name}。`
+            : settings.backgroundAudio
+              ? `提示音已播放：${selectedSoundProfile.name}`
+              : `提示音已播放：${selectedSoundProfile.name}。但后台播放提示音当前关闭，真实告警不会自动响铃。`,
         );
-        setSoundFeedbackTone(settings.backgroundAudio ? 'success' : 'warning');
+        setSoundFeedbackTone(
+          result.fallback === 'system-beep'
+            ? 'warning'
+            : settings.backgroundAudio
+              ? 'success'
+              : 'warning',
+        );
       } else {
         setSoundFeedbackText('没有播放成功，请检查系统声音或提示音文件。');
         setSoundFeedbackTone('danger');
@@ -1157,16 +1495,24 @@ export const RulesSettingsView = ({
         enabled: true,
         setAsDefault: true,
       });
-      const played = await onPreviewSound({
+      const result = await onPreviewSound({
         id: selectedSoundProfile.id,
         gain: selectedSoundProfile.gain,
       });
       setSoundFeedbackText(
-        played
-          ? `已登记为默认提示音，并播放确认音：${selectedSoundProfile.name}`
+        result.played
+          ? result.fallback === 'system-beep'
+            ? `已登记为默认提示音：${selectedSoundProfile.name}。当前提示音未直接播放，已用系统提示音确认。`
+            : `已登记为默认提示音，并播放确认音：${selectedSoundProfile.name}`
           : `已登记为默认提示音：${selectedSoundProfile.name}。确认音没有播放，请检查系统声音。`,
       );
-      setSoundFeedbackTone(played ? 'success' : 'warning');
+      setSoundFeedbackTone(
+        result.played
+          ? result.fallback === 'system-beep'
+            ? 'warning'
+            : 'success'
+          : 'warning',
+      );
     } catch {
       setSoundFeedbackText('登记失败，请稍后再试。');
       setSoundFeedbackTone('danger');
@@ -1196,6 +1542,107 @@ export const RulesSettingsView = ({
     }
   };
 
+  const handleCreateStorageBackup = async () => {
+    if (isMainDbMissing) {
+      setStorageFeedbackText(
+        storageBackupDisabledReason ??
+          copy.settings.storageCreateBackupMissingMainDb(copy.settings.storageMissing),
+      );
+      setStorageFeedbackTone('warning');
+      return;
+    }
+
+    setStorageBusyAction('backup');
+    setStorageFeedbackText(copy.settings.storageCreateBackupBusy);
+    setStorageFeedbackTone('muted');
+    try {
+      await onCreateStorageBackup();
+      setStorageFeedbackText(storageText.backupSuccess);
+      setStorageFeedbackTone('success');
+    } catch {
+      setStorageFeedbackText(copy.settings.storageCreateBackupFailed);
+      setStorageFeedbackTone('danger');
+    } finally {
+      setStorageBusyAction(null);
+    }
+  };
+
+  const handleCreateDiagnosticsPackage = async () => {
+    setStorageBusyAction('diagnostics');
+    setStorageFeedbackText(storageText.diagnosticsBusy);
+    setStorageFeedbackTone('muted');
+    try {
+      const result = await onCreateDiagnosticsPackage();
+      setStorageFeedbackText(storageText.diagnosticsSuccess(result.packagePath));
+      setStorageFeedbackTone('success');
+    } catch {
+      setStorageFeedbackText(storageText.diagnosticsFailed);
+      setStorageFeedbackTone('danger');
+    } finally {
+      setStorageBusyAction(null);
+    }
+  };
+
+  const handleClearStorageCache = async () => {
+    if (!storageSummary || !storageSummary.canClearCache) {
+      setStorageFeedbackText(copy.settings.storageClearCacheEmpty);
+      setStorageFeedbackTone('warning');
+      return;
+    }
+
+    setStorageBusyAction('clear-cache');
+    setStorageFeedbackText(copy.settings.storageClearCacheBusy);
+    setStorageFeedbackTone('muted');
+    try {
+      const result = await onClearStorageCache();
+      if (result.reclaimedBytes > 0) {
+        setStorageFeedbackText(storageText.cleanupSuccess(formatFileSizeText(result.reclaimedBytes)));
+        setStorageFeedbackTone('success');
+      } else {
+        setStorageFeedbackText(copy.settings.storageClearCacheEmpty);
+        setStorageFeedbackTone('warning');
+      }
+    } catch {
+      setStorageFeedbackText(copy.settings.storageClearCacheFailed);
+      setStorageFeedbackTone('danger');
+    } finally {
+      setStorageBusyAction(null);
+    }
+  };
+
+  const handleRunStorageMaintenance = async () => {
+    if (isMainDbMissing) {
+      setStorageFeedbackText(
+        storageBackupDisabledReason ??
+          copy.settings.storageCreateBackupMissingMainDb(copy.settings.storageMissing),
+      );
+      setStorageFeedbackTone('warning');
+      return;
+    }
+
+    setStorageBusyAction('maintenance');
+    setStorageFeedbackText(storageText.maintenanceBusy);
+    setStorageFeedbackTone('muted');
+    try {
+      const result = await onRunStorageMaintenance();
+      const archivedRows = result.summary.lastArchivedRows;
+      const prunedTickRows = result.summary.lastPrunedTickRows;
+      const prunedAlertRows = result.summary.lastPrunedAlertRows;
+      const changedRows = archivedRows + prunedTickRows + prunedAlertRows;
+      if (changedRows > 0) {
+        setStorageFeedbackText(storageText.maintenanceDone);
+      } else {
+        setStorageFeedbackText(storageText.maintenanceNoop);
+      }
+      setStorageFeedbackTone('success');
+    } catch {
+      setStorageFeedbackText(storageText.maintenanceFailed);
+      setStorageFeedbackTone('danger');
+    } finally {
+      setStorageBusyAction(null);
+    }
+  };
+
   const handleBackgroundAudioChange = async (enabled: boolean) => {
     setSoundFeedbackText(enabled ? '正在开启后台提示音...' : '正在关闭后台提示音...');
     setSoundFeedbackTone('muted');
@@ -1220,11 +1667,11 @@ export const RulesSettingsView = ({
     try {
       const imported = await onImportCityMap(SAMPLE_CITY_MAP_LINES);
       if (imported > 0) {
-        setCityMapFeedbackText(`已导入 ${imported} 条示例城市映射。`);
+        setCityMapFeedbackText(`已导入 ${imported} 条示例城市映射，盘口数据已同步刷新。`);
         setCityMapFeedbackTone('success');
       } else {
-        setCityMapFeedbackText('没有导入新映射，可能示例城市已存在或未命中。');
-        setCityMapFeedbackTone('danger');
+        setCityMapFeedbackText('本次示例城市映射没有新增变化；当前示例只覆盖东京和纽约。');
+        setCityMapFeedbackTone('warning');
       }
     } catch {
       setCityMapFeedbackText('导入失败，请稍后再试。');
@@ -1365,6 +1812,26 @@ export const RulesSettingsView = ({
               当前安静时段为 {settings.quietHoursStart} - {settings.quietHoursEnd}
               。规则命中仍会记录到告警中心，系统弹窗和提示音会暂时停用。
             </span>
+          </section>
+        ) : null}
+
+        {runtimeIssues.length > 0 ? (
+          <section className="rule-runtime-warning" role="alert" aria-label="runtime-diagnostics">
+            <div className="rule-runtime-warning__head">
+              <div>
+                <strong>当前运行存在需要处理的问题</strong>
+                <span>启动失败、worker 未在线、最近操作失败或数据文件缺失都会在这里直接展示。</span>
+              </div>
+            </div>
+            <div className="settings-readiness-panel">
+              {runtimeIssues.map((issue) => (
+                <article key={issue.id} className={`settings-readiness-card is-${issue.tone}`}>
+                  <span>{issue.sourceLabel}</span>
+                  <strong>{issue.title}</strong>
+                  <p>{issue.detail}</p>
+                </article>
+              ))}
+            </div>
           </section>
         ) : null}
 
@@ -2137,6 +2604,52 @@ export const RulesSettingsView = ({
             </label>
 
             <label className="field">
+              <span>{copy.settings.tickRetention}</span>
+              <input
+                type="number"
+                min={MIN_TICK_RETENTION_DAYS}
+                max={MAX_TICK_RETENTION_DAYS}
+                step={1}
+                value={settings.tickRetentionDays}
+                onChange={(event) =>
+                  onUpdateSettings({
+                    tickRetentionDays: Math.max(
+                      MIN_TICK_RETENTION_DAYS,
+                      Math.min(
+                        MAX_TICK_RETENTION_DAYS,
+                        Math.trunc(Number(event.target.value) || DEFAULT_TICK_RETENTION_DAYS),
+                      ),
+                    ),
+                  })
+                }
+              />
+              <small className="rule-field-hint">{copy.settings.tickRetentionHint}</small>
+            </label>
+
+            <label className="field">
+              <span>{copy.settings.alertRetention}</span>
+              <input
+                type="number"
+                min={MIN_ALERT_RETENTION_DAYS}
+                max={MAX_ALERT_RETENTION_DAYS}
+                step={1}
+                value={settings.alertRetentionDays}
+                onChange={(event) =>
+                  onUpdateSettings({
+                    alertRetentionDays: Math.max(
+                      MIN_ALERT_RETENTION_DAYS,
+                      Math.min(
+                        MAX_ALERT_RETENTION_DAYS,
+                        Math.trunc(Number(event.target.value) || DEFAULT_ALERT_RETENTION_DAYS),
+                      ),
+                    ),
+                  })
+                }
+              />
+              <small className="rule-field-hint">{copy.settings.alertRetentionHint}</small>
+            </label>
+
+            <label className="field">
               <span>{copy.settings.quietStart}</span>
               <input
                 type="time"
@@ -2187,6 +2700,95 @@ export const RulesSettingsView = ({
               </div>
             ))}
           </div>
+
+          <header className="panel__header panel__header--stacked">
+            <div>
+              <h2>{copy.settings.storageTitle}</h2>
+              <span>{copy.settings.storageHint}</span>
+            </div>
+          </header>
+
+          <div className="settings-storage-panel" aria-label="storage-summary">
+            {storageOverviewItems.map((item, index) => (
+              <div
+                key={item.label}
+                className={`settings-readiness-card ${index === 0 ? 'settings-storage-card--primary' : ''} is-${item.tone}`}
+              >
+                <span>{item.label}</span>
+                <strong>{item.value}</strong>
+                <p>{item.hint}</p>
+              </div>
+            ))}
+          </div>
+
+          <div className="action-row storage-action-row">
+            <button
+              type="button"
+              className="ghost-button ghost-button--primary"
+              aria-label="storage-clear-cache"
+              onClick={() => void handleClearStorageCache()}
+              disabled={storageBusyAction !== null || Boolean(storageClearDisabledReason)}
+              title={storageClearDisabledReason ?? undefined}
+            >
+              {storageBusyAction === 'clear-cache'
+                ? copy.settings.storageClearCacheBusy
+                : copy.settings.storageClearCache}
+            </button>
+            <button
+              type="button"
+              className="ghost-button"
+              aria-label="storage-run-maintenance"
+              onClick={() => void handleRunStorageMaintenance()}
+              disabled={storageBusyAction !== null || isMainDbMissing}
+              title={storageBackupDisabledReason ?? undefined}
+            >
+              {storageBusyAction === 'maintenance'
+                ? storageText.maintenanceBusy
+                : storageText.maintenanceButton}
+            </button>
+            <button
+              type="button"
+              className="ghost-button"
+              aria-label="storage-create-backup"
+              onClick={() => void handleCreateStorageBackup()}
+              disabled={storageBusyAction !== null || isMainDbMissing}
+              title={storageBackupDisabledReason ?? undefined}
+            >
+              {storageBusyAction === 'backup'
+                ? copy.settings.storageCreateBackupBusy
+                : copy.settings.storageCreateBackup}
+            </button>
+            <button
+              type="button"
+              className="ghost-button"
+              aria-label="storage-create-diagnostics"
+              onClick={() => void handleCreateDiagnosticsPackage()}
+              disabled={storageBusyAction !== null}
+            >
+              {storageBusyAction === 'diagnostics'
+                ? storageText.diagnosticsBusy
+                : storageText.diagnosticsButton}
+            </button>
+          </div>
+          <p className={`rule-settings-feedback is-${resolvedStorageFeedbackTone}`} role="status">
+            {resolvedStorageFeedbackText}
+          </p>
+
+          <details className="storage-technical-details">
+            <summary>{copy.settings.storageTechnicalDetails}</summary>
+            <p className="rule-hint">{copy.settings.storageTechnicalDetailsHint}</p>
+            <div className="storage-technical-list">
+              {storageTechnicalItems.map((item) => (
+                <div key={item.label} className="storage-technical-item">
+                  <span>{item.label}</span>
+                  <strong>{item.value}</strong>
+                </div>
+              ))}
+            </div>
+            {latestMainBackupPath ? (
+              <p className="rule-hint">{latestMainBackupPath}</p>
+            ) : null}
+          </details>
 
           <div className="action-row">
             <button

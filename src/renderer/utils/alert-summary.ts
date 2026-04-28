@@ -1,6 +1,7 @@
 export {
   buildAlertDetail,
   buildAlertHeadline,
+  buildAlertNotificationContent,
   buildAlertPresentation,
   buildAlertSummary,
   buildAlertTitle,

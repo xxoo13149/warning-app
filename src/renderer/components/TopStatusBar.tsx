@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 
+import type { MonitorRuntimeIssue } from '../hooks/useMonitorConsole';
 import { useI18n } from '../i18n';
 import type { AppHealth } from '../types/contracts';
 
@@ -8,6 +9,7 @@ interface TopStatusBarProps {
   mode: 'live' | 'mock';
   marketTotal: number;
   activeAlerts: number;
+  runtimeIssues: MonitorRuntimeIssue[];
   onRefresh: () => void;
 }
 
@@ -16,6 +18,7 @@ export const TopStatusBar = ({
   mode,
   marketTotal,
   activeAlerts,
+  runtimeIssues,
   onRefresh,
 }: TopStatusBarProps) => {
   const { language } = useI18n();
@@ -33,7 +36,7 @@ export const TopStatusBar = ({
           tokens: '订阅标的',
           latency: '响应延迟',
           markets: '监控项',
-          alerts: '待处理告警',
+          alerts: '最新告警',
           lastSync: '最近更新',
           refresh: '刷新数据',
         }
@@ -48,7 +51,7 @@ export const TopStatusBar = ({
           tokens: 'Tokens',
           latency: 'Latency',
           markets: 'Markets',
-          alerts: 'Unacked Alerts',
+          alerts: 'Recent Alerts',
           lastSync: 'Last Sync',
           refresh: 'Refresh',
         };
@@ -67,6 +70,7 @@ export const TopStatusBar = ({
 
   const modeLabel =
     effectiveMode === 'live' ? copy.live : effectiveMode === 'mock' ? copy.mock : copy.degraded;
+  const primaryRuntimeIssue = runtimeIssues[0] ?? null;
 
   const statusItems = useMemo(
     () => [
@@ -121,6 +125,16 @@ export const TopStatusBar = ({
           </div>
         ))}
       </div>
+
+      {primaryRuntimeIssue ? (
+        <div className={`topbar__alert topbar__alert--${primaryRuntimeIssue.tone}`} role="alert">
+          <strong>{primaryRuntimeIssue.title}</strong>
+          <span>{primaryRuntimeIssue.detail}</span>
+          {runtimeIssues.length > 1 ? (
+            <em>{`另有 ${runtimeIssues.length - 1} 项问题待处理`}</em>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="topbar__actions">
         {language === 'zh-CN' ? (

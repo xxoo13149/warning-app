@@ -12,24 +12,36 @@ if (!port) {
 process.env.WS_NO_BUFFER_UTIL = '1';
 process.env.WS_NO_UTF_8_VALIDATE = '1';
 
+const toError = (error: unknown): Error =>
+  error instanceof Error ? error : new Error(String(error));
+
+const failWorkerStartup = (label: string, error: unknown): void => {
+  const normalizedError = toError(error);
+  console.error(label, normalizedError);
+  port.close();
+  queueMicrotask(() => {
+    throw normalizedError;
+  });
+};
+
 const bootstrap = async (): Promise<void> => {
   const { WorkerRuntime } = await import('./worker-runtime');
   const runtime = new WorkerRuntime(port, workerData as WorkerBootstrapData);
-
-  void runtime.start().catch((error) => {
-    console.error('[worker-entry] startup failed', error);
-    process.exitCode = 1;
-  });
+  let startupFailed = false;
 
   port.on('message', (message: WorkerRequest) => {
-    if (!message || message.kind !== 'request') {
+    if (startupFailed || !message || message.kind !== 'request') {
       return;
     }
     void runtime.handleRequest(message);
   });
+
+  void runtime.start().catch((error) => {
+    startupFailed = true;
+    failWorkerStartup('[worker-entry] startup failed', error);
+  });
 };
 
 void bootstrap().catch((error) => {
-  console.error('[worker-entry] bootstrap failed', error);
-  process.exitCode = 1;
+  failWorkerStartup('[worker-entry] bootstrap failed', error);
 });

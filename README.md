@@ -1,38 +1,123 @@
-# Polymarket Weather Monitor V1
+# 天气监控桌面应用
 
-## Architecture overview
-- Based on `Electron + React + TypeScript + Vite` so the renderer is a single-page dashboard while the main process owns the tray, notifications, and IPC bridges.
-- A dedicated worker thread (Node `worker_threads`) handles Polymarket discovery, WebSocket subscriptions, alert rules, and SQLite persistence (`better-sqlite3 + Drizzle + Zod` semantics) so renderer code never reaches across the network or touches the database directly.
-- Alerts, sounds, and configuration live locally; the app is read-only—no wallet, no trading, only market observation for the 47 daily-weather cities.
+一个面向 Polymarket 天气市场的本地桌面监控工具，基于 `Electron + React + TypeScript` 构建。  
+项目重点是“实时监控、告警分发、桌面常驻、本地数据持久化”，不包含下单、钱包连接或自动交易能力。
 
-## Prerequisites
-- Windows build tools (Visual Studio Build Tools or equivalent) must be installed so `better-sqlite3` can compile its native bindings. After `npm install`, run `npx electron-rebuild` if `npm start` complains about missing `.node` modules.
+## 功能概览
 
-## Development
-1. `npm install`
-2. `npm run start` to launch the Electron app with HMR and the worker thread enabled.
-3. `npm run lint` to catch TypeScript/ESLint issues before packaging.
-4. On Windows machines that access Polymarket through a local proxy, the app now auto-detects the system proxy from Internet Settings and routes Polymarket REST/WebSocket traffic through it.
+- 实时监控 Polymarket 天气相关市场与价格变化
+- 首页泡泡图展示城市风险热度与告警密度
+- 市场总览支持城市、日期、状态、关键词等维度筛选
+- 告警中心支持实时告警流、规则归类、城市归类与历史查看
+- 托盘常驻、系统通知、音效提醒、后台监控
+- 本地 SQLite 持久化规则、告警、行情快照与运行配置
+- 支持本地导入城市配置、音效配置与运行诊断
 
-## Packaging
-- `npm run package` creates a distributable Electron bundle under `D:\warning-app-artifacts\`. Use this for lightweight QA runs without polluting the repo workspace.
-- `npm run make` runs the `@electron-forge/maker-squirrel` maker and produces `Setup.exe` installers (and related artifacts) under `D:\warning-app-artifacts\make`. Install that EXE to test tray behavior, background audio, and alert delivery.
-- Runtime-only copied native dependencies are prepared under `D:\warning-app-runtime_node_modules\` so packaging output stays outside the repository.
-- If `npm run make` needs to download tooling through a proxy, set `HTTP_PROXY` and `HTTPS_PROXY` explicitly before invoking it. Example in PowerShell: `$env:HTTP_PROXY='http://127.0.0.1:7897'; $env:HTTPS_PROXY='http://127.0.0.1:7897'; npm run make`.
-- On a fresh install, enable the tray/auto-start options inside the Settings page; auto-start defaults to disabled.
+## 技术架构
 
-## Configuration
-- Drop city mappings and sound profiles via the Settings page’s import controls or place JSON files next to the application data directory and load them through the same dialog. City configs follow the schema in `docs/city-config.md`, and the example set in `tests/fixtures/city-config.example.json` matches the required `CityConfig` structure.
-- Sound profiles are described in `docs/sound-config.md`, with `tests/fixtures/sound-config.example.json` showing how to register files, volumes, and loop flags for custom alert tones.
+- `Electron`
+  负责主进程、托盘、系统通知、窗口调度、打包发布
+- `React + TypeScript + Vite`
+  负责前端界面、页面交互与可视化展示
+- `worker_threads`
+  负责市场发现、WebSocket 订阅、告警规则计算与后台运行
+- `better-sqlite3 + Drizzle`
+  负责本地数据库、归档、查询与迁移能力
 
-## Known limitations
-- Only the 47 daily-weather Polymarket cities are tracked; other weather markets (rain, snow, miscellaneous tags) are intentionally excluded in V1.
-- The app is read-only, so no wallet/transaction support is provided and alerts cannot trigger orders or hedge actions.
-- Alert delivery depends on the worker thread maintaining WebSocket connectivity; the UI cannot exert control if the worker crashes, so monitor the tray icon for reconnection status.
+## 核心页面
 
-## Fixtures & validation
-- Run `node tests/fixtures/validate-config.js tests/fixtures/city-config.example.json` (and repeat with the sound config) to verify each entry defines every required property and that numeric fields look sane. This script avoids the GUI entirely and ensures the JSON can safely be reloaded by the worker layer.
+- 首页泡泡图
+  用于快速感知哪些城市、哪些市场当前风险更高
+- 市场总览
+  用于查看当前监控范围内的市场列表、价格状态与筛选结果
+- 告警中心
+  用于查看实时告警、历史告警、规则命中情况与上下文信息
+- 设置中心
+  用于管理存储、规则、音效、导入导出与运行诊断
 
-## Notes
-- Store the active alert rules, sound profiles, and city config in SQLite so hot updates survive restarts; the fixtures here are meant to seed that storage via the import workflow described above.
-- Keep the renderer focused on Dashboard/Market Explorer/Alert Center while the worker handles discovery, WebSocket reconnections, and alert deduplication.
+## 快速开始
+
+### 环境要求
+
+- Node.js 18+
+- Windows
+- 本地可用的 Electron 原生模块编译环境
+- 如本机需要代理访问 Polymarket，请先配置系统代理或相关环境变量
+
+### 安装依赖
+
+```bash
+npm install
+```
+
+### 启动开发环境
+
+```bash
+npm run start
+```
+
+### 常用命令
+
+```bash
+npm run lint
+npm run typecheck
+npm run test
+npm run package
+npm run make
+```
+
+## 打包说明
+
+- `npm run package`
+  生成可直接验证的桌面应用包
+- `npm run make`
+  生成安装包与发布产物
+- `npm run shortcuts:update`
+  更新 Windows 桌面快捷方式与开始菜单快捷方式
+
+## 数据与隐私说明
+
+- 项目采用本地 SQLite 存储，不依赖独立后端数据库服务
+- 用户运行期数据、缓存、日志、会话文件、数据库文件均不应提交到仓库
+- 本仓库默认忽略以下敏感或本地文件：
+  - `.env` / `.env.*`
+  - 证书、密钥文件
+  - 本地数据库、日志、缓存与打包产物
+- 公开仓库仅保留源码、测试、文档与示例配置，不包含个人运行数据
+
+## 项目定位
+
+这个项目当前定位为：
+
+- 本地实时监控工具
+- 桌面常驻告警工具
+- 单机部署的轻量产品雏形
+
+不包含：
+
+- 自动交易
+- 钱包操作
+- 云端账户体系
+- 多用户协作后台
+
+## 当前重点演进方向
+
+- 持续优化长时间运行时的稳定性与性能
+- 统一存储结构与运行目录
+- 完善告警分页、归档与诊断能力
+- 提升托盘、通知、后台唯一实例与关闭逻辑的一致性
+
+## 仓库说明
+
+- `src/`
+  应用源码
+- `tests/`
+  单元测试与集成测试
+- `docs/`
+  配置文档、方案文档与研究记录
+- `scripts/`
+  打包、验证、快捷方式、运行时辅助脚本
+
+## 许可证
+
+`MIT`
