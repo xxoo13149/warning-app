@@ -9,9 +9,11 @@ import { GammaDiscoveryClient } from '../polymarket/gamma-discovery';
 import { TokenShardWsManager } from '../polymarket/token-shard-ws-manager';
 import type {
   BookResponseItem,
+  BookLevel,
   CityConfig,
   DailyWeatherUniverse,
   MarketWsMessage,
+  OrderBookEdgeSnapshot,
   PriceSnapshot,
   ShardMarketEvent,
   ShardStatusEvent,
@@ -48,6 +50,28 @@ export declare interface PolymarketDataService {
   on(event: 'error', listener: (error: Error) => void): this;
 }
 
+interface LocalOrderBookState {
+  bids: Map<number, number>;
+  asks: Map<number, number>;
+}
+
+interface OrderBookSummary {
+  bestBid?: number;
+  bestBidSize?: number;
+  bestAsk?: number;
+  bestAskSize?: number;
+  bidLevelCount: number;
+  askLevelCount: number;
+  bidVisibleSize: number;
+  askVisibleSize: number;
+}
+
+interface OrderBookDelta {
+  side: 'BUY' | 'SELL';
+  price: number;
+  size: number;
+}
+
 export class PolymarketDataService extends EventEmitter {
   private readonly gammaClient: GammaDiscoveryClient;
   private readonly clobRestClient: ClobRestClient;
@@ -61,6 +85,7 @@ export class PolymarketDataService extends EventEmitter {
   private universe: DailyWeatherUniverse | null = null;
   private watchlistTokenIds: string[] = [];
   private tokenStates = new Map<string, TokenRuntimeState>();
+  private readonly orderBooks = new Map<string, LocalOrderBookState>();
   private lastStaleActionAtByShard = new Map<string, number>();
   private connectingSinceByShard = new Map<string, number>();
   private reconcileTimer?: ReturnType<typeof setInterval>;
@@ -223,60 +248,29 @@ export class PolymarketDataService extends EventEmitter {
       return;
     }
 
+    const now = Date.now();
     const existing = this.tokenStates.get(tokenId) ?? {
       tokenId,
-      updatedAt: Date.now(),
+      updatedAt: now,
     };
+    existing.removedBidEdge = undefined;
+    existing.removedAskEdge = undefined;
     existing.lastEventType = eventType;
-    existing.updatedAt = Date.now();
+    existing.updatedAt = now;
 
     if (eventType === 'best_bid_ask') {
       existing.bestBid = toNumberOrUndefined(event.best_bid);
       existing.bestAsk = toNumberOrUndefined(event.best_ask);
       existing.spread = toNumberOrUndefined(event.spread);
-    } else if (eventType === 'last_trade_price' || eventType === 'price_change') {
-      existing.lastTradePrice = toNumberOrUndefined(
-        (event as Record<string, unknown>).price ??
-          (event as Record<string, unknown>).last_trade_price,
-      );
-
-      const bestBid = toNumberOrUndefined(event.best_bid);
-      const bestAsk = toNumberOrUndefined(event.best_ask);
-      if (bestBid !== undefined) {
-        existing.bestBid = bestBid;
-      }
-      if (bestAsk !== undefined) {
-        existing.bestAsk = bestAsk;
-      }
-      if (existing.bestBid !== undefined && existing.bestAsk !== undefined) {
-        existing.spread = existing.bestAsk - existing.bestBid;
-      }
+    } else if (eventType === 'last_trade_price') {
+      this.applyTradeEvent(existing, event, now);
+    } else if (eventType === 'price_change') {
+      this.applyPriceChangeEvent(tokenId, existing, event, now);
     } else if (eventType === 'book') {
-      const bids = (event as Record<string, unknown>).bids;
-      const asks = (event as Record<string, unknown>).asks;
-      const bookBestBid = this.pickBookEdge(bids, true);
-      const bookBestAsk = this.pickBookEdge(asks, false);
-
-      if (
-        bookBestBid === undefined &&
-        bookBestAsk === undefined &&
-        existing.bestBid === undefined &&
-        existing.bestAsk === undefined &&
-        existing.bookBestBid === undefined &&
-        existing.bookBestAsk === undefined &&
-        existing.lastTradePrice === undefined
-      ) {
+      const applied = this.applyBookEvent(tokenId, existing, event);
+      if (!applied) {
         return;
       }
-
-      existing.bookBestBid = bookBestBid;
-      existing.bookBestAsk = bookBestAsk;
-      existing.bestBid = bookBestBid;
-      existing.bestAsk = bookBestAsk;
-      existing.spread =
-        bookBestBid !== undefined && bookBestAsk !== undefined
-          ? Number((bookBestAsk - bookBestBid).toFixed(6))
-          : undefined;
     } else {
       return;
     }
@@ -285,20 +279,163 @@ export class PolymarketDataService extends EventEmitter {
     this.emit('token_state', existing);
   }
 
-  private pickBookEdge(levels: unknown, isBid: boolean): number | undefined {
-    if (!Array.isArray(levels) || levels.length === 0) {
-      return undefined;
+  private applyTradeEvent(
+    existing: TokenRuntimeState,
+    event: MarketWsMessage,
+    now: number,
+  ): void {
+    existing.lastTradePrice = toNumberOrUndefined(
+      (event as Record<string, unknown>).price ??
+        (event as Record<string, unknown>).last_trade_price,
+    );
+    const side = String((event as Record<string, unknown>).side ?? '').toUpperCase();
+    if (side === 'BUY' || side === 'SELL') {
+      existing.lastTradeSide = side === 'BUY' ? 'buy' : 'sell';
     }
-    let edge: number | undefined;
+    const tradeSize = toNumberOrUndefined((event as Record<string, unknown>).size);
+    if (tradeSize !== undefined) {
+      existing.lastTradeSize = tradeSize;
+    }
+    existing.lastTradeAt = now;
+    this.applyBestBidAskSnapshot(existing, event);
+  }
 
-    for (const level of levels) {
-      if (!level || typeof level !== 'object') {
+  private applyPriceChangeEvent(
+    tokenId: string,
+    existing: TokenRuntimeState,
+    event: MarketWsMessage,
+    now: number,
+  ): void {
+    const orderBook = this.getOrCreateOrderBook(tokenId);
+    const before = this.summarizeOrderBook(orderBook);
+    const changes = this.parsePriceChanges((event as Record<string, unknown>).price_changes);
+
+    if (changes.length > 0) {
+      this.applyOrderBookDeltas(orderBook, changes);
+      const after = this.summarizeOrderBook(orderBook);
+      this.applyOrderBookSummary(existing, after);
+      existing.removedBidEdge = this.resolveRemovedEdge(before, after, changes, 'BUY', 'price_change');
+      existing.removedAskEdge = this.resolveRemovedEdge(before, after, changes, 'SELL', 'price_change');
+    } else {
+      this.applyBestBidAskSnapshot(existing, event);
+    }
+    this.applyBestBidAskSnapshot(existing, event);
+  }
+
+  private applyBookEvent(
+    tokenId: string,
+    existing: TokenRuntimeState,
+    event: MarketWsMessage,
+  ): boolean {
+    const bids = this.parseBookLevels((event as Record<string, unknown>).bids);
+    const asks = this.parseBookLevels((event as Record<string, unknown>).asks);
+    const orderBook = this.getOrCreateOrderBook(tokenId);
+    const before = this.summarizeOrderBook(orderBook);
+    orderBook.bids = bids;
+    orderBook.asks = asks;
+    const after = this.summarizeOrderBook(orderBook);
+
+    if (
+      after.bestBid === undefined &&
+      after.bestAsk === undefined &&
+      existing.bestBid === undefined &&
+      existing.bestAsk === undefined &&
+      existing.bookBestBid === undefined &&
+      existing.bookBestAsk === undefined &&
+      existing.lastTradePrice === undefined
+    ) {
+      return false;
+    }
+
+    this.applyOrderBookSummary(existing, after);
+    existing.removedBidEdge = this.resolveRemovedEdge(before, after, [], 'BUY', 'book');
+    existing.removedAskEdge = this.resolveRemovedEdge(before, after, [], 'SELL', 'book');
+    return true;
+  }
+
+  private getOrCreateOrderBook(tokenId: string): LocalOrderBookState {
+    const existing = this.orderBooks.get(tokenId);
+    if (existing) {
+      return existing;
+    }
+    const created: LocalOrderBookState = {
+      bids: new Map<number, number>(),
+      asks: new Map<number, number>(),
+    };
+    this.orderBooks.set(tokenId, created);
+    return created;
+  }
+
+  private parseBookLevels(levels: unknown): Map<number, number> {
+    const next = new Map<number, number>();
+    if (!Array.isArray(levels)) {
+      return next;
+    }
+    for (const level of levels as BookLevel[]) {
+      const price = toNumberOrUndefined(level.price);
+      const size = toNumberOrUndefined(level.size);
+      if (price === undefined || size === undefined || size <= 0) {
         continue;
       }
-      const price = toNumberOrUndefined((level as Record<string, unknown>).price);
-      if (price === undefined) {
+      next.set(price, size);
+    }
+    return next;
+  }
+
+  private parsePriceChanges(changes: unknown): OrderBookDelta[] {
+    if (!Array.isArray(changes)) {
+      return [];
+    }
+    const next: OrderBookDelta[] = [];
+    for (const item of changes) {
+      if (!item || typeof item !== 'object') {
         continue;
       }
+      const price = toNumberOrUndefined((item as Record<string, unknown>).price);
+      const size = toNumberOrUndefined((item as Record<string, unknown>).size);
+      const side = String((item as Record<string, unknown>).side ?? '').toUpperCase();
+      if (price === undefined || size === undefined || (side !== 'BUY' && side !== 'SELL')) {
+        continue;
+      }
+      next.push({
+        side: side as OrderBookDelta['side'],
+        price,
+        size,
+      });
+    }
+    return next;
+  }
+
+  private applyOrderBookDeltas(orderBook: LocalOrderBookState, changes: readonly OrderBookDelta[]): void {
+    for (const change of changes) {
+      const target = change.side === 'BUY' ? orderBook.bids : orderBook.asks;
+      if (change.size <= 0) {
+        target.delete(change.price);
+      } else {
+        target.set(change.price, change.size);
+      }
+    }
+  }
+
+  private summarizeOrderBook(orderBook: LocalOrderBookState): OrderBookSummary {
+    const bestBid = this.pickBookEdge(orderBook.bids, true);
+    const bestAsk = this.pickBookEdge(orderBook.asks, false);
+    return {
+      bestBid,
+      bestBidSize: bestBid !== undefined ? orderBook.bids.get(bestBid) : undefined,
+      bestAsk,
+      bestAskSize: bestAsk !== undefined ? orderBook.asks.get(bestAsk) : undefined,
+      bidLevelCount: orderBook.bids.size,
+      askLevelCount: orderBook.asks.size,
+      bidVisibleSize: this.sumBookSize(orderBook.bids),
+      askVisibleSize: this.sumBookSize(orderBook.asks),
+    };
+  }
+
+  private pickBookEdge(levels: Map<number, number>, isBid: boolean): number | undefined {
+    const iterator = levels.keys();
+    let edge = iterator.next().value as number | undefined;
+    for (const price of levels.keys()) {
       if (edge === undefined) {
         edge = price;
       } else if (isBid) {
@@ -307,8 +444,85 @@ export class PolymarketDataService extends EventEmitter {
         edge = Math.min(edge, price);
       }
     }
-
     return edge;
+  }
+
+  private sumBookSize(levels: Map<number, number>): number {
+    let total = 0;
+    for (const size of levels.values()) {
+      total += size;
+    }
+    return Number(total.toFixed(6));
+  }
+
+  private applyOrderBookSummary(existing: TokenRuntimeState, summary: OrderBookSummary): void {
+    existing.bookBestBid = summary.bestBid;
+    existing.bookBestAsk = summary.bestAsk;
+    existing.bestBid = summary.bestBid;
+    existing.bestBidSize = summary.bestBidSize;
+    existing.bestAsk = summary.bestAsk;
+    existing.bestAskSize = summary.bestAskSize;
+    existing.bidLevelCount = summary.bidLevelCount;
+    existing.askLevelCount = summary.askLevelCount;
+    existing.bidVisibleSize = summary.bidVisibleSize;
+    existing.askVisibleSize = summary.askVisibleSize;
+    existing.spread =
+      summary.bestBid !== undefined && summary.bestAsk !== undefined
+        ? Number((summary.bestAsk - summary.bestBid).toFixed(6))
+        : undefined;
+  }
+
+  private applyBestBidAskSnapshot(existing: TokenRuntimeState, event: MarketWsMessage): void {
+    const bestBid = toNumberOrUndefined(event.best_bid);
+    const bestAsk = toNumberOrUndefined(event.best_ask);
+    if (bestBid !== undefined) {
+      existing.bestBid = bestBid;
+    }
+    if (bestAsk !== undefined) {
+      existing.bestAsk = bestAsk;
+    }
+    if (existing.bestBid !== undefined && existing.bestAsk !== undefined) {
+      existing.spread = Number((existing.bestAsk - existing.bestBid).toFixed(6));
+    }
+  }
+
+  private resolveRemovedEdge(
+    before: OrderBookSummary,
+    after: OrderBookSummary,
+    changes: readonly OrderBookDelta[],
+    side: 'BUY' | 'SELL',
+    source: OrderBookEdgeSnapshot['source'],
+  ): OrderBookEdgeSnapshot | undefined {
+    const previousPrice = side === 'BUY' ? before.bestBid : before.bestAsk;
+    const previousSize = side === 'BUY' ? before.bestBidSize : before.bestAskSize;
+    if (previousPrice === undefined) {
+      return undefined;
+    }
+
+    const currentPrice = side === 'BUY' ? after.bestBid : after.bestAsk;
+    const currentSize = side === 'BUY' ? after.bestBidSize : after.bestAskSize;
+    const levelCountAfter = side === 'BUY' ? after.bidLevelCount : after.askLevelCount;
+    const visibleSizeAfter = side === 'BUY' ? after.bidVisibleSize : after.askVisibleSize;
+    const changeForPreviousEdge = changes.find(
+      (change) => change.side === side && Math.abs(change.price - previousPrice) < Number.EPSILON,
+    );
+    const removedByDelta = changeForPreviousEdge ? changeForPreviousEdge.size <= 0 : false;
+    const removedByBook =
+      currentPrice === undefined || Math.abs(currentPrice - previousPrice) >= Number.EPSILON;
+
+    if (!removedByDelta && !removedByBook) {
+      return undefined;
+    }
+
+    return {
+      previousPrice,
+      previousSize: previousSize ?? null,
+      currentPrice: currentPrice ?? null,
+      currentSize: currentSize ?? null,
+      levelCountAfter,
+      visibleSizeAfter,
+      source,
+    };
   }
 
   private applyPriceSnapshots(snapshots: PriceSnapshot[]): void {

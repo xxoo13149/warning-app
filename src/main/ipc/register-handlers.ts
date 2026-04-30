@@ -1,4 +1,4 @@
-import { app, dialog, ipcMain, session } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, session } from 'electron';
 import path from 'node:path';
 
 import type {
@@ -10,7 +10,10 @@ import type {
   RuntimeState,
 } from '../contracts/ipc';
 import { DEFAULT_HEALTH as DEFAULT_HEALTH_VALUE } from '../contracts/ipc';
+import { IPC_CHANNELS } from '@/shared/constants';
+import type { RuntimeRendererMemoryReport } from '@/shared/monitor-contracts';
 import type { CoreWorkerClient } from '../services/core-worker-client';
+import type { RuntimeMemoryTelemetryService } from '../services/runtime-memory-telemetry';
 import type { PreviewSoundPlaybackResult } from '../services/audio-window';
 import {
   clearRuntimeStorageCache,
@@ -25,6 +28,7 @@ type EmitEvent = <C extends EventChannel>(channel: C, payload: EventPayloadMap[C
 interface RegisterIpcHandlersOptions {
   coreClient: CoreWorkerClient;
   runtimePaths: RuntimePaths;
+  memoryTelemetryService: RuntimeMemoryTelemetryService;
   getRuntimeState: () => RuntimeState;
   setRuntimeState: (updater: (prev: RuntimeState) => RuntimeState) => void;
   setRuntimeHealth: (health: RuntimeState['health']) => void;
@@ -40,6 +44,7 @@ interface RegisterIpcHandlersOptions {
 export const registerIpcHandlers = ({
   coreClient,
   runtimePaths,
+  memoryTelemetryService,
   getRuntimeState,
   setRuntimeState,
   setRuntimeHealth,
@@ -64,11 +69,11 @@ export const registerIpcHandlers = ({
     try {
       const health = await coreClient.invoke('app.getHealth');
       setRuntimeHealth(health);
-      return health;
+      return getRuntimeState().health;
     } catch {
       const fallbackHealth = toDegradedHealth(getRuntimeState().health);
       setRuntimeHealth(fallbackHealth);
-      return fallbackHealth;
+      return getRuntimeState().health;
     }
   });
 
@@ -236,7 +241,9 @@ export const registerIpcHandlers = ({
   ipcMain.handle(
     'storage.createDiagnostics',
     async (): Promise<InvokeResultMap['storage.createDiagnostics']> =>
-      createRuntimeDiagnosticsPackage(runtimePaths),
+      createRuntimeDiagnosticsPackage(runtimePaths, {
+        memoryTelemetry: memoryTelemetryService.getLatestSnapshot(),
+      }),
   );
 
   ipcMain.handle(
@@ -411,6 +418,24 @@ export const registerIpcHandlers = ({
 
       const result = await previewSoundFromPath(filePath, payload?.gain ?? targetSound?.gain ?? 1);
       return { ok: true, ...result };
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.internal.telemetryMemoryReport,
+    async (
+      event,
+      payload: RuntimeRendererMemoryReport,
+    ): Promise<{ ok: true }> => {
+      const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+      await memoryTelemetryService.recordRendererReport(payload, {
+        webContentsId: event.sender.id,
+        browserWindowId: ownerWindow?.id ?? null,
+        url: event.sender.getURL() || null,
+        title: ownerWindow?.getTitle() ?? null,
+      });
+      setRuntimeHealth(getRuntimeState().health);
+      return { ok: true };
     },
   );
 

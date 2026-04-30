@@ -36,6 +36,7 @@ interface MarketBandProps {
 
 type MarketExplorerMode = 'overview' | 'precise';
 type MarketSideFilter = '' | Extract<OrderSide, 'YES' | 'NO'>;
+type MarketExplorerPreset = 'all' | 'lottery' | 'watchlist';
 
 const MARKET_STATUS_LABELS: Record<MarketRow['status'], string> = {
   active: '交易中',
@@ -56,7 +57,7 @@ const MARKET_SIDE_LABELS: Record<MarketSideFilter, string> = {
   NO: '否',
 };
 
-const DEFAULT_SORT_BY: NonNullable<MarketQuery['sortBy']> = 'volume24h';
+const DEFAULT_SORT_BY: NonNullable<MarketQuery['sortBy']> = 'updatedAt';
 const DEFAULT_SORT_DIR: NonNullable<MarketQuery['sortDir']> = 'desc';
 const OVERVIEW_CITY_GROUP_LIMIT = 8;
 const OVERVIEW_MARKETS_PER_CITY_LIMIT = 6;
@@ -69,17 +70,112 @@ const SEVERITY_WEIGHT: Record<MarketRow['bubbleSeverity'], number> = {
 };
 
 const marketHasWideSpread = (row: MarketRow) => (row.spread ?? 0) >= 0.05;
+const marketHasLotterySignal = (row: MarketRow) => row.lotteryCandidate === true && (row.lotteryLift ?? 0) > 0;
+
+const LOTTERY_SOURCE_LABELS: Record<
+  NonNullable<MarketRow['lotteryConfirmationSource']>,
+  { zh: string; en: string }
+> = {
+  edge_volume: {
+    zh: '卖一旧档被吃掉',
+    en: 'Edge volume lifted',
+  },
+  trade_confirmed: {
+    zh: '成交确认',
+    en: 'Trade confirmed',
+  },
+  book_depth: {
+    zh: '盘口深度确认',
+    en: 'Book depth',
+  },
+};
+
+const formatSortOptionLabel = (
+  sortBy: NonNullable<MarketQuery['sortBy']>,
+  language: AppLanguage,
+  sortByLabel: (key: 'volume24h' | 'change5m' | 'spread' | 'updatedAt') => string,
+) => {
+  if (sortBy === 'lotteryLift') {
+    return language === 'zh-CN' ? '异常彩票优先' : 'Lottery Lift';
+  }
+
+  return sortByLabel(sortBy);
+};
+
+const formatLotteryLiftLabel = (value: number | null | undefined, language: AppLanguage) => {
+  if (value === null || value === undefined || !Number.isFinite(value) || value <= 0) {
+    return '--';
+  }
+
+  return `+${formatMarketCentsLabel(value, { compact: true }, language)}`;
+};
+
+const formatLotteryRouteLabel = (row: MarketRow, language: AppLanguage) => {
+  if (
+    row.lotteryReferenceAsk === null ||
+    row.lotteryReferenceAsk === undefined ||
+    row.lotteryCurrentAsk === null ||
+    row.lotteryCurrentAsk === undefined
+  ) {
+    return null;
+  }
+
+  return `${formatMarketCentsLabel(row.lotteryReferenceAsk, { compact: true }, language)} -> ${formatMarketCentsLabel(
+    row.lotteryCurrentAsk,
+    { compact: true },
+    language,
+  )}`;
+};
+
+const formatLotterySourceLabel = (
+  source: MarketRow['lotteryConfirmationSource'],
+  language: AppLanguage,
+) => {
+  if (!source) {
+    return language === 'zh-CN' ? '待确认' : 'Pending';
+  }
+
+  const meta = LOTTERY_SOURCE_LABELS[source];
+  if (!meta) {
+    return source;
+  }
+
+  return language === 'zh-CN' ? meta.zh : meta.en;
+};
+
+const formatLotterySizeLabel = (value: number | null | undefined, language: AppLanguage) => {
+  if (value === null || value === undefined || !Number.isFinite(value) || value <= 0) {
+    return '--';
+  }
+
+  const displayValue =
+    value >= 1000 ? Math.round(value).toLocaleString(language) : Number(value.toFixed(2)).toLocaleString(language);
+  return language === 'zh-CN' ? `${displayValue} 份` : `${displayValue} shares`;
+};
+
+const formatLotteryNotionalLabel = (value: number | null | undefined, language: AppLanguage) => {
+  if (value === null || value === undefined || !Number.isFinite(value) || value <= 0) {
+    return '--';
+  }
+
+  return new Intl.NumberFormat(language, {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: 2,
+  }).format(value);
+};
 
 const getMarketBandClassName = (row: MarketRow, selected: boolean) =>
   cn(
     'market-band',
     `market-band--${row.bubbleSeverity}`,
+    marketHasLotterySignal(row) && 'market-band--lottery',
     marketHasWideSpread(row) && 'market-band--wide-spread',
     selected && 'is-selected',
   );
 
-const getMarketRowClassName = (selected: boolean) =>
-  cn('market-table-row', selected && 'is-selected');
+const getMarketRowClassName = (row: MarketRow, selected: boolean) =>
+  cn('market-table-row', marketHasLotterySignal(row) && 'market-table-row--lottery', selected && 'is-selected');
 
 const groupMarketsByCity = (rows: MarketRow[]) => {
   const groups = new Map<
@@ -90,6 +186,8 @@ const groupMarketsByCity = (rows: MarketRow[]) => {
       rows: MarketRow[];
       riskCount: number;
       watchlistedCount: number;
+      lotteryCount: number;
+      maxLotteryLift: number;
       maxSeverityWeight: number;
       latestUpdatedAt: string;
     }
@@ -101,6 +199,8 @@ const groupMarketsByCity = (rows: MarketRow[]) => {
     if (current) {
       current.rows.push(row);
       current.watchlistedCount += row.watchlisted ? 1 : 0;
+      current.lotteryCount += marketHasLotterySignal(row) ? 1 : 0;
+      current.maxLotteryLift = Math.max(current.maxLotteryLift, row.lotteryLift ?? 0);
       current.riskCount +=
         row.bubbleSeverity === 'critical' || row.bubbleSeverity === 'warning' ? 1 : 0;
       current.maxSeverityWeight = Math.max(
@@ -119,12 +219,22 @@ const groupMarketsByCity = (rows: MarketRow[]) => {
       rows: [row],
       riskCount: row.bubbleSeverity === 'critical' || row.bubbleSeverity === 'warning' ? 1 : 0,
       watchlistedCount: row.watchlisted ? 1 : 0,
+      lotteryCount: marketHasLotterySignal(row) ? 1 : 0,
+      maxLotteryLift: row.lotteryLift ?? 0,
       maxSeverityWeight: SEVERITY_WEIGHT[row.bubbleSeverity],
       latestUpdatedAt: row.updatedAt,
     });
   });
 
   return [...groups.values()].sort((left, right) => {
+    if (left.lotteryCount !== right.lotteryCount) {
+      return right.lotteryCount - left.lotteryCount;
+    }
+
+    if (left.maxLotteryLift !== right.maxLotteryLift) {
+      return right.maxLotteryLift - left.maxLotteryLift;
+    }
+
     if (left.maxSeverityWeight !== right.maxSeverityWeight) {
       return right.maxSeverityWeight - left.maxSeverityWeight;
     }
@@ -150,9 +260,11 @@ const MarketExplorerRow = memo(
     const spreadClass = marketHasWideSpread(row) ? 'value-down' : '';
     const changeClass = row.change5m >= 0 ? 'value-up' : 'value-down';
     const hasQuotes = hasMarketQuoteSignal(row);
+    const lotteryLift = marketHasLotterySignal(row) ? formatLotteryLiftLabel(row.lotteryLift, language) : '--';
+    const lotteryRoute = formatLotteryRouteLabel(row, language);
 
     return (
-      <tr className={getMarketRowClassName(selected)} onClick={() => onSelect(row.marketId)}>
+      <tr className={getMarketRowClassName(row, selected)} onClick={() => onSelect(row.marketId)}>
         <td>{row.cityName}</td>
         <td>{row.eventDate}</td>
         <td>{formatTemperatureBandLabel(row.temperatureBand, language)}</td>
@@ -163,6 +275,12 @@ const MarketExplorerRow = memo(
           {formatMarketCentsLabel(row.spread, { treatZeroAsUnknown: !hasQuotes }, language)}
         </td>
         <td className={changeClass}>{formatMarketPercent(row.change5m)}</td>
+        <td
+          className={marketHasLotterySignal(row) ? 'value-up market-table-cell--lottery' : 'market-table-cell--lottery'}
+          title={lotteryRoute ?? undefined}
+        >
+          {lotteryLift}
+        </td>
         <td>{formatTime(row.updatedAt)}</td>
       </tr>
     );
@@ -173,6 +291,13 @@ const MarketBand = memo(
   ({ row, formatTime, language, selected, onSelect }: MarketBandProps) => {
     const hasQuotes = hasMarketQuoteSignal(row);
     const changeClass = row.change5m >= 0 ? 'value-up' : 'value-down';
+    const lotteryRoute = formatLotteryRouteLabel(row, language);
+    const lotterySource = marketHasLotterySignal(row)
+      ? formatLotterySourceLabel(row.lotteryConfirmationSource, language)
+      : null;
+    const lotteryBadge = marketHasLotterySignal(row)
+      ? `${language === 'zh-CN' ? '异常彩票' : 'Lottery'} ${formatLotteryLiftLabel(row.lotteryLift, language)}`
+      : null;
 
     return (
       <button
@@ -208,6 +333,15 @@ const MarketBand = memo(
           </span>
         </span>
         <span className="market-band__badges">
+          {lotteryBadge ? (
+            <span className="market-band__badge market-band__badge--lottery">{lotteryBadge}</span>
+          ) : null}
+          {lotterySource ? (
+            <span className="market-band__badge market-band__badge--source">{lotterySource}</span>
+          ) : null}
+          {lotteryRoute ? (
+            <span className="market-band__badge market-band__badge--route">{lotteryRoute}</span>
+          ) : null}
           {row.watchlisted ? <span>已关注</span> : null}
           {marketHasWideSpread(row) ? <span>价差偏高</span> : null}
         </span>
@@ -230,6 +364,7 @@ export const MarketExplorerView = ({
     query.side === 'YES' || query.side === 'NO' ? query.side : '',
   );
   const [watchlistOnly, setWatchlistOnly] = useState(Boolean(query.watchlistedOnly));
+  const [lotteryOnly, setLotteryOnly] = useState(Boolean(query.lotteryOnly));
   const [viewMode, setViewMode] = useState<MarketExplorerMode>('overview');
   const [selectedMarketId, setSelectedMarketId] = useState<string | null>(null);
 
@@ -248,11 +383,27 @@ export const MarketExplorerView = ({
     [rows, selectedMarketId],
   );
   const selectedMarketHasQuotes = hasMarketQuoteSignal(selectedMarket);
+  const selectedLotteryRoute = selectedMarket ? formatLotteryRouteLabel(selectedMarket, language) : null;
+  const selectedLotterySource = selectedMarket
+    ? formatLotterySourceLabel(selectedMarket.lotteryConfirmationSource, language)
+    : null;
+  const lotteryFocused = lotteryOnly;
+  const lotteryRows = useMemo(
+    () => rows.filter((row) => marketHasLotterySignal(row)),
+    [rows],
+  );
   const visibleCityCount = cityGroups.length;
   const watchlistedCount = rows.filter((row) => row.watchlisted).length;
   const riskCount = rows.filter(
     (row) => row.bubbleSeverity === 'critical' || row.bubbleSeverity === 'warning',
   ).length;
+  const lotteryCityCount = new Set(lotteryRows.map((row) => row.cityKey)).size;
+  const confirmedLotteryCount = lotteryRows.filter((row) => Boolean(row.lotteryConfirmationSource)).length;
+  const averageLotteryLift =
+    lotteryRows.length > 0
+      ? lotteryRows.reduce((sum, row) => sum + (row.lotteryLift ?? 0), 0) / lotteryRows.length
+      : null;
+  const bestLotteryLift = lotteryRows.reduce((best, row) => Math.max(best, row.lotteryLift ?? 0), 0);
   const visibleOverviewMarketCount = visibleCityGroups.reduce(
     (sum, group) => sum + Math.min(group.rows.length, OVERVIEW_MARKETS_PER_CITY_LIMIT),
     0,
@@ -260,14 +411,25 @@ export const MarketExplorerView = ({
   const hiddenOverviewMarketCount = Math.max(0, rows.length - visibleOverviewMarketCount);
   const hiddenPrecisionRowCount = Math.max(0, rows.length - visiblePrecisionRows.length);
   const hasSearchTerm = cityKey.trim().length > 0;
+  const activePreset: MarketExplorerPreset = lotteryOnly
+    ? 'lottery'
+    : watchlistOnly
+      ? 'watchlist'
+      : 'all';
+  const activeSortBy = query.sortBy ?? DEFAULT_SORT_BY;
+  const activeSortDir = query.sortDir ?? DEFAULT_SORT_DIR;
+  const describeSort = (sortBy: NonNullable<MarketQuery['sortBy']>) =>
+    formatSortOptionLabel(sortBy, language, sortByLabel);
   const activeFilterLabels = [
     hasSearchTerm ? `搜索：${cityKey.trim()}` : '搜索：全部城市/机场',
     eventDate ? `日期：${eventDate}` : '日期：全部',
-    `方向：${MARKET_SIDE_LABELS[sideFilter]}`,
-    watchlistOnly ? '仅关注盘口' : '全部盘口',
-    `排序：${sortByLabel(query.sortBy ?? DEFAULT_SORT_BY)} / ${
-      (query.sortDir ?? DEFAULT_SORT_DIR) === 'desc' ? '降序' : '升序'
-    }`,
+    lotteryOnly
+      ? '模式：异常彩票（超低价更敏感）'
+      : watchlistOnly
+        ? '模式：仅看关注盘口'
+        : '模式：全部盘口',
+    lotteryOnly ? '方向：已锁定超低价盘口' : `方向：${MARKET_SIDE_LABELS[sideFilter]}`,
+    `排序：${describeSort(activeSortBy)} / ${activeSortDir === 'desc' ? '降序' : '升序'}`,
   ];
 
   useEffect(() => {
@@ -287,6 +449,10 @@ export const MarketExplorerView = ({
   }, [query.watchlistedOnly]);
 
   useEffect(() => {
+    setLotteryOnly(Boolean(query.lotteryOnly));
+  }, [query.lotteryOnly]);
+
+  useEffect(() => {
     startTransition(() => {
       onQueryChange({
         cityKey: deferredCityKey.trim().toLowerCase() || undefined,
@@ -297,10 +463,11 @@ export const MarketExplorerView = ({
   useEffect(() => {
     onQueryChange({
       eventDate: eventDate || undefined,
-      side: sideFilter || undefined,
+      side: lotteryOnly ? undefined : sideFilter || undefined,
       watchlistedOnly: watchlistOnly || undefined,
+      lotteryOnly: lotteryOnly || undefined,
     });
-  }, [eventDate, onQueryChange, sideFilter, watchlistOnly]);
+  }, [eventDate, lotteryOnly, onQueryChange, sideFilter, watchlistOnly]);
 
   useEffect(() => {
     if (rows.length === 0) {
@@ -318,11 +485,15 @@ export const MarketExplorerView = ({
     setEventDate('');
     setSideFilter('');
     setWatchlistOnly(false);
+    setLotteryOnly(false);
     onQueryChange({
       cityKey: undefined,
       eventDate: undefined,
       side: undefined,
       watchlistedOnly: undefined,
+      lotteryOnly: undefined,
+      sortBy: DEFAULT_SORT_BY,
+      sortDir: DEFAULT_SORT_DIR,
     });
   };
 
@@ -334,6 +505,47 @@ export const MarketExplorerView = ({
     setCityKey(selectedMarket.cityKey);
     setEventDate(selectedMarket.eventDate);
     setSideFilter(selectedMarket.side === 'YES' || selectedMarket.side === 'NO' ? selectedMarket.side : '');
+  };
+
+  const applyPreset = (preset: MarketExplorerPreset) => {
+    if (preset === 'lottery') {
+      setLotteryOnly(true);
+      setWatchlistOnly(false);
+      setSideFilter('');
+      onQueryChange({
+        lotteryOnly: true,
+        watchlistedOnly: undefined,
+        side: undefined,
+        sortBy: 'lotteryLift',
+        sortDir: 'desc',
+      });
+      return;
+    }
+
+    if (preset === 'watchlist') {
+      setLotteryOnly(false);
+      setWatchlistOnly(true);
+      setSideFilter('');
+      onQueryChange({
+        lotteryOnly: undefined,
+        watchlistedOnly: true,
+        side: undefined,
+        sortBy: 'updatedAt',
+        sortDir: 'desc',
+      });
+      return;
+    }
+
+    setLotteryOnly(false);
+    setWatchlistOnly(false);
+    setSideFilter('');
+    onQueryChange({
+      lotteryOnly: undefined,
+      watchlistedOnly: undefined,
+      side: undefined,
+      sortBy: DEFAULT_SORT_BY,
+      sortDir: DEFAULT_SORT_DIR,
+    });
   };
 
   return (
@@ -355,6 +567,37 @@ export const MarketExplorerView = ({
         </header>
 
         <div className="market-explorer-toolbar">
+          <div className="market-explorer-presets" role="group" aria-label="运营预设">
+            <button
+              type="button"
+              className={cn('market-explorer-preset', activePreset === 'all' && 'is-active')}
+              onClick={() => applyPreset('all')}
+            >
+              全部盘口
+            </button>
+            <button
+              type="button"
+              className={cn('market-explorer-preset', activePreset === 'lottery' && 'is-active')}
+              onClick={() => applyPreset('lottery')}
+            >
+              异常彩票
+            </button>
+            <button
+              type="button"
+              className={cn('market-explorer-preset', activePreset === 'watchlist' && 'is-active')}
+              onClick={() => applyPreset('watchlist')}
+            >
+              关注队列
+            </button>
+          </div>
+
+          {lotteryFocused ? (
+            <div className="market-explorer-mode-note">
+              <strong>异常彩票模式</strong>
+              <span>低价越低越敏感：1-2c 推高 3c 即触发，3-4c 推高 4c 即触发。</span>
+            </div>
+          ) : null}
+
           <div className="market-explorer-filters">
             <label className="field field--grow">
               <span>{copy.explorer.cityKey}</span>
@@ -378,6 +621,7 @@ export const MarketExplorerView = ({
               <span>方向</span>
               <select
                 value={sideFilter}
+                disabled={lotteryFocused}
                 onChange={(event) => setSideFilter(event.target.value as MarketSideFilter)}
               >
                 <option value="">全部方向</option>
@@ -396,7 +640,8 @@ export const MarketExplorerView = ({
                   })
                 }
               >
-                <option value="volume24h">{sortByLabel('volume24h')}</option>
+                <option value="lotteryLift">{describeSort('lotteryLift')}</option>
+                <option value="volume24h">{describeSort('volume24h')}</option>
                 <option value="change5m">{sortByLabel('change5m')}</option>
                 <option value="spread">{sortByLabel('spread')}</option>
                 <option value="updatedAt">{sortByLabel('updatedAt')}</option>
@@ -433,6 +678,7 @@ export const MarketExplorerView = ({
               {activeFilterLabels.map((label) => (
                 <span key={label}>{label}</span>
               ))}
+              {lotteryFocused ? <span>阈值：1-2c 看 +3c，3-4c 看 +4c</span> : null}
               <span>{copy.explorer.summary(rows.length, total)}</span>
             </div>
             <div className="market-explorer-view-toggle" role="group" aria-label="视图模式">
@@ -456,27 +702,54 @@ export const MarketExplorerView = ({
 
         <div className="market-explorer-body">
           <main className="market-explorer-main">
-            <div className="market-explorer-summary">
-              <div>
-                <span>当前结果</span>
-                <strong>{rows.length}</strong>
-                <em>共 {total} 个盘口</em>
-              </div>
-              <div>
-                <span>覆盖城市</span>
-                <strong>{visibleCityCount}</strong>
-                <em>按城市分组展示</em>
-              </div>
-              <div>
-                <span>重点风险</span>
-                <strong>{riskCount}</strong>
-                <em>预警或高风险盘口</em>
-              </div>
-              <div>
-                <span>关注盘口</span>
-                <strong>{watchlistedCount}</strong>
-                <em>已加入关注列表</em>
-              </div>
+            <div className={cn('market-explorer-summary', lotteryFocused && 'market-explorer-summary--lottery')}>
+              {lotteryFocused ? (
+                <>
+                  <div>
+                    <span>异常候选</span>
+                    <strong>{rows.length}</strong>
+                    <em>覆盖 {lotteryCityCount} 座城市</em>
+                  </div>
+                  <div>
+                    <span>确认路径</span>
+                    <strong>{confirmedLotteryCount}</strong>
+                    <em>已确认成交、旧档或盘口深度</em>
+                  </div>
+                  <div>
+                    <span>平均推高</span>
+                    <strong>{formatLotteryLiftLabel(averageLotteryLift, language)}</strong>
+                    <em>超低价盘口采用更敏感阈值</em>
+                  </div>
+                  <div>
+                    <span>最大推高</span>
+                    <strong>{formatLotteryLiftLabel(bestLotteryLift || null, language)}</strong>
+                    <em>当前排序：{describeSort(activeSortBy)}</em>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div>
+                    <span>当前结果</span>
+                    <strong>{rows.length}</strong>
+                    <em>共 {total} 个盘口</em>
+                  </div>
+                  <div>
+                    <span>覆盖城市</span>
+                    <strong>{visibleCityCount}</strong>
+                    <em>按城市分组展示</em>
+                  </div>
+                  <div>
+                    <span>重点风险</span>
+                    <strong>{riskCount}</strong>
+                    <em>预警或高风险盘口</em>
+                  </div>
+                  <div>
+                    <span>异常彩票</span>
+                    <strong>{lotteryRows.length}</strong>
+                    <em>超低价盘口异动候选</em>
+                  </div>
+                </>
+              )}
             </div>
 
             {viewMode === 'overview' ? (
@@ -496,6 +769,12 @@ export const MarketExplorerView = ({
                               </span>
                             </div>
                             <div className="market-city-group__stats">
+                              {group.lotteryCount > 0 ? (
+                                <span>异常彩票 {group.lotteryCount}</span>
+                              ) : null}
+                              {group.maxLotteryLift > 0 ? (
+                                <span>最大推高 {formatLotteryLiftLabel(group.maxLotteryLift, language)}</span>
+                              ) : null}
                               <span>{group.riskCount} 个重点风险</span>
                               <span>{group.watchlistedCount} 个关注</span>
                             </div>
@@ -546,6 +825,7 @@ export const MarketExplorerView = ({
                           <th>{copy.dashboard.ask}</th>
                           <th>{copy.dashboard.spread}</th>
                           <th>{copy.dashboard.change5m}</th>
+                          <th>异常彩票</th>
                           <th>{copy.common.updated}</th>
                         </tr>
                       </thead>
@@ -610,6 +890,43 @@ export const MarketExplorerView = ({
                     <p>和“是”价格配合判断盘口是否平衡。</p>
                   </div>
                 </div>
+
+                {marketHasLotterySignal(selectedMarket) ? (
+                  <div className="market-inspector__lottery">
+                    <div className="market-inspector__lottery-head">
+                      <span>异常彩票信号</span>
+                      <strong>{formatLotteryLiftLabel(selectedMarket.lotteryLift, language)}</strong>
+                      <em>{selectedLotteryRoute ?? '超低价盘口被快速推高'}</em>
+                    </div>
+                    <div className="market-inspector__metrics market-inspector__metrics--lottery">
+                      <div>
+                        <span>确认路径</span>
+                        <strong>{selectedLotterySource}</strong>
+                      </div>
+                      <div>
+                        <span>有效数量</span>
+                        <strong>{formatLotterySizeLabel(selectedMarket.lotteryEffectiveSize, language)}</strong>
+                      </div>
+                      <div>
+                        <span>有效金额</span>
+                        <strong>
+                          {formatLotteryNotionalLabel(selectedMarket.lotteryEffectiveNotional, language)}
+                        </strong>
+                      </div>
+                      <div>
+                        <span>信号时间</span>
+                        <strong>
+                          {selectedMarket.lotteryUpdatedAt ? formatTime(selectedMarket.lotteryUpdatedAt) : '--'}
+                        </strong>
+                      </div>
+                    </div>
+                  </div>
+                ) : lotteryFocused ? (
+                  <div className="market-inspector__lottery market-inspector__lottery--empty">
+                    <strong>当前盘口还未满足异常彩票确认</strong>
+                    <span>异常彩票优先关注参考卖一不高于 4c，且被短时间推高的超低价盘口。</span>
+                  </div>
+                ) : null}
 
                 <div className="market-inspector__metrics">
                   <div>

@@ -102,6 +102,21 @@ describe('ipc contract alignment', () => {
     expect(content).toContain(`exposeInMainWorld('api', api)`);
   });
 
+  it('keeps the internal memory telemetry IPC wired between preload and main', () => {
+    const preloadBridgeSource = fs.readFileSync(
+      path.resolve(process.cwd(), 'src/main/preload-bridge.ts'),
+      'utf-8',
+    );
+    const registerHandlerSource = fs.readFileSync(
+      path.resolve(process.cwd(), 'src/main/ipc/register-handlers.ts'),
+      'utf-8',
+    );
+
+    expect(preloadBridgeSource).toContain('IPC_CHANNELS.internal.telemetryMemoryReport');
+    expect(registerHandlerSource).toContain('IPC_CHANNELS.internal.telemetryMemoryReport');
+    expect(IPC_CHANNELS.internal.telemetryMemoryReport).toBe('telemetry.memory.report');
+  });
+
   it('keeps shared channel constants synced with main contracts', () => {
     const sharedInvoke = new Set<string>(Object.values(IPC_CHANNELS.invoke));
     hookInvokeChannels.forEach((channel) => {

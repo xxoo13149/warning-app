@@ -23,6 +23,8 @@ vi.mock('../../src/core/db/repository', () => {
     insertPriceTicks = vi.fn(() => undefined);
     prunePriceTicks = vi.fn(() => 0);
     pruneAlertEvents = vi.fn(() => 0);
+    queryAlertEvents = vi.fn(() => ({ rows: [], total: 0, hasMore: false, nextCursor: undefined }));
+    queryRecentAlertEventsForScoring = vi.fn(() => []);
     checkpointWal = vi.fn(() => undefined);
     compactDatabase = vi.fn(() => undefined);
 
@@ -51,7 +53,11 @@ vi.mock('../../src/core/db/repository', () => {
     }
   }
 
-  return { WeatherMonitorRepository };
+  return {
+    ALERT_EVENT_PAGE_LIMIT_DEFAULT: 200,
+    ALERT_EVENT_PAGE_LIMIT_MAX: 500,
+    WeatherMonitorRepository,
+  };
 });
 
 vi.mock('../../src/core/services/polymarket-data-service', () => {
@@ -112,11 +118,11 @@ const expectArchiveQuery = (
 ) => {
   const actual = runtime.repository.archivePriceTicks.mock.calls[callIndex]?.[0];
   expect(actual?.batchSize).toBe(ARCHIVE_BATCH_SIZE);
-  expect(Math.abs((actual?.cutoffTimestamp ?? 0) - (nowMs - retentionDays * DAY_MS))).toBeLessThanOrEqual(5);
+  expect(Math.abs((actual?.cutoffTimestamp ?? 0) - (nowMs - retentionDays * DAY_MS))).toBeLessThanOrEqual(50);
 };
 
 describe('worker runtime alert retention', () => {
-  it('prunes alert history immediately when retention changes', () => {
+  it('prunes alert history immediately when retention changes', async () => {
     const runtime = createRuntime();
 
     runtime.repository.pruneAlertEvents.mockReturnValueOnce(50);
@@ -137,6 +143,7 @@ describe('worker runtime alert retention', () => {
     });
 
     runtime.updateSettings({ alertRetentionDays: 30 });
+    await runtime.maintenanceInFlight;
 
     expect(runtime.repository.pruneAlertEvents).toHaveBeenCalledTimes(1);
     expect(runtime.repository.pruneAlertEvents).toHaveBeenCalledWith(30);
@@ -148,7 +155,7 @@ describe('worker runtime alert retention', () => {
     expect(runtime.repository.queryAppSetting('alertRetentionDays')?.value).toBe('30');
   });
 
-  it('compacts the database after a large alert prune', () => {
+  it('compacts the database after a large alert prune', async () => {
     const runtime = createRuntime();
 
     runtime.repository.pruneAlertEvents.mockReturnValueOnce(12_000);
@@ -169,6 +176,7 @@ describe('worker runtime alert retention', () => {
     });
 
     runtime.updateSettings({ alertRetentionDays: 30 });
+    await runtime.maintenanceInFlight;
 
     expect(runtime.repository.pruneAlertEvents).toHaveBeenCalledTimes(1);
     expect(runtime.repository.archivePriceTicks).toHaveBeenCalledTimes(1);

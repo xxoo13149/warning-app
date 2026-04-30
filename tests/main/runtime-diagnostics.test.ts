@@ -7,7 +7,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { createRuntimeDiagnosticsPackage } from '../../src/main/services/runtime-diagnostics';
 import { resolveRuntimePaths } from '../../src/main/services/runtime-paths';
-import type { RuntimeDiagnosticsPackage } from '../../src/shared/monitor-contracts';
+import type {
+  RuntimeDiagnosticsPackage,
+  RuntimeMemoryTelemetry,
+} from '../../src/shared/monitor-contracts';
 
 describe('runtime diagnostics package', () => {
   const tempDirs: string[] = [];
@@ -23,6 +26,7 @@ describe('runtime diagnostics package', () => {
     tempDirs.push(tempRoot);
     const runtimePaths = resolveRuntimePaths(tempRoot);
     const generatedAt = new Date('2026-04-25T09:30:00.000Z');
+    const memoryTelemetry = createMemoryTelemetrySample(generatedAt.toISOString());
 
     seedRuntimeMainDatabase(runtimePaths.mainDbPath, 'SECRET_MAIN_DB_PAYLOAD');
     writeLogFile(
@@ -40,6 +44,7 @@ describe('runtime diagnostics package', () => {
       now: () => generatedAt,
       logFileLimit: 1,
       logTailBytes: 24,
+      memoryTelemetry,
     });
 
     expect(fs.existsSync(result.packagePath)).toBe(true);
@@ -55,6 +60,7 @@ describe('runtime diagnostics package', () => {
     expect(diagnostics.storageSummary.mainDbPath).toBe(runtimePaths.mainDbPath);
     expect(diagnostics.storageSummary.mainDbExists).toBe(true);
     expect(diagnostics.storageSummary.priceTickCount).toBe(1);
+    expect(diagnostics.memoryTelemetry).toEqual(memoryTelemetry);
     expect(diagnostics.logs.directory).toBe(runtimePaths.logsDir);
     expect(diagnostics.logs.fileCount).toBe(2);
     expect(diagnostics.logs.includedFileCount).toBe(1);
@@ -91,6 +97,69 @@ describe('runtime diagnostics package', () => {
       'runtime-diagnostics-20260425-103000.json',
     ]);
   });
+});
+
+const createMemoryTelemetrySample = (sampledAt: string): RuntimeMemoryTelemetry => ({
+  sampledAt,
+  browser: {
+    sampledAt,
+    pid: 100,
+    creationTime: 1,
+    cpuPercent: 0.5,
+    processMemory: {
+      privateKb: 120,
+      residentSetKb: 240,
+      sharedKb: 60,
+    },
+    appMetrics: {
+      workingSetKb: 300,
+      peakWorkingSetKb: 360,
+      privateBytesKb: 180,
+    },
+  },
+  tabs: [
+    {
+      sampledAt,
+      pid: 200,
+      name: 'Renderer',
+      serviceName: null,
+      creationTime: 2,
+      cpuPercent: 1.2,
+      sandboxed: false,
+      integrityLevel: 'medium',
+      memory: {
+        workingSetKb: 210,
+        peakWorkingSetKb: 260,
+        privateBytesKb: 170,
+      },
+    },
+  ],
+  renderer: {
+    sampledAt,
+    pid: 200,
+    webContentsId: 1,
+    browserWindowId: 1,
+    url: 'file:///renderer/index.html',
+    title: 'Warning App',
+    hidden: false,
+    visibilityState: 'visible',
+    processMemory: {
+      privateKb: 150,
+      residentSetKb: 190,
+      sharedKb: 25,
+    },
+    blinkMemory: {
+      allocatedKb: 90,
+      totalKb: 120,
+    },
+    appMetrics: {
+      workingSetKb: 210,
+      peakWorkingSetKb: 260,
+      privateBytesKb: 170,
+    },
+    cpuPercent: 1.2,
+    creationTime: 2,
+  },
 });
 
 const seedRuntimeMainDatabase = (dbPath: string, secret: string): void => {

@@ -35,6 +35,7 @@ import {
   buildRuleEditorScopeOptions,
   buildRuleScopeSummary,
   filtersFromRule,
+  formatLiquiditySideLabel,
   formatRuleDuration,
   formatRuleMetricLabel,
   formatRuleOperatorLabel,
@@ -266,6 +267,7 @@ const METRIC_OPTIONS: AlertRule['metric'][] = [
   'change5m',
   'spread',
   'liquidity_kill',
+  'volume_pricing',
   'bidask_gap',
   'new_market',
   'resolved',
@@ -273,6 +275,15 @@ const METRIC_OPTIONS: AlertRule['metric'][] = [
 ];
 
 const OPERATOR_OPTIONS: AlertRule['operator'][] = ['>', '>=', '<', '<=', 'crosses'];
+
+const LIQUIDITY_SIDE_OPTIONS: Array<{
+  value: NonNullable<AlertRule['liquiditySide']>;
+  label: string;
+}> = [
+  { value: 'both', label: '买卖两边' },
+  { value: 'buy', label: '只看买盘' },
+  { value: 'sell', label: '只看卖盘' },
+];
 
 const getRuleScopeFilter = (rule: AlertRule): Exclude<ScopeFilter, 'all'> => {
   if (cleanText(rule.scope?.marketId) || cleanText(rule.scope?.tokenId)) {
@@ -478,6 +489,27 @@ const formatScopeBandText = (value?: string | null) => {
     .trim();
 };
 
+const formatPreviewSampleLabel = (row: RulePreviewResult['sampleMarkets'][number]) =>
+  [
+    cleanText(row.cityName) || row.cityKey,
+    row.eventDate,
+    formatScopeBandText(row.temperatureBand),
+    formatScopeSideText(row.side),
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
+const formatPreviewSampleQuote = (row: RulePreviewResult['sampleMarkets'][number]) => {
+  const parts = [
+    `买一 ${formatCentsText(row.bestBid)}`,
+    `卖一 ${formatCentsText(row.bestAsk)}`,
+  ];
+  if (hasNumber(row.spread)) {
+    parts.push(`价差 ${formatCentsText(row.spread)}`);
+  }
+  return parts.join(' · ');
+};
+
 const buildScopeMarketLabel = (row: MarketRow) =>
   [
     cleanText(row.cityName) || row.cityKey,
@@ -508,10 +540,9 @@ const getRuleCurrentValue = (rule: AlertRule, row: MarketRow) => {
     case 'spread':
     case 'bidask_gap':
       return row.spread;
-    case 'liquidity_kill': {
-      const values = [row.bestBid, row.bestAsk].filter(hasNumber);
-      return values.length > 0 ? Math.min(...values) : null;
-    }
+    case 'liquidity_kill':
+    case 'volume_pricing':
+      return null;
     default:
       return null;
   }
@@ -528,6 +559,7 @@ const formatRuleValue = (rule: AlertRule, value: number | null | undefined) => {
       return hasNumber(value) ? `${Math.round(value)} 秒` : '暂无';
     case 'price':
     case 'liquidity_kill':
+    case 'volume_pricing':
     default:
       return formatCentsText(value);
   }
@@ -585,6 +617,122 @@ const buildRuleDiagnostic = ({
         : rule.metric === 'feed_stale' && !health.serviceStatus
           ? '当前还没有数据流状态，等监控连接稳定后再判断。'
           : null;
+
+  if (rule.metric === 'volume_pricing') {
+    const coverageText = `${scopedRows.length} 个盘口`;
+    const windowText = formatRuleDuration(rule.windowSec);
+    const title = disabledReason
+      ? '暂时不会触发'
+      : latestAlertAt
+        ? '最近捕捉到过带量定价'
+        : scopedRows.length > 0
+          ? '等待新的带量定价事件'
+          : '当前范围没有覆盖盘口';
+    const summary =
+      disabledReason ??
+      (scopedRows.length === 0
+        ? '先把范围收窄到真正要盯的城市、日期、温区或单个盘口，否则这条规则不会命中。'
+        : '这条规则看的是卖一在短窗口内被明显推高，并且要有成交量或盘口量确认；不是单纯看当前价格高低。');
+
+    return {
+      tone: disabledReason ? 'warning' : latestAlertAt ? 'success' : scopedRows.length > 0 ? 'muted' : 'warning',
+      title,
+      summary,
+      items: [
+        {
+          label: '规则状态',
+          value: rule.enabled ? '已启用' : '已停用',
+          hint: rule.enabled ? '后台会持续监听新的带量定价事件。' : '开启后才会继续监听带量定价。',
+          tone: rule.enabled ? 'success' : 'danger',
+        },
+        {
+          label: '覆盖盘口',
+          value: coverageText,
+          hint:
+            scopedRows.length > 0
+              ? buildRuleScopeSummary(rule, marketRows)
+              : '当前范围没有任何盘口样本，请先调整范围。',
+          tone: scopedRows.length > 0 ? 'success' : 'warning',
+        },
+        {
+          label: '触发逻辑',
+          value: `卖一推高 ${formatRuleValue(rule, rule.threshold)}+`,
+          hint: '例如卖一从 20 美分被推高到 40 美分，并且有成交或挂单量确认，才算带量定价。',
+          tone: 'muted',
+        },
+        {
+          label: '观察窗口',
+          value: windowText,
+          hint: `后台会在 ${windowText} 内比较卖一是否被推高，并自动做冷却和去重。`,
+          tone: 'muted',
+        },
+        {
+          label: '最近命中',
+          value: latestAlertAt ? formatDateTimeText(latestAlertAt) : '暂无',
+          hint: latestAlertAt ? '告警中心里可以查看这次带量定价的完整记录。' : '没有命中不代表异常，只代表还没出现有效量价事件。',
+          tone: latestAlertAt ? 'success' : 'muted',
+        },
+      ],
+    };
+  }
+
+  if (rule.metric === 'liquidity_kill') {
+    const coverageText = `${scopedRows.length} 个盘口`;
+    const windowText = formatRuleDuration(rule.windowSec);
+    const title = disabledReason
+      ? '暂时不会触发'
+      : latestAlertAt
+        ? '最近捕捉到过盘口斩杀'
+        : scopedRows.length > 0
+          ? '等待新的盘口斩杀事件'
+          : '当前范围没有覆盖盘口';
+    const summary =
+      disabledReason ??
+      (scopedRows.length === 0
+        ? '先把范围收窄到真正要盯的城市、日期、温区或单个盘口，否则这条规则不会命中。'
+        : '这条规则看的是短窗口内“顶档被清空”的事件，不适合用当前买一卖一直接判断会不会触发。');
+
+    return {
+      tone: disabledReason ? 'warning' : latestAlertAt ? 'success' : scopedRows.length > 0 ? 'muted' : 'warning',
+      title,
+      summary,
+      items: [
+        {
+          label: '规则状态',
+          value: rule.enabled ? '已启用' : '已停用',
+          hint: rule.enabled ? '后台会持续监听新的盘口清空事件。' : '开启后才会继续监听盘口斩杀。 ',
+          tone: rule.enabled ? 'success' : 'danger',
+        },
+        {
+          label: '覆盖盘口',
+          value: coverageText,
+          hint:
+            scopedRows.length > 0
+              ? buildRuleScopeSummary(rule, marketRows)
+              : '当前范围没有任何盘口样本，请先调整范围。',
+          tone: scopedRows.length > 0 ? 'success' : 'warning',
+        },
+        {
+          label: '监控盘口',
+          value: formatLiquiditySideLabel(rule.liquiditySide),
+          hint: '买盘指买一侧，卖盘指卖一侧；这不是 YES/NO 方向。',
+          tone: 'muted',
+        },
+        {
+          label: '触发门槛',
+          value: `${formatRuleValue(rule, rule.threshold)} / ${windowText}`,
+          hint: '只要被清空前的顶档价位不低于这个门槛，并且事件发生在观察窗口内，就会进入告警判断。',
+          tone: 'muted',
+        },
+        {
+          label: '最近告警',
+          value: latestAlertAt ? formatDateTimeText(latestAlertAt) : '暂无',
+          hint: latestAlertAt ? '这是最近一次写入告警中心的盘口斩杀记录。' : '当前已加载的告警里还没有这条规则的记录。',
+          tone: latestAlertAt ? 'success' : 'muted',
+        },
+      ],
+    };
+  }
 
   const hasCurrentHit = rule.metric === 'feed_stale' ? feedTriggered : triggeredRows.length > 0;
   const tone = disabledReason
@@ -663,7 +811,9 @@ const getRuleMetricPlainText = (metric: AlertRule['metric']) => {
     case 'spread':
       return '监控买一和卖一之间的价差是否过宽。';
     case 'liquidity_kill':
-      return '监控买盘或卖盘是否快速接近归零。';
+      return '监控短窗口内买一或卖一顶档是否被清空，这是一个事件型规则，不是静态价格阈值。';
+    case 'volume_pricing':
+      return '监控卖一是否在短窗口内被明显推高，并且有成交或盘口量确认。';
     case 'bidask_gap':
       return '监控买卖盘之间是否出现明显缺口。';
     case 'new_market':
@@ -680,8 +830,11 @@ const getRuleMetricPlainText = (metric: AlertRule['metric']) => {
 const getRuleThresholdHint = (metric: AlertRule['metric']) => {
   switch (metric) {
     case 'price':
-    case 'liquidity_kill':
       return '按 0 到 1 的价格填写，例如 0.5 表示 50 美分。';
+    case 'liquidity_kill':
+      return '填写“被清空前的最低顶档价位”，例如 0.2 表示只有清空 20 美分及以上的顶档才提醒。';
+    case 'volume_pricing':
+      return '填写“卖一被推高的最小幅度”，例如 0.1 表示至少推高 10 美分才提醒。';
     case 'spread':
     case 'bidask_gap':
       return '按盘口差值填写，例如 0.05 表示约 5 美分价差。';
@@ -725,33 +878,95 @@ const getRuleThresholdStep = (metric: AlertRule['metric']) => {
   }
 };
 
-const buildRuleTriggerGuide = (rule: AlertRule): RuleTriggerGuide => ({
-  title: buildRuleConditionSummary(rule),
-  summary: getRuleMetricPlainText(rule.metric),
-  thresholdHint: getRuleThresholdHint(rule.metric),
-  items: [
-    {
-      label: '监控指标',
-      value: formatRuleMetricLabel(rule.metric),
-      hint: getRuleMetricPlainText(rule.metric),
-    },
-    {
-      label: '判断方式',
-      value: formatRuleOperatorLabel(rule.operator),
-      hint: getRuleOperatorPlainText(rule.operator),
-    },
-    {
-      label: '阈值写法',
-      value: String(rule.threshold),
-      hint: getRuleThresholdHint(rule.metric),
-    },
-    {
-      label: '时间控制',
-      value: `${formatRuleDuration(rule.windowSec)} / ${formatRuleDuration(rule.cooldownSec)}`,
-      hint: `观察 ${formatRuleDuration(rule.windowSec)}；触发后冷却 ${formatRuleDuration(rule.cooldownSec)}。`,
-    },
-  ],
-});
+const buildRuleTriggerGuide = (rule: AlertRule): RuleTriggerGuide => {
+  if (rule.metric === 'volume_pricing') {
+    return {
+      title: buildRuleConditionSummary(rule),
+      summary: getRuleMetricPlainText(rule.metric),
+      thresholdHint: getRuleThresholdHint(rule.metric),
+      items: [
+        {
+          label: '监控指标',
+          value: formatRuleMetricLabel(rule.metric),
+          hint: '带量定价看的是卖一被推高后，是否有成交量、被移除盘口量或新卖一挂单量确认。',
+        },
+        {
+          label: '判断方式',
+          value: '卖一推高幅度',
+          hint: '后台固定按“不低于最小推高幅度”判断，避免把方向和盘口侧设置得太复杂。',
+        },
+        {
+          label: '最小推高幅度',
+          value: formatRuleValue(rule, rule.threshold),
+          hint: getRuleThresholdHint(rule.metric),
+        },
+        {
+          label: '观察窗口',
+          value: formatRuleDuration(rule.windowSec),
+          hint: `后台会在 ${formatRuleDuration(rule.windowSec)} 内寻找从低卖一到高卖一的变化，并要求量能确认。`,
+        },
+      ],
+    };
+  }
+
+  if (rule.metric === 'liquidity_kill') {
+    return {
+      title: buildRuleConditionSummary(rule),
+      summary: getRuleMetricPlainText(rule.metric),
+      thresholdHint: getRuleThresholdHint(rule.metric),
+      items: [
+        {
+          label: '监控指标',
+          value: formatRuleMetricLabel(rule.metric),
+          hint: '新版盘口斩杀看的是“顶档被清空”这个事件，不是当前价格还剩多少。',
+        },
+        {
+          label: '监控盘口',
+          value: formatLiquiditySideLabel(rule.liquiditySide),
+          hint: '买盘=买一侧，卖盘=卖一侧；如果选买卖两边，只要任意一边被清空就会判断。',
+        },
+        {
+          label: '最低被清空价位',
+          value: formatRuleValue(rule, rule.threshold),
+          hint: getRuleThresholdHint(rule.metric),
+        },
+        {
+          label: '观察窗口',
+          value: formatRuleDuration(rule.windowSec),
+          hint: `后台会在 ${formatRuleDuration(rule.windowSec)} 的窗口里看是否发生顶档清空，再叠加冷却和去重控制重复提醒。`,
+        },
+      ],
+    };
+  }
+
+  return {
+    title: buildRuleConditionSummary(rule),
+    summary: getRuleMetricPlainText(rule.metric),
+    thresholdHint: getRuleThresholdHint(rule.metric),
+    items: [
+      {
+        label: '监控指标',
+        value: formatRuleMetricLabel(rule.metric),
+        hint: getRuleMetricPlainText(rule.metric),
+      },
+      {
+        label: '判断方式',
+        value: formatRuleOperatorLabel(rule.operator),
+        hint: getRuleOperatorPlainText(rule.operator),
+      },
+      {
+        label: '阈值写法',
+        value: String(rule.threshold),
+        hint: getRuleThresholdHint(rule.metric),
+      },
+      {
+        label: '时间控制',
+        value: `${formatRuleDuration(rule.windowSec)} / ${formatRuleDuration(rule.cooldownSec)}`,
+        hint: `观察 ${formatRuleDuration(rule.windowSec)}；触发后冷却 ${formatRuleDuration(rule.cooldownSec)}。`,
+      },
+    ],
+  };
+};
 
 const buildRuleScopeGuide = (rule: AlertRule, marketRows: MarketRow[]): RuleScopeGuide => {
   if (rule.metric === 'feed_stale') {
@@ -860,6 +1075,47 @@ const buildRuleListSignal = (
   }
 
   const scopedRows = getRowsForRuleScope(rule, marketRows);
+
+  if (rule.metric === 'volume_pricing') {
+    if (scopedRows.length === 0) {
+      return {
+        tone: 'warning',
+        statusText: '已启用',
+        coverageText: '0 个盘口',
+        hitText: '按事件判断',
+        hint: '当前范围没有覆盖盘口，后台就抓不到带量定价事件。',
+      };
+    }
+
+    return {
+      tone: 'muted',
+      statusText: '已启用',
+      coverageText: `${scopedRows.length} 个盘口`,
+      hitText: '事件型规则',
+      hint: `卖一在 ${formatRuleDuration(rule.windowSec)} 内被推高 ${formatRuleValue(rule, rule.threshold)} 以上，并且有量确认时提醒。`,
+    };
+  }
+
+  if (rule.metric === 'liquidity_kill') {
+    if (scopedRows.length === 0) {
+      return {
+        tone: 'warning',
+        statusText: '已启用',
+        coverageText: '0 个盘口',
+        hitText: '按事件判断',
+        hint: '当前范围没有覆盖盘口，后台就抓不到盘口斩杀事件。',
+      };
+    }
+
+    return {
+      tone: 'muted',
+      statusText: '已启用',
+      coverageText: `${scopedRows.length} 个盘口`,
+      hitText: '事件型规则',
+      hint: `监控 ${formatLiquiditySideLabel(rule.liquiditySide)} 顶档是否会在 ${formatRuleDuration(rule.windowSec)} 内被清空；当前买一卖一只用于预览覆盖范围。`,
+    };
+  }
+
   const hitRows = scopedRows.filter((row) =>
     compareRuleValue(getRuleCurrentValue(rule, row), rule.operator, rule.threshold),
   );
@@ -936,6 +1192,7 @@ export const RulesSettingsView = ({
   const [scopeFilter, setScopeFilter] = useState<ScopeFilter>('all');
   const [selectedRuleId, setSelectedRuleId] = useState<string>('');
   const [previewText, setPreviewText] = useState(RULE_PAGE_TEXT.previewEmpty);
+  const [previewResult, setPreviewResult] = useState<RulePreviewResult | null>(null);
   const [saveText, setSaveText] = useState('');
   const [previewBusy, setPreviewBusy] = useState(false);
   const [soundFeedbackText, setSoundFeedbackText] = useState('提示音待试听。');
@@ -1018,25 +1275,32 @@ export const RulesSettingsView = ({
 
   useEffect(() => {
     if (!selectedRuleId) {
-      const fallbackId = visibleRules[0]?.id ?? '';
+      const fallbackId = visibleRules[0]?.id ?? normalizedRules[0]?.id ?? '';
       if (fallbackId) {
         setSelectedRuleId(fallbackId);
       }
       return;
     }
 
-    const stillVisible = visibleRules.some((rule) => rule.id === selectedRuleId);
-    if (stillVisible) {
+    const stillExists = normalizedRules.some((rule) => rule.id === selectedRuleId);
+    if (stillExists) {
       return;
     }
 
-    const fallbackId = visibleRules[0]?.id ?? '';
+    const fallbackId = visibleRules[0]?.id ?? normalizedRules[0]?.id ?? '';
     if (fallbackId !== selectedRuleId) {
       setSelectedRuleId(fallbackId);
     }
-  }, [selectedRuleId, visibleRules]);
+  }, [normalizedRules, selectedRuleId, visibleRules]);
 
-  const selectedRule = visibleRules.find((rule) => rule.id === selectedRuleId) ?? null;
+  useEffect(() => {
+    setPreviewText(RULE_PAGE_TEXT.previewEmpty);
+    setPreviewResult(null);
+  }, [selectedRuleId]);
+
+  const selectedRule = normalizedRules.find((rule) => rule.id === selectedRuleId) ?? null;
+  const selectedRuleHiddenByFilters =
+    Boolean(selectedRule) && !visibleRules.some((rule) => rule.id === selectedRuleId);
 
   const selectedScopeFilters = selectedRule ? filtersFromRule(selectedRule) : createEmptyScopeFilters();
   const selectedQuietDraft = selectedRule ? quietHoursToDraft(selectedRule.quietHours) : null;
@@ -1433,6 +1697,7 @@ export const RulesSettingsView = ({
     if (previewText !== RULE_PAGE_TEXT.previewEmpty) {
       setPreviewText(RULE_ACTION_PANEL_TEXT.previewStaleHint);
     }
+    setPreviewResult(null);
   };
 
   const handlePreviewSound = async () => {
@@ -1681,22 +1946,12 @@ export const RulesSettingsView = ({
     }
   };
 
-  const updateRule = (
-    ruleId: string,
-    patch: Partial<AlertRule>,
-    options: { persistImmediately?: boolean } = {},
-  ) => {
+  const updateRule = (ruleId: string, patch: Partial<AlertRule>) => {
     markPreviewStale();
     const nextRules = normalizeRuleDrafts(
       normalizedRules.map((rule) => (rule.id === ruleId ? { ...rule, ...patch } : rule)),
     );
     setDraftRules(nextRules);
-
-    if (options.persistImmediately) {
-      onSaveRules(nextRules);
-      setPersistedRulesKey(JSON.stringify(nextRules));
-      setSaveText('启用状态已保存并立即生效。');
-    }
   };
 
   const updateRuleScope = (ruleId: string, nextFilters: RuleScopeFilters) => {
@@ -1758,6 +2013,7 @@ export const RulesSettingsView = ({
   const handlePreviewFirstRule = async () => {
     if (!selectedRule) {
       setPreviewText(RULE_PAGE_TEXT.noSelectedRule);
+      setPreviewResult(null);
       return;
     }
 
@@ -1765,9 +2021,11 @@ export const RulesSettingsView = ({
     try {
       const result = await onPreviewRule(selectedRule);
       setPreviewText(RULE_PAGE_TEXT.previewResult(result.matchedCityCount, result.matchedMarketCount));
+      setPreviewResult(result);
     } catch (error) {
       const message = error instanceof Error && error.message.trim() ? error.message : '预览失败';
       setPreviewText(message);
+      setPreviewResult(null);
     } finally {
       setPreviewBusy(false);
     }
@@ -1793,6 +2051,7 @@ export const RulesSettingsView = ({
     setDraftRules(normalizeRuleDrafts(rules));
     setSaveText(RULE_PAGE_TEXT.draftReset);
     setPreviewText(RULE_PAGE_TEXT.previewEmpty);
+    setPreviewResult(null);
   };
 
   return (
@@ -1877,25 +2136,6 @@ export const RulesSettingsView = ({
 
               <div className="rules-filter-segments">
                 <div className="rules-filter-segment">
-                  <span>{RULE_PAGE_TEXT.source}</span>
-                  <div className="rules-filter-chip-row">
-                    {SOURCE_FILTERS.map((option) => (
-                      <button
-                        type="button"
-                        key={option.value}
-                        className={`rules-filter-chip ${
-                          sourceFilter === option.value ? 'is-active' : ''
-                        }`}
-                        aria-pressed={sourceFilter === option.value}
-                        onClick={() => setSourceFilter(option.value)}
-                      >
-                        {option.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="rules-filter-segment">
                   <span>{RULE_PAGE_TEXT.enabledFilter}</span>
                   <div className="rules-filter-chip-row">
                     {ENABLED_FILTERS.map((option) => (
@@ -1913,17 +2153,30 @@ export const RulesSettingsView = ({
                     ))}
                   </div>
                 </div>
-
               </div>
             </section>
 
-            <section className="rules-filter-group rules-filter-group--compact">
-              <div className="rules-filter-group__head">
-                <strong>{RULE_FILTER_PANEL_TEXT.advancedTitle}</strong>
-                <span>{RULE_FILTER_PANEL_TEXT.advancedHint}</span>
-              </div>
+            <details className="rules-filter-details">
+              <summary>
+                <span>{RULE_FILTER_PANEL_TEXT.advancedTitle}</span>
+                <small>{RULE_FILTER_PANEL_TEXT.advancedHint}</small>
+              </summary>
 
               <div className="rules-filter-selects">
+                <label className="field">
+                  <span>{RULE_PAGE_TEXT.source}</span>
+                  <select
+                    value={sourceFilter}
+                    onChange={(event) => setSourceFilter(event.target.value as SourceFilter)}
+                  >
+                    {SOURCE_FILTERS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
                 <label className="field">
                   <span>{RULE_PAGE_TEXT.metricFilter}</span>
                   <select
@@ -1953,7 +2206,7 @@ export const RulesSettingsView = ({
                   </select>
                 </label>
               </div>
-            </section>
+            </details>
           </div>
 
           <div className="rules-filter-active">
@@ -1968,6 +2221,12 @@ export const RulesSettingsView = ({
               <p className="rules-filter-empty">{RULE_FILTER_PANEL_TEXT.activeEmpty}</p>
             )}
           </div>
+
+          {selectedRuleHiddenByFilters ? (
+            <div className="rules-selection-notice" role="status">
+              当前选中的规则被筛选器隐藏了，你仍然在编辑它；清空筛选后会重新出现在列表里。
+            </div>
+          ) : null}
         </section>
 
         <div className="panel-section rule-editor-layout">
@@ -2024,6 +2283,16 @@ export const RulesSettingsView = ({
                 <span className="rule-action-card__label">{RULE_ACTION_PANEL_TEXT.previewTitle}</span>
                 <strong>{previewFeedbackTitle}</strong>
                 <p>{previewFeedbackText}</p>
+                {previewResult?.sampleMarkets?.length ? (
+                  <ul className="rule-preview-samples">
+                    {previewResult.sampleMarkets.map((row) => (
+                      <li key={`${row.marketId}-${row.side}`}>
+                        <strong>{formatPreviewSampleLabel(row)}</strong>
+                        <span>{formatPreviewSampleQuote(row)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
               </article>
               <article
                 className={`rule-action-card ${hasUnsavedChanges ? 'is-warning' : 'is-success'}`}
@@ -2074,7 +2343,7 @@ export const RulesSettingsView = ({
                         onChange={(event) =>
                           updateRule(selectedRule.id, {
                             enabled: event.target.checked,
-                          }, { persistImmediately: true })
+                          })
                         }
                       />
                       <span>{RULE_PAGE_TEXT.ruleEnabled}</span>
@@ -2140,26 +2409,57 @@ export const RulesSettingsView = ({
                       <small className="rule-field-hint">选择这条规则要盯住的盘口变化。</small>
                     </label>
 
-                    <label className="field">
-                      <span>判断方式</span>
-                      <select
-                        value={selectedRule.operator}
-                        onChange={(event) =>
-                          updateRule(selectedRule.id, {
-                            operator: event.target.value as AlertRule['operator'],
-                          })
-                        }
-                      >
-                        {OPERATOR_OPTIONS.map((operator) => (
-                          <option key={operator} value={operator}>
-                            {formatRuleOperatorLabel(operator)}
-                          </option>
-                        ))}
-                      </select>
-                      <small className="rule-field-hint">
-                        {selectedTriggerGuide?.items[1]?.hint ?? '设置实际值和阈值的比较方式。'}
-                      </small>
-                    </label>
+                    {selectedRule.metric === 'liquidity_kill' ? (
+                      <label className="field">
+                        <span>监控盘口</span>
+                        <select
+                          value={selectedRule.liquiditySide ?? 'both'}
+                          onChange={(event) =>
+                            updateRule(selectedRule.id, {
+                              liquiditySide: event.target.value as NonNullable<AlertRule['liquiditySide']>,
+                            })
+                          }
+                        >
+                          {LIQUIDITY_SIDE_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                        <small className="rule-field-hint">
+                          买盘指买一侧，卖盘指卖一侧；不是 YES/NO 方向。
+                        </small>
+                      </label>
+                    ) : selectedRule.metric === 'volume_pricing' ? (
+                      <label className="field">
+                        <span>判断方式</span>
+                        <input value="卖一推高幅度" disabled />
+                        <small className="rule-field-hint">
+                          后台固定按“卖一被推高至少多少美分，并且有量确认”判断，不需要再选大于/小于。
+                        </small>
+                      </label>
+                    ) : (
+                      <label className="field">
+                        <span>判断方式</span>
+                        <select
+                          value={selectedRule.operator}
+                          onChange={(event) =>
+                            updateRule(selectedRule.id, {
+                              operator: event.target.value as AlertRule['operator'],
+                            })
+                          }
+                        >
+                          {OPERATOR_OPTIONS.map((operator) => (
+                            <option key={operator} value={operator}>
+                              {formatRuleOperatorLabel(operator)}
+                            </option>
+                          ))}
+                        </select>
+                        <small className="rule-field-hint">
+                          {selectedTriggerGuide?.items[1]?.hint ?? '设置实际值和阈值的比较方式。'}
+                        </small>
+                      </label>
+                    )}
 
                     <label className="field">
                       <span>{RULE_PAGE_TEXT.threshold}</span>
@@ -2192,59 +2492,74 @@ export const RulesSettingsView = ({
                         用来判断短时间变化，当前为 {formatRuleDuration(selectedRule.windowSec)}。
                       </small>
                     </label>
-
-                    <label className="field">
-                      <span>{RULE_PAGE_TEXT.cooldownSec}</span>
-                      <input
-                        type="number"
-                        min={0}
-                        value={selectedRule.cooldownSec}
-                        onChange={(event) =>
-                          updateRule(selectedRule.id, {
-                            cooldownSec: parseNumberInput(event.target.value, selectedRule.cooldownSec),
-                          })
-                        }
-                      />
-                      <small className="rule-field-hint">
-                        命中后暂停重复提醒，当前为 {formatRuleDuration(selectedRule.cooldownSec)}。
-                      </small>
-                    </label>
-
-                    <label className="field">
-                      <span>{RULE_PAGE_TEXT.dedupeWindowSec}</span>
-                      <input
-                        type="number"
-                        min={0}
-                        value={selectedRule.dedupeWindowSec}
-                        onChange={(event) =>
-                          updateRule(selectedRule.id, {
-                            dedupeWindowSec: parseNumberInput(
-                              event.target.value,
-                              selectedRule.dedupeWindowSec,
-                            ),
-                          })
-                        }
-                      />
-                      <small className="rule-field-hint">
-                        相同告警在 {formatRuleDuration(selectedRule.dedupeWindowSec)} 内合并。
-                      </small>
-                    </label>
-
-                    <label className="field">
-                      <span>{RULE_PAGE_TEXT.bubbleWeight}</span>
-                      <input
-                        type="number"
-                        min={0}
-                        value={selectedRule.bubbleWeight}
-                        onChange={(event) =>
-                          updateRule(selectedRule.id, {
-                            bubbleWeight: parseNumberInput(event.target.value, selectedRule.bubbleWeight),
-                          })
-                        }
-                      />
-                      <small className="rule-field-hint">只影响总览泡泡风险权重，不影响是否触发。</small>
-                    </label>
                   </div>
+
+                  <details className="rule-editor-advanced">
+                    <summary>高级触发设置</summary>
+                    <div className="rule-editor-section__grid">
+                      {selectedRule.metric !== 'liquidity_kill' ? null : (
+                        <label className="field">
+                          <span>判断方式</span>
+                          <input value="不低于最低被清空价位" disabled />
+                          <small className="rule-field-hint">
+                            新版盘口斩杀固定按“被清空前的价位是否达到最低门槛”判断。
+                          </small>
+                        </label>
+                      )}
+
+                      <label className="field">
+                        <span>{RULE_PAGE_TEXT.cooldownSec}</span>
+                        <input
+                          type="number"
+                          min={0}
+                          value={selectedRule.cooldownSec}
+                          onChange={(event) =>
+                            updateRule(selectedRule.id, {
+                              cooldownSec: parseNumberInput(event.target.value, selectedRule.cooldownSec),
+                            })
+                          }
+                        />
+                        <small className="rule-field-hint">
+                          命中后暂停重复提醒，当前为 {formatRuleDuration(selectedRule.cooldownSec)}。
+                        </small>
+                      </label>
+
+                      <label className="field">
+                        <span>{RULE_PAGE_TEXT.dedupeWindowSec}</span>
+                        <input
+                          type="number"
+                          min={0}
+                          value={selectedRule.dedupeWindowSec}
+                          onChange={(event) =>
+                            updateRule(selectedRule.id, {
+                              dedupeWindowSec: parseNumberInput(
+                                event.target.value,
+                                selectedRule.dedupeWindowSec,
+                              ),
+                            })
+                          }
+                        />
+                        <small className="rule-field-hint">
+                          相同告警在 {formatRuleDuration(selectedRule.dedupeWindowSec)} 内合并。
+                        </small>
+                      </label>
+
+                      <label className="field">
+                        <span>{RULE_PAGE_TEXT.bubbleWeight}</span>
+                        <input
+                          type="number"
+                          min={0}
+                          value={selectedRule.bubbleWeight}
+                          onChange={(event) =>
+                            updateRule(selectedRule.id, {
+                              bubbleWeight: parseNumberInput(event.target.value, selectedRule.bubbleWeight),
+                            })
+                          }
+                        />
+                        <small className="rule-field-hint">只影响总览泡泡风险权重，不影响是否触发。</small>
+                      </label>
+                    </div>
+                  </details>
                 </section>
 
                 <section className="rule-editor-section">
@@ -2386,55 +2701,58 @@ export const RulesSettingsView = ({
                     <span>{RULE_EDITOR_SECTION_TEXT.quiet.hint}</span>
                   </div>
 
-                  <div className="rule-editor-section__grid">
-                    <label className="field field--checkbox">
-                      <input
-                        type="checkbox"
-                        checked={Boolean(selectedRule.quietHours)}
-                        onChange={(event) =>
-                          updateRuleQuietHours(
-                            selectedRule.id,
-                            event.target.checked
-                              ? quietHoursDraftToValue({ start: '23:00', end: '06:00' })
-                              : undefined,
-                          )
-                        }
-                      />
-                      <span>{RULE_PAGE_TEXT.quietCustom}</span>
-                    </label>
+                  <details className="rule-editor-advanced">
+                    <summary>高级通知设置</summary>
+                    <div className="rule-editor-section__grid">
+                      <label className="field field--checkbox">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(selectedRule.quietHours)}
+                          onChange={(event) =>
+                            updateRuleQuietHours(
+                              selectedRule.id,
+                              event.target.checked
+                                ? quietHoursDraftToValue({ start: '23:00', end: '06:00' })
+                                : undefined,
+                            )
+                          }
+                        />
+                        <span>{RULE_PAGE_TEXT.quietCustom}</span>
+                      </label>
 
-                    <label className="field">
-                      <span>{RULE_PAGE_TEXT.quietStart}</span>
-                      <input
-                        type="time"
-                        value={selectedQuietDraft?.start ?? ''}
-                        disabled={!selectedRule.quietHours || !selectedQuietDraft}
-                        onChange={(event) =>
-                          selectedQuietDraft
-                            ? updateQuietDraft(selectedRule.id, selectedQuietDraft, {
-                                start: event.target.value,
-                              })
-                            : undefined
-                        }
-                      />
-                    </label>
+                      <label className="field">
+                        <span>{RULE_PAGE_TEXT.quietStart}</span>
+                        <input
+                          type="time"
+                          value={selectedQuietDraft?.start ?? ''}
+                          disabled={!selectedRule.quietHours || !selectedQuietDraft}
+                          onChange={(event) =>
+                            selectedQuietDraft
+                              ? updateQuietDraft(selectedRule.id, selectedQuietDraft, {
+                                  start: event.target.value,
+                                })
+                              : undefined
+                          }
+                        />
+                      </label>
 
-                    <label className="field">
-                      <span>{RULE_PAGE_TEXT.quietEnd}</span>
-                      <input
-                        type="time"
-                        value={selectedQuietDraft?.end ?? ''}
-                        disabled={!selectedRule.quietHours || !selectedQuietDraft}
-                        onChange={(event) =>
-                          selectedQuietDraft
-                            ? updateQuietDraft(selectedRule.id, selectedQuietDraft, {
-                                end: event.target.value,
-                              })
-                            : undefined
-                        }
-                      />
-                    </label>
-                  </div>
+                      <label className="field">
+                        <span>{RULE_PAGE_TEXT.quietEnd}</span>
+                        <input
+                          type="time"
+                          value={selectedQuietDraft?.end ?? ''}
+                          disabled={!selectedRule.quietHours || !selectedQuietDraft}
+                          onChange={(event) =>
+                            selectedQuietDraft
+                              ? updateQuietDraft(selectedRule.id, selectedQuietDraft, {
+                                  end: event.target.value,
+                                })
+                              : undefined
+                          }
+                        />
+                      </label>
+                    </div>
+                  </details>
                 </section>
               </div>
             </section>
@@ -2527,7 +2845,7 @@ export const RulesSettingsView = ({
                               onChange={(event) =>
                                 updateRule(rule.id, {
                                   enabled: event.target.checked,
-                                }, { persistImmediately: true })
+                                })
                               }
                             />
                             <span>{rule.enabled ? RULE_PAGE_TEXT.enabled : RULE_PAGE_TEXT.disabled}</span>

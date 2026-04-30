@@ -63,4 +63,56 @@ describe('PolymarketDataService', () => {
 
     expect(updates).toHaveLength(0);
   });
+
+  it('treats price_change as orderbook movement instead of a trade fill', () => {
+    const service = new PolymarketDataService();
+    const updates: TokenRuntimeState[] = [];
+    service.on('token_state', (payload) => {
+      updates.push(payload);
+    });
+
+    (
+      service as unknown as {
+        applyWsEvent(event: MarketWsMessage): void;
+      }
+    ).applyWsEvent({
+      event_type: 'book',
+      asset_id: 'token-price-change',
+      bids: [
+        { price: '0.39', size: '12' },
+        { price: '0.42', size: '3' },
+      ],
+      asks: [
+        { price: '0.45', size: '2' },
+        { price: '0.47', size: '8' },
+      ],
+    });
+
+    (
+      service as unknown as {
+        applyWsEvent(event: MarketWsMessage): void;
+      }
+    ).applyWsEvent({
+      event_type: 'price_change',
+      asset_id: 'token-price-change',
+      best_bid: '0.39',
+      best_ask: '0.45',
+      price_changes: [{ side: 'BUY', price: '0.42', size: '0' }],
+    });
+
+    expect(updates).toHaveLength(2);
+    expect(updates[1]).toMatchObject({
+      tokenId: 'token-price-change',
+      lastEventType: 'price_change',
+      bestBid: 0.39,
+      bestAsk: 0.45,
+      removedBidEdge: {
+        previousPrice: 0.42,
+        currentPrice: 0.39,
+        source: 'price_change',
+      },
+    });
+    expect(updates[1]?.lastTradeAt).toBeUndefined();
+    expect(updates[1]?.lastTradePrice).toBeUndefined();
+  });
 });

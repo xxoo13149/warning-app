@@ -5,6 +5,7 @@ import type {
   RuntimeDiagnosticsLogFile,
   RuntimeDiagnosticsPackage,
   RuntimeDiagnosticsPackageResult,
+  RuntimeMemoryTelemetry,
 } from '../../shared/monitor-contracts';
 import type { RuntimePaths } from './runtime-paths';
 import { inspectRuntimeStorageSummary } from './runtime-storage';
@@ -14,6 +15,7 @@ export interface RuntimeDiagnosticsOptions {
   now?: () => Date;
   logFileLimit?: number;
   logTailBytes?: number;
+  memoryTelemetry?: RuntimeMemoryTelemetry;
 }
 
 const DEFAULT_LOG_FILE_LIMIT = 5;
@@ -42,6 +44,7 @@ export const createRuntimeDiagnosticsPackage = (
       nodeVersion: process.versions.node,
       electronVersion: process.versions.electron ?? null,
     },
+    memoryTelemetry: options.memoryTelemetry,
     logs: collectRuntimeLogs(runtimePaths.logsDir, logFileLimit, logTailBytes),
     privacy: {
       format: 'json',

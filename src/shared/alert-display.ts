@@ -4,13 +4,15 @@ export type BuiltinRuleKey =
   | 'price_change_5m'
   | 'spread_threshold'
   | 'feed_stale'
-  | 'liquidity_kill';
+  | 'liquidity_kill'
+  | 'volume_pricing';
 
 export type AlertMessageKey =
   | 'price_threshold'
   | 'spread_threshold'
   | 'price_change_pct'
   | 'liquidity_kill'
+  | 'volume_pricing'
   | 'feed_stale'
   | 'system_error';
 
@@ -19,6 +21,7 @@ export type AlertMetricKey =
   | 'change5m'
   | 'spread'
   | 'liquidity_kill'
+  | 'volume_pricing'
   | 'bidask_gap'
   | 'new_market'
   | 'resolved'
@@ -33,8 +36,14 @@ export interface AlertMarketSnapshot {
   eventDate?: string | null;
   temperatureBand?: string | null;
   yesPrice?: number | null;
+  lastTradePrice?: number | null;
+  lastTradeSize?: number | null;
   bestBid?: number | null;
+  bestBidSize?: number | null;
   bestAsk?: number | null;
+  bestAskSize?: number | null;
+  bidVisibleSize?: number | null;
+  askVisibleSize?: number | null;
   spread?: number | null;
   change5m?: number | null;
 }
@@ -46,10 +55,14 @@ export interface AlertMessageParams {
   previous?: number | null;
   windowSec?: number | null;
   lagSec?: number | null;
+  outcome?: 'yes' | 'no' | null;
   feedKey?: string | null;
   side?: 'buy' | 'sell' | null;
   source?: string | null;
   reason?: string | null;
+  effectiveSize?: number | null;
+  effectiveNotional?: number | null;
+  referencePrice?: number | null;
 }
 
 export interface AlertMessageEnvelope {
@@ -94,12 +107,20 @@ export const metricMeta: Record<AlertMetricKey, LocalizedMeta> = {
     descriptionEn: 'Triggers when the bid/ask spread becomes too wide.',
   },
   liquidity_kill: {
-    zh: '流动性消失',
-    en: 'Liquidity Kill',
+    zh: '盘口斩杀',
+    en: 'Orderbook Wipeout',
     zhAlias: 'liquidity_kill',
     enAlias: 'liquidity_kill',
-    descriptionZh: '当买盘或卖盘在短时间内快速归零时触发。',
-    descriptionEn: 'Triggers when bid or ask liquidity rapidly collapses to zero.',
+    descriptionZh: '当买盘或卖盘的顶档在短时间内被清空时触发。',
+    descriptionEn: 'Triggers when the bid or ask edge of the book is rapidly wiped out.',
+  },
+  volume_pricing: {
+    zh: '带量定价',
+    en: 'Volume-backed Pricing',
+    zhAlias: 'volume_pricing',
+    enAlias: 'volume_pricing',
+    descriptionZh: '当卖一价格在短时间内被明显推高，并且有成交或盘口量确认时触发。',
+    descriptionEn: 'Triggers when the best ask is lifted quickly with trade or depth confirmation.',
   },
   bidask_gap: {
     zh: '买卖盘缺口',
@@ -170,12 +191,20 @@ export const builtinRuleMeta: Record<BuiltinRuleKey, LocalizedMeta> = {
     descriptionEn: 'Monitors whether discovery or websocket data has gone stale.',
   },
   liquidity_kill: {
-    zh: '流动性消失',
-    en: 'Liquidity Kill',
+    zh: '盘口斩杀',
+    en: 'Orderbook Wipeout',
     zhAlias: 'liquidity_kill',
     enAlias: 'liquidity_kill',
-    descriptionZh: '监控买盘或卖盘快速归零的异常情况。',
-    descriptionEn: 'Monitors abrupt bid or ask liquidity collapse.',
+    descriptionZh: '监控买盘或卖盘顶档被快速清空的异常情况。',
+    descriptionEn: 'Monitors abrupt wipeouts at the bid or ask edge.',
+  },
+  volume_pricing: {
+    zh: '带量定价',
+    en: 'Volume-backed Pricing',
+    zhAlias: 'volume_pricing',
+    enAlias: 'volume_pricing',
+    descriptionZh: '监控卖一被快速推高且有成交或盘口量支撑的重新定价。',
+    descriptionEn: 'Monitors fast ask repricing backed by trade or order book size.',
   },
 };
 
@@ -287,6 +316,80 @@ const formatLiquiditySide = (
   return 'liquidity';
 };
 
+const formatOutcomeSide = (
+  outcome: 'yes' | 'no' | null | undefined,
+  locale: DisplayLocale,
+) => {
+  if (!outcome) {
+    return '';
+  }
+  if (locale === 'zh-CN') {
+    return outcome === 'yes' ? 'YES ' : 'NO ';
+  }
+  return outcome === 'yes' ? 'YES ' : 'NO ';
+};
+
+const formatSize = (value: number | null | undefined, locale: DisplayLocale) => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return locale === 'zh-CN' ? '暂无' : 'N/A';
+  }
+  const rounded = value >= 100 ? Math.round(value) : Number(value.toFixed(2));
+  return locale === 'zh-CN' ? `${rounded} 张` : `${rounded} shares`;
+};
+
+const formatUsd = (value: number | null | undefined, locale: DisplayLocale) => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return locale === 'zh-CN' ? '暂无' : 'N/A';
+  }
+  return `$${value >= 100 ? Math.round(value) : value.toFixed(2)}`;
+};
+
+const formatLiquiditySource = (
+  source: string | null | undefined,
+  locale: DisplayLocale,
+) => {
+  switch (source) {
+    case 'trade_sweep':
+      return locale === 'zh-CN' ? '疑似成交扫空' : 'likely trade sweep';
+    case 'cancel_pull':
+      return locale === 'zh-CN' ? '疑似撤单抽走' : 'likely cancel pull';
+    case 'fallback':
+      return locale === 'zh-CN' ? '来源待确认' : 'source unconfirmed';
+    default:
+      return locale === 'zh-CN' ? '原因待确认' : 'cause unconfirmed';
+  }
+};
+
+const formatVolumePricingSource = (
+  source: string | null | undefined,
+  locale: DisplayLocale,
+) => {
+  switch (source) {
+    case 'trade_confirmed':
+      return locale === 'zh-CN' ? '成交量确认' : 'trade confirmed';
+    case 'edge_volume':
+      return locale === 'zh-CN' ? '低价卖单被移除' : 'removed ask size';
+    case 'book_depth':
+      return locale === 'zh-CN' ? '新卖一挂单量确认' : 'book depth confirmed';
+    default:
+      return locale === 'zh-CN' ? '量能确认' : 'volume confirmed';
+  }
+};
+
+const formatLiquidityReason = (
+  reason: string | null | undefined,
+  locale: DisplayLocale,
+) => {
+  switch (reason) {
+    case 'full_empty':
+      return locale === 'zh-CN' ? '该侧盘口已全空' : 'that side of the book is now empty';
+    case 'top_level':
+      return locale === 'zh-CN' ? '买一/卖一已被清空' : 'the top level was cleared';
+    default:
+      return '';
+  }
+};
+
 const formatMessageBody = (
   locale: DisplayLocale,
   key: AlertMessageKey,
@@ -333,6 +436,23 @@ const formatMessageBody = (
             params.previous,
             locale,
           )} to ${formatCents(params.actual, locale)}`;
+    case 'volume_pricing': {
+      const sourceText = formatVolumePricingSource(params.source, locale);
+      const sizeText = formatSize(params.effectiveSize, locale);
+      const notionalText = formatUsd(params.effectiveNotional, locale);
+      return locale === 'zh-CN'
+        ? `${marketLabel}${formatOutcomeSide(params.outcome, locale)}带量定价：卖一从 ${formatCents(
+            params.previous,
+            locale,
+          )} 推高到 ${formatCents(params.actual, locale)}，${sourceText}，有效量 ${sizeText} / ${notionalText}`
+        : `${marketLabel} ${formatOutcomeSide(
+            params.outcome,
+            locale,
+          )}volume-backed ask repriced from ${formatCents(
+            params.previous,
+            locale,
+          )} to ${formatCents(params.actual, locale)} (${sourceText}, ${sizeText} / ${notionalText})`;
+    }
     case 'feed_stale':
       return locale === 'zh-CN'
         ? `数据流 ${params.feedKey ?? ''} 已停滞 ${params.lagSec ?? 0} 秒`
@@ -345,9 +465,39 @@ const formatMessageBody = (
   }
 };
 
+const formatMessageBodyV2 = (
+  locale: DisplayLocale,
+  key: AlertMessageKey,
+  params: AlertMessageParams,
+  snapshot?: AlertMarketSnapshot | null,
+) => {
+  if (key !== 'liquidity_kill') {
+    return formatMessageBody(locale, key, params, snapshot);
+  }
+
+  const marketLabel = formatMarketLabel(locale, snapshot);
+  const notes = [formatLiquiditySource(params.source, locale), formatLiquidityReason(params.reason, locale)]
+    .filter(Boolean)
+    .join(locale === 'zh-CN' ? '，' : ', ');
+  const suffix =
+    notes.length > 0 ? (locale === 'zh-CN' ? `（${notes}）` : ` (${notes})`) : '';
+  const prefix = `${marketLabel}${locale === 'zh-CN' ? '' : ' '}${formatOutcomeSide(
+    params.outcome,
+    locale,
+  )}${formatLiquiditySide(params.side, locale)}`;
+  const fromValue = formatCents(params.previous, locale);
+  const toValue = formatCents(params.actual, locale);
+
+  if (locale === 'zh-CN') {
+    return `${prefix}盘口斩杀：从 ${fromValue} 降到 ${toValue}${suffix}`;
+  }
+
+  return `${prefix} orderbook wipeout from ${fromValue} to ${toValue}${suffix}`;
+};
+
 export const formatAlertMessage = (locale: DisplayLocale, alert: AlertMessageEnvelope) => {
   if (alert.messageKey) {
-    return formatMessageBody(
+    return formatMessageBodyV2(
       locale,
       alert.messageKey,
       alert.messageParams ?? {},

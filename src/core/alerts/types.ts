@@ -5,8 +5,15 @@ import type {
   AlertMarketSnapshot,
   BuiltinRuleKey,
 } from '../../shared/alert-display';
+import type { OrderbookLiquiditySide } from '../../shared/monitor-contracts';
 
-export type AlertMetric = 'price_threshold' | 'price_change_pct' | 'spread_threshold' | 'feed_stale' | 'liquidity_kill';
+export type AlertMetric =
+  | 'price_threshold'
+  | 'price_change_pct'
+  | 'spread_threshold'
+  | 'feed_stale'
+  | 'liquidity_kill'
+  | 'volume_pricing';
 
 export type AlertOperator =
   | '>'
@@ -49,6 +56,7 @@ export interface AlertRule {
   bubbleWeight?: number;
   severity: AlertSeverity;
   soundProfileId?: string;
+  liquiditySide?: OrderbookLiquiditySide;
   scope?: AlertScope;
   quietHours?: QuietHours;
 }

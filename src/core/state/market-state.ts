@@ -8,8 +8,35 @@ export interface MarketTickSnapshot {
   side?: 'yes' | 'no';
   timestamp: number;
   lastTradePrice?: number;
+  lastTradeSide?: 'buy' | 'sell';
+  lastTradeSize?: number;
+  lastTradeAt?: number;
   bestBid?: number;
+  bestBidSize?: number;
   bestAsk?: number;
+  bestAskSize?: number;
+  bidLevelCount?: number;
+  askLevelCount?: number;
+  bidVisibleSize?: number;
+  askVisibleSize?: number;
+  removedBidEdge?: {
+    previousPrice: number;
+    previousSize: number | null;
+    currentPrice: number | null;
+    currentSize: number | null;
+    levelCountAfter: number;
+    visibleSizeAfter: number;
+    source: 'price_change' | 'book' | 'fallback';
+  };
+  removedAskEdge?: {
+    previousPrice: number;
+    previousSize: number | null;
+    currentPrice: number | null;
+    currentSize: number | null;
+    levelCountAfter: number;
+    visibleSizeAfter: number;
+    source: 'price_change' | 'book' | 'fallback';
+  };
   spread?: number;
   lastMessageAt?: number;
 }
@@ -27,18 +54,36 @@ export interface FeedSnapshot {
 export class MarketStateStore {
   private readonly latestByToken = new Map<string, MarketTickSnapshot>();
   private readonly historyByToken = new Map<string, MarketTickSnapshot[]>();
-  private readonly maxHistoryMs: number;
+  private historyWindowMs: number;
 
-  constructor(maxHistoryMs = 24 * 60 * 60 * 1000) {
-    this.maxHistoryMs = maxHistoryMs;
+  constructor(historyWindowMs = 24 * 60 * 60 * 1000) {
+    this.historyWindowMs = normalizeHistoryWindowMs(historyWindowMs);
+  }
+
+  setHistoryWindow(historyWindowMs: number): void {
+    const nextWindowMs = normalizeHistoryWindowMs(historyWindowMs);
+    if (nextWindowMs === this.historyWindowMs) {
+      return;
+    }
+
+    this.historyWindowMs = nextWindowMs;
+    for (const tokenId of this.historyByToken.keys()) {
+      this.pruneTokenHistory(tokenId);
+    }
   }
 
   recordTick(snapshot: MarketTickSnapshot): void {
     this.latestByToken.set(snapshot.tokenId, snapshot);
+
+    if (this.historyWindowMs <= 0) {
+      this.historyByToken.set(snapshot.tokenId, [snapshot]);
+      return;
+    }
+
     const history = this.historyByToken.get(snapshot.tokenId) ?? [];
     history.push(snapshot);
     this.historyByToken.set(snapshot.tokenId, history);
-    this.pruneTokenHistory(snapshot.tokenId, snapshot.timestamp - this.maxHistoryMs);
+    this.pruneTokenHistory(snapshot.tokenId, snapshot.timestamp - this.historyWindowMs);
   }
 
   getLatest(tokenId: string): MarketTickSnapshot | undefined {
@@ -62,22 +107,45 @@ export class MarketStateStore {
     this.historyByToken.clear();
   }
 
-  private pruneTokenHistory(tokenId: string, cutoffMs: number): void {
+  private pruneTokenHistory(tokenId: string, cutoffMs?: number): void {
     const history = this.historyByToken.get(tokenId);
     if (!history || history.length === 0) {
       return;
     }
 
+    const latest = this.latestByToken.get(tokenId);
+    if (!latest) {
+      this.historyByToken.delete(tokenId);
+      return;
+    }
+
+    if (this.historyWindowMs <= 0) {
+      this.historyByToken.set(tokenId, [latest]);
+      return;
+    }
+
+    const effectiveCutoffMs = cutoffMs ?? latest.timestamp - this.historyWindowMs;
     let firstKeepIndex = 0;
-    while (firstKeepIndex < history.length && history[firstKeepIndex].timestamp < cutoffMs) {
+    while (
+      firstKeepIndex < history.length &&
+      history[firstKeepIndex].timestamp < effectiveCutoffMs
+    ) {
       firstKeepIndex += 1;
     }
 
     if (firstKeepIndex > 0) {
-      this.historyByToken.set(tokenId, history.slice(firstKeepIndex));
+      const nextHistory = history.slice(firstKeepIndex);
+      if (nextHistory.length === 0) {
+        this.historyByToken.set(tokenId, [latest]);
+        return;
+      }
+      this.historyByToken.set(tokenId, nextHistory);
     }
   }
 }
+
+const normalizeHistoryWindowMs = (value: number): number =>
+  Number.isFinite(value) && value > 0 ? Math.max(0, Math.trunc(value)) : 0;
 
 export class FeedStateStore {
   private readonly feeds = new Map<string, FeedSnapshot>();

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { AlertRule } from '../../src/renderer/types/contracts';
 import {
+  buildRuleConditionSummary,
   filterRuleDrafts,
   groupRuleDrafts,
   normalizeRuleDraft,
@@ -58,5 +59,36 @@ describe('rules settings severity unification', () => {
     const filtered = filterRuleDrafts(rules, { severity: 'critical' });
 
     expect(filtered).toHaveLength(2);
+  });
+
+  it('normalizes liquidity rules to the new wipeout defaults', () => {
+    const normalized = normalizeRuleDraft(
+      createRule({
+        id: 'rule-liquidity',
+        metric: 'liquidity_kill',
+        operator: '<=',
+      }),
+    );
+
+    expect(normalized.operator).toBe('>=');
+    expect(normalized.liquiditySide).toBe('both');
+  });
+
+  it('normalizes volume pricing as a simple event rule', () => {
+    const normalized = normalizeRuleDraft(
+      createRule({
+        id: 'rule-volume-pricing',
+        builtinKey: 'volume_pricing',
+        metric: 'volume_pricing',
+        operator: '<',
+        threshold: 0.1,
+        windowSec: 60,
+      }),
+    );
+
+    expect(normalized.operator).toBe('>=');
+    expect(normalized.liquiditySide).toBeUndefined();
+    expect(buildRuleConditionSummary(normalized)).toContain('带量');
+    expect(buildRuleConditionSummary(normalized)).toContain('10');
   });
 });

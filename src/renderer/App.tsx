@@ -83,7 +83,7 @@ export const App = () => {
       eventDate: eventDate || undefined,
       cityKey: cityKey || undefined,
       limit: 2000,
-      sortBy: 'change5m',
+      sortBy: 'updatedAt',
       sortDir: 'desc',
     });
   }, [monitor.setMarketQuery]);

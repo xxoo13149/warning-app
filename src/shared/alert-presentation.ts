@@ -111,8 +111,10 @@ const RULE_LABELS: Record<string, string> = {
   'spread-threshold': '价差过宽',
   feed_stale: '数据流停滞',
   'feed-stale': '数据流停滞',
-  liquidity_kill: '流动性骤降',
-  'liquidity-kill': '流动性骤降',
+  liquidity_kill: '盘口斩杀',
+  'liquidity-kill': '盘口斩杀',
+  volume_pricing: '带量定价',
+  'volume-pricing': '带量定价',
   system_error: '系统异常',
   'worker-error': '系统异常',
 };
@@ -221,6 +223,9 @@ const getAlertKey = (alert: AlertPresentationSource) => {
   const ruleKey = normalizeKey(alert.ruleId);
   if (ruleKey.includes('liquidity')) {
     return 'liquidity_kill';
+  }
+  if (ruleKey.includes('volume_pricing') || ruleKey.includes('volumepricing')) {
+    return 'volume_pricing';
   }
   if (ruleKey.includes('spread')) {
     return 'spread_threshold';
@@ -384,6 +389,77 @@ const getLiquiditySide = (alert: AlertPresentationSource) => {
   return '盘口';
 };
 
+const getLiquidityOutcome = (alert: AlertPresentationSource) => {
+  const outcome = alert.messageParams?.outcome;
+  if (outcome === 'yes') {
+    return 'YES';
+  }
+  if (outcome === 'no') {
+    return 'NO';
+  }
+  return '';
+};
+
+const getLiquidityCauseText = (alert: AlertPresentationSource) => {
+  const notes: string[] = [];
+  switch (alert.messageParams?.source) {
+    case 'trade_sweep':
+      notes.push('疑似成交扫空');
+      break;
+    case 'cancel_pull':
+      notes.push('疑似撤单抽走');
+      break;
+    case 'fallback':
+      notes.push('来源待确认');
+      break;
+    default:
+      break;
+  }
+
+  switch (alert.messageParams?.reason) {
+    case 'full_empty':
+      notes.push('该侧盘口已空');
+      break;
+    case 'top_level':
+      notes.push('顶档已被清空');
+      break;
+    default:
+      break;
+  }
+
+  return notes.join('，');
+};
+
+const getVolumePricingCauseText = (alert: AlertPresentationSource) => {
+  switch (alert.messageParams?.source) {
+    case 'trade_confirmed':
+      return '成交量确认';
+    case 'edge_volume':
+      return '低价卖单被移除';
+    case 'book_depth':
+      return '新卖一挂单量确认';
+    default:
+      return '量能确认';
+  }
+};
+
+const getEffectiveVolumeText = (alert: AlertPresentationSource) => {
+  const size = alert.messageParams?.effectiveSize;
+  const notional = alert.messageParams?.effectiveNotional;
+  if (!hasValue(size) && !hasValue(notional)) {
+    return null;
+  }
+
+  const parts: string[] = [];
+  if (hasValue(size)) {
+    parts.push(`${size >= 100 ? Math.round(size) : Number(size.toFixed(2))} 张`);
+  }
+  if (hasValue(notional)) {
+    parts.push(`$${notional >= 100 ? Math.round(notional) : notional.toFixed(2)}`);
+  }
+  return parts.join(' / ');
+};
+
 const buildLocationLine = (alert: AlertPresentationSource) => {
   const cityLabel = getAlertCityLabel(alert);
   if (cityLabel === '系统') {
@@ -407,10 +483,31 @@ const buildReasonText = (alert: AlertPresentationSource) => {
       }
       return '盘口价差明显扩大';
     case 'liquidity_kill':
-      if (hasValue(previous) && hasValue(actual)) {
-        return `${getLiquiditySide(alert)}从 ${formatCents(previous)}降到 ${formatCents(actual)}`;
+      {
+        const outcome = getLiquidityOutcome(alert);
+        const sideLabel = getLiquiditySide(alert);
+        const target = outcome ? `${outcome} ${sideLabel}` : sideLabel;
+        const cause = getLiquidityCauseText(alert);
+        if (hasValue(previous) && hasValue(actual)) {
+          return cause
+            ? `${target}从 ${formatCents(previous)}降到 ${formatCents(actual)}（${cause}）`
+            : `${target}从 ${formatCents(previous)}降到 ${formatCents(actual)}`;
+        }
+        return cause ? `${target}出现盘口斩杀（${cause}）` : `${target}出现盘口斩杀`;
       }
-      return `${getLiquiditySide(alert)}突然变弱`;
+    case 'volume_pricing':
+      {
+        const outcome = getLiquidityOutcome(alert);
+        const prefix = outcome ? `${outcome} ` : '';
+        const cause = getVolumePricingCauseText(alert);
+        const volume = getEffectiveVolumeText(alert);
+        if (hasValue(previous) && hasValue(actual)) {
+          return volume
+            ? `${prefix}卖一从 ${formatCents(previous)} 推高到 ${formatCents(actual)}，${cause} ${volume}`
+            : `${prefix}卖一从 ${formatCents(previous)} 推高到 ${formatCents(actual)}，${cause}`;
+        }
+        return `${prefix}卖一被带量推高，${cause}`;
+      }
     case 'price_change_pct':
     case 'price_change_5m':
       if (hasValue(actual)) {
@@ -472,8 +569,16 @@ const buildFacts = (alert: AlertPresentationSource) => {
   } else if (key === 'spread_threshold') {
     pushFact(facts, '触发价差', formatCents(actual), 'strong');
   } else if (key === 'liquidity_kill') {
-    pushFact(facts, '当前流动性', formatCents(actual), 'strong');
-    pushFact(facts, '之前流动性', formatCents(previous));
+    pushFact(facts, '监控盘口', `${getLiquidityOutcome(alert) ? `${getLiquidityOutcome(alert)} ` : ''}${getLiquiditySide(alert)}`);
+    pushFact(facts, '当前边缘价', formatCents(actual), 'strong');
+    pushFact(facts, '被清空前', formatCents(previous));
+    pushFact(facts, '事件归因', getLiquidityCauseText(alert));
+  } else if (key === 'volume_pricing') {
+    pushFact(facts, '监控合约', `${getLiquidityOutcome(alert) || 'YES/NO'} 卖一`);
+    pushFact(facts, '带量价', formatCents(actual), 'strong');
+    pushFact(facts, '参考价', formatCents(previous));
+    pushFact(facts, '有效量', getEffectiveVolumeText(alert));
+    pushFact(facts, '确认方式', getVolumePricingCauseText(alert));
   } else {
     pushFact(facts, '触发值', formatCents(actual), 'strong');
   }
@@ -544,13 +649,36 @@ const buildNotificationValueParts = (alert: AlertPresentationSource) => {
 
   switch (key) {
     case 'liquidity_kill': {
+      const outcome = getLiquidityOutcome(alert);
+      const prefix = outcome ? `${outcome} ${getLiquiditySide(alert)}` : getLiquiditySide(alert);
+      const cause = getLiquidityCauseText(alert);
       if (hasValue(previous) && hasValue(actual)) {
-        return [`${getLiquiditySide(alert)} ${formatCents(previous)} → ${formatCents(actual)}`];
+        return cause
+          ? [`${prefix} ${formatCents(previous)} → ${formatCents(actual)}`, cause]
+          : [`${prefix} ${formatCents(previous)} → ${formatCents(actual)}`];
       }
       if (hasValue(actual)) {
-        return [`${getLiquiditySide(alert)} ${formatCents(actual)}`];
+        return cause
+          ? [`${prefix} ${formatCents(actual)}`, cause]
+          : [`${prefix} ${formatCents(actual)}`];
       }
-      return [];
+      return cause ? [cause] : [];
+    }
+    case 'volume_pricing': {
+      const outcome = getLiquidityOutcome(alert);
+      const prefix = outcome ? `${outcome} 卖一` : '卖一';
+      const parts: string[] = [];
+      if (hasValue(previous) && hasValue(actual)) {
+        parts.push(`${prefix} ${formatCents(previous)} -> ${formatCents(actual)}`);
+      } else if (hasValue(actual)) {
+        parts.push(`${prefix} ${formatCents(actual)}`);
+      }
+      const volume = getEffectiveVolumeText(alert);
+      if (volume) {
+        parts.push(`有效量 ${volume}`);
+      }
+      parts.push(getVolumePricingCauseText(alert));
+      return parts;
     }
     case 'spread_threshold': {
       const parts: string[] = [];

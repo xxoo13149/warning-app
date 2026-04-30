@@ -115,6 +115,7 @@ export const alertRules = sqliteTable(
     bubbleWeight: real('bubble_weight').notNull().default(60),
     severity: text('severity').notNull(),
     soundProfileId: text('sound_profile_id'),
+    liquiditySide: text('liquidity_side'),
     scopeCityKey: text('scope_city_key'),
     scopeSeriesSlug: text('scope_series_slug'),
     scopeEventDate: text('scope_event_date'),

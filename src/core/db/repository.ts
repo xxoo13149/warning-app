@@ -620,6 +620,7 @@ function toAlertRuleRow(rule: AlertRule, now: number): AlertRuleRow {
     bubbleWeight: rule.bubbleWeight ?? 60,
     severity: rule.severity,
     soundProfileId: rule.soundProfileId ?? null,
+    liquiditySide: rule.liquiditySide ?? null,
     scopeCityKey: scope.cityKey ?? null,
     scopeSeriesSlug: scope.seriesSlug ?? null,
     scopeEventDate: scope.eventDate ?? null,
@@ -680,6 +681,10 @@ function fromAlertRuleRow(row: AlertRuleRow): AlertRule {
     bubbleWeight: row.bubbleWeight ?? 60,
     severity: row.severity as AlertRule['severity'],
     soundProfileId: row.soundProfileId ?? undefined,
+    liquiditySide:
+      row.liquiditySide === 'buy' || row.liquiditySide === 'sell' || row.liquiditySide === 'both'
+        ? row.liquiditySide
+        : undefined,
     scope: Object.keys(scope).length > 0 ? scope : undefined,
     quietHours,
   };
@@ -701,6 +706,10 @@ function normalizeAlertMetric(metric: string): AlertRule['metric'] {
     case 'liquidity-kill':
     case 'liquiditykill':
       return 'liquidity_kill';
+    case 'volume_pricing':
+    case 'volume-pricing':
+    case 'volumepricing':
+      return 'volume_pricing';
     case 'spread_threshold':
     case 'spread':
     case 'bidask_gap':

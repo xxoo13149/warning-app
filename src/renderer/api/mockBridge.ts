@@ -12,6 +12,7 @@ import type {
   MarketRow,
   RegisterSoundPayload,
   RuntimeDiagnosticsPackageResult,
+  RuntimeMemoryTelemetry,
   StorageMaintenanceResult,
   StorageMaintenanceSummary,
   RuntimeStorageSummary,
@@ -244,6 +245,7 @@ const DEFAULT_HEALTH: AppHealth = {
     lastError: null,
     lastErrorSource: null,
   },
+  memoryTelemetry: buildMockMemoryTelemetry(),
 };
 
 const DEFAULT_STARTUP_STATUS: StartupStatus = {
@@ -261,6 +263,74 @@ const DEFAULT_CONTROL_STATE: AppControlState = {
   coreProcessRunning: true,
   startupStatus: DEFAULT_STARTUP_STATUS,
 };
+
+function buildMockMemoryTelemetry(): RuntimeMemoryTelemetry {
+  const sampledAt = nowIso();
+  const createdAt = Date.now() - 60_000;
+
+  return {
+    sampledAt,
+    browser: {
+      sampledAt,
+      pid: 1024,
+      creationTime: createdAt,
+      cpuPercent: 1.2,
+      processMemory: {
+        privateKb: 240_000,
+        residentSetKb: 310_000,
+        sharedKb: 72_000,
+      },
+      appMetrics: {
+        workingSetKb: 315_000,
+        peakWorkingSetKb: 342_000,
+        privateBytesKb: 248_000,
+      },
+    },
+    tabs: [
+      {
+        sampledAt,
+        pid: 2048,
+        name: 'Renderer',
+        serviceName: null,
+        creationTime: createdAt + 5_000,
+        cpuPercent: 2.6,
+        sandboxed: false,
+        integrityLevel: 'medium',
+        memory: {
+          workingSetKb: 188_000,
+          peakWorkingSetKb: 214_000,
+          privateBytesKb: 176_000,
+        },
+      },
+    ],
+    renderer: {
+      sampledAt,
+      pid: 2048,
+      webContentsId: 1,
+      browserWindowId: 1,
+      url: 'mock://dashboard',
+      title: 'Warning App Mock',
+      hidden: false,
+      visibilityState: 'visible',
+      processMemory: {
+        privateKb: 172_000,
+        residentSetKb: 193_000,
+        sharedKb: 16_000,
+      },
+      blinkMemory: {
+        allocatedKb: 86_000,
+        totalKb: 104_000,
+      },
+      appMetrics: {
+        workingSetKb: 188_000,
+        peakWorkingSetKb: 214_000,
+        privateBytesKb: 176_000,
+      },
+      cpuPercent: 2.6,
+      creationTime: createdAt + 5_000,
+    },
+  };
+}
 
 const buildMockStorageSummary = (
   alerts: AlertEvent[],
@@ -858,6 +928,7 @@ export const createMockBridge = (): WarningApiBridge => {
                 nodeVersion: 'mock',
                 electronVersion: 'mock',
               },
+              memoryTelemetry: buildMockMemoryTelemetry(),
               logs: {
                 directory: 'D:\\天气监控-data\\logs',
                 fileCount: 1,

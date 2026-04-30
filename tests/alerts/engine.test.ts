@@ -206,4 +206,273 @@ describe('alert engine for market ticks', () => {
     expect(disappeared[0].messageKey).toBe('liquidity_kill');
     expect(disappeared[0].messageParams?.side).toBe('sell');
   });
+
+  it('uses explicit removed edges to classify probable trade sweeps', () => {
+    const engine = new AlertEngine(new MarketStateStore());
+    const t0 = Date.UTC(2026, 0, 1, 0, 1, 0);
+    const rule: AlertRule = {
+      id: 'rule-liquidity-edge',
+      name: '盘口斩杀',
+      enabled: true,
+      metric: 'liquidity_kill',
+      operator: '>=',
+      threshold: 0.2,
+      windowSec: 30,
+      cooldownSec: 0,
+      dedupeWindowSec: 0,
+      severity: 'critical',
+      liquiditySide: 'buy',
+    };
+
+    const result = engine.evaluateMarketTick(
+      [rule],
+      {
+        tokenId: 'token-edge',
+        marketId: 'market-edge',
+        cityKey: 'nyc',
+        side: 'yes',
+        timestamp: t0,
+        bestBid: 0.18,
+        bidLevelCount: 2,
+        removedBidEdge: {
+          previousPrice: 0.31,
+          previousSize: 4,
+          currentPrice: 0.18,
+          currentSize: 2,
+          levelCountAfter: 2,
+          visibleSizeAfter: 6,
+          source: 'price_change',
+        },
+        lastTradeAt: t0,
+      },
+      t0,
+    );
+
+    expect(result).toHaveLength(1);
+    expect(result[0].messageParams).toMatchObject({
+      outcome: 'yes',
+      side: 'buy',
+      source: 'trade_sweep',
+      reason: 'top_level',
+      previous: 0.31,
+      actual: 0.18,
+    });
+  });
+
+  it('respects liquiditySide and uses fallback empty-book detection', () => {
+    const engine = new AlertEngine(new MarketStateStore());
+    const t0 = Date.UTC(2026, 0, 1, 0, 2, 0);
+
+    engine.evaluateMarketTick(
+      [],
+      {
+        tokenId: 'token-fallback',
+        marketId: 'market-fallback',
+        cityKey: 'nyc',
+        timestamp: t0,
+        bestAsk: 0.24,
+        askLevelCount: 1,
+      },
+      t0,
+    );
+
+    const buyOnlyRule: AlertRule = {
+      id: 'rule-buy-only',
+      name: '只看买盘',
+      enabled: true,
+      metric: 'liquidity_kill',
+      operator: '>=',
+      threshold: 0.2,
+      windowSec: 30,
+      cooldownSec: 0,
+      dedupeWindowSec: 0,
+      severity: 'critical',
+      liquiditySide: 'buy',
+    };
+    const sellOnlyRule: AlertRule = {
+      ...buyOnlyRule,
+      id: 'rule-sell-only',
+      name: '只看卖盘',
+      liquiditySide: 'sell',
+    };
+
+    const result = engine.evaluateMarketTick(
+      [buyOnlyRule, sellOnlyRule],
+      {
+        tokenId: 'token-fallback',
+        marketId: 'market-fallback',
+        cityKey: 'nyc',
+        timestamp: t0 + 10_000,
+        askLevelCount: 0,
+      },
+      t0 + 10_000,
+    );
+
+    expect(result).toHaveLength(1);
+    expect(result[0].ruleId).toBe('rule-sell-only');
+    expect(result[0].messageParams).toMatchObject({
+      side: 'sell',
+      source: 'fallback',
+      reason: 'full_empty',
+      previous: 0.24,
+      actual: 0,
+    });
+  });
+
+  it('triggers volume pricing when best ask is lifted with depth confirmation', () => {
+    const engine = new AlertEngine(new MarketStateStore());
+    const t0 = Date.UTC(2026, 0, 1, 0, 3, 0);
+    const rule: AlertRule = {
+      id: 'rule-volume-pricing',
+      name: 'Volume pricing',
+      enabled: true,
+      metric: 'volume_pricing',
+      operator: '>=',
+      threshold: 0.1,
+      windowSec: 60,
+      cooldownSec: 0,
+      dedupeWindowSec: 0,
+      severity: 'medium',
+    };
+
+    engine.evaluateMarketTick(
+      [rule],
+      {
+        tokenId: 'token-volume',
+        marketId: 'market-volume',
+        cityKey: 'nyc',
+        timestamp: t0,
+        side: 'yes',
+        bestBid: 0.18,
+        bestAsk: 0.2,
+        bestAskSize: 40,
+        spread: 0.02,
+      },
+      t0,
+    );
+
+    const result = engine.evaluateMarketTick(
+      [rule],
+      {
+        tokenId: 'token-volume',
+        marketId: 'market-volume',
+        cityKey: 'nyc',
+        timestamp: t0 + 30_000,
+        side: 'yes',
+        bestBid: 0.38,
+        bestAsk: 0.4,
+        bestAskSize: 50,
+        spread: 0.02,
+      },
+      t0 + 30_000,
+    );
+
+    expect(result).toHaveLength(1);
+    expect(result[0].messageKey).toBe('volume_pricing');
+    expect(result[0].messageParams).toMatchObject({
+      outcome: 'yes',
+      side: 'sell',
+      previous: 0.2,
+      actual: 0.4,
+      source: 'book_depth',
+      effectiveSize: 50,
+      effectiveNotional: 20,
+    });
+  });
+
+  it('does not trigger volume pricing without enough trade or book size', () => {
+    const engine = new AlertEngine(new MarketStateStore());
+    const t0 = Date.UTC(2026, 0, 1, 0, 4, 0);
+    const rule: AlertRule = {
+      id: 'rule-volume-pricing-small',
+      name: 'Volume pricing',
+      enabled: true,
+      metric: 'volume_pricing',
+      operator: '>=',
+      threshold: 0.1,
+      windowSec: 60,
+      cooldownSec: 0,
+      dedupeWindowSec: 0,
+      severity: 'medium',
+    };
+
+    engine.evaluateMarketTick(
+      [rule],
+      {
+        tokenId: 'token-volume-small',
+        marketId: 'market-volume',
+        cityKey: 'nyc',
+        timestamp: t0,
+        bestBid: 0.18,
+        bestAsk: 0.2,
+        spread: 0.02,
+      },
+      t0,
+    );
+
+    const result = engine.evaluateMarketTick(
+      [rule],
+      {
+        tokenId: 'token-volume-small',
+        marketId: 'market-volume',
+        cityKey: 'nyc',
+        timestamp: t0 + 30_000,
+        bestBid: 0.38,
+        bestAsk: 0.4,
+        bestAskSize: 2,
+        spread: 0.02,
+      },
+      t0 + 30_000,
+    );
+
+    expect(result).toHaveLength(0);
+  });
+
+  it('does not trigger volume pricing when the repriced ask is too far from the bid', () => {
+    const engine = new AlertEngine(new MarketStateStore());
+    const t0 = Date.UTC(2026, 0, 1, 0, 5, 0);
+    const rule: AlertRule = {
+      id: 'rule-volume-pricing-wide',
+      name: 'Volume pricing',
+      enabled: true,
+      metric: 'volume_pricing',
+      operator: '>=',
+      threshold: 0.1,
+      windowSec: 60,
+      cooldownSec: 0,
+      dedupeWindowSec: 0,
+      severity: 'medium',
+    };
+
+    engine.evaluateMarketTick(
+      [rule],
+      {
+        tokenId: 'token-volume-wide',
+        marketId: 'market-volume',
+        cityKey: 'nyc',
+        timestamp: t0,
+        bestBid: 0.18,
+        bestAsk: 0.2,
+        spread: 0.02,
+      },
+      t0,
+    );
+
+    const result = engine.evaluateMarketTick(
+      [rule],
+      {
+        tokenId: 'token-volume-wide',
+        marketId: 'market-volume',
+        cityKey: 'nyc',
+        timestamp: t0 + 30_000,
+        bestBid: 0.1,
+        bestAsk: 0.4,
+        bestAskSize: 100,
+        spread: 0.3,
+      },
+      t0 + 30_000,
+    );
+
+    expect(result).toHaveLength(0);
+  });
 });

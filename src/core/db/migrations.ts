@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 
-export const CURRENT_DB_SCHEMA_VERSION = 4;
+export const CURRENT_DB_SCHEMA_VERSION = 5;
 
 export interface DbMigration {
   version: number;
@@ -165,6 +165,10 @@ const migrationV4 = (_db: Database.Database): void => {
   // without creating the unused experimental price_bars table in fresh databases.
 };
 
+const migrationV5 = (db: Database.Database): void => {
+  ensureColumn(db, 'alert_rules', 'liquidity_side', 'TEXT');
+};
+
 export const DB_MIGRATIONS: readonly DbMigration[] = [
   {
     version: 1,
@@ -185,6 +189,11 @@ export const DB_MIGRATIONS: readonly DbMigration[] = [
     version: 4,
     name: 'reserved-schema-version-4',
     up: migrationV4,
+  },
+  {
+    version: 5,
+    name: 'liquidity-side-rule-field',
+    up: migrationV5,
   },
 ] as const;
 

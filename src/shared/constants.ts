@@ -21,6 +21,9 @@ export const IPC_CHANNELS = {
     settingsRegisterSound: 'settings.registerSound',
     settingsPreviewSound: 'settings.previewSound',
   },
+  internal: {
+    telemetryMemoryReport: 'telemetry.memory.report',
+  },
   events: {
     health: 'app.health',
     controlState: 'app.controlState',

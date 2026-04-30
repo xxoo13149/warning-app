@@ -178,11 +178,6 @@ const normalizeAlertResult = (payload: unknown): AlertListResult => {
   };
 };
 
-const prependUniqueAlert = (alerts: AlertEvent[], alert: AlertEvent): AlertEvent[] => {
-  const withoutCurrent = alerts.filter((item) => item.id !== alert.id);
-  return [alert, ...withoutCurrent];
-};
-
 const appendUniqueAlerts = (current: AlertEvent[], incoming: AlertEvent[]): AlertEvent[] => {
   const next = [...current];
   const seen = new Set(current.map((item) => item.id));
@@ -194,6 +189,78 @@ const appendUniqueAlerts = (current: AlertEvent[], incoming: AlertEvent[]): Aler
     next.push(alert);
   }
   return next;
+};
+
+const prependIncomingAlerts = (
+  current: AlertEvent[],
+  incoming: AlertEvent[],
+): { rows: AlertEvent[]; added: number } => {
+  if (incoming.length === 0) {
+    return { rows: current, added: 0 };
+  }
+
+  const latestIncoming: AlertEvent[] = [];
+  const incomingIds = new Set<string>();
+  for (let index = incoming.length - 1; index >= 0; index -= 1) {
+    const alert = incoming[index];
+    if (incomingIds.has(alert.id)) {
+      continue;
+    }
+    incomingIds.add(alert.id);
+    latestIncoming.push(alert);
+  }
+
+  if (latestIncoming.length === 0) {
+    return { rows: current, added: 0 };
+  }
+
+  const currentIds = new Set(current.map((item) => item.id));
+  const added = latestIncoming.reduce(
+    (count, alert) => count + (currentIds.has(alert.id) ? 0 : 1),
+    0,
+  );
+
+  return {
+    rows: [...latestIncoming, ...current.filter((item) => !incomingIds.has(item.id))],
+    added,
+  };
+};
+
+type AlertWindowMergeMode = 'replace' | 'append' | 'prepend';
+
+const toAlertCursor = (alert: AlertEvent | undefined): AlertListCursor | undefined =>
+  alert
+    ? {
+        triggeredAt: alert.triggeredAt,
+        id: alert.id,
+      }
+    : undefined;
+
+const trimAlertWindow = (alerts: AlertEvent[], mode: AlertWindowMergeMode): AlertEvent[] => {
+  if (alerts.length <= ALERT_RENDER_BUFFER_LIMIT) {
+    return alerts;
+  }
+
+  if (mode === 'append') {
+    return alerts.slice(alerts.length - ALERT_RENDER_BUFFER_LIMIT);
+  }
+
+  return alerts.slice(0, ALERT_RENDER_BUFFER_LIMIT);
+};
+
+const finalizeAlertWindow = (
+  alerts: AlertEvent[],
+  total: number,
+  mode: AlertWindowMergeMode,
+): AlertListResult => {
+  const rows = trimAlertWindow(alerts, mode);
+  const hasMore = total > rows.length;
+  return {
+    rows,
+    total,
+    hasMore,
+    ...(hasMore ? { nextCursor: toAlertCursor(rows.at(-1)) } : {}),
+  };
 };
 
 const mergeSettingsPayload = (
@@ -360,6 +427,7 @@ const TICK_BATCH_WINDOW_MS = 80;
 const MAX_PENDING_TICKS = 150;
 const ALERT_BATCH_WINDOW_MS = 120;
 const MAX_PENDING_ALERTS = 24;
+export const ALERT_RENDER_BUFFER_LIMIT = 600;
 const START_PROGRESS_MAX = 68;
 const START_PROGRESS_INTERVAL_MS = 320;
 const MARKET_LIMIT_DEFAULT = 2000;
@@ -379,8 +447,9 @@ const normalizeMarketQuery = (query: MarketQuery): MarketQuery => ({
   eventDate: query.eventDate,
   side: query.side,
   watchlistedOnly: query.watchlistedOnly,
+  lotteryOnly: query.lotteryOnly,
   limit: normalizeMarketLimit(query.limit),
-  sortBy: query.sortBy ?? 'volume24h',
+  sortBy: query.sortBy ?? 'updatedAt',
   sortDir: query.sortDir ?? 'desc',
 });
 
@@ -389,6 +458,7 @@ const isSameMarketQuery = (left: MarketQuery, right: MarketQuery): boolean =>
   left.eventDate === right.eventDate &&
   left.side === right.side &&
   left.watchlistedOnly === right.watchlistedOnly &&
+  left.lotteryOnly === right.lotteryOnly &&
   left.limit === right.limit &&
   left.sortBy === right.sortBy &&
   left.sortDir === right.sortDir;
@@ -534,7 +604,7 @@ export const useMonitorConsole = (): MonitorConsoleState => {
   const [marketQuery, setMarketQueryState] = useState<MarketQuery>(
     normalizeMarketQuery({
       limit: MARKET_LIMIT_DEFAULT,
-      sortBy: 'volume24h',
+      sortBy: 'updatedAt',
       sortDir: 'desc',
     }),
   );
@@ -576,18 +646,19 @@ export const useMonitorConsole = (): MonitorConsoleState => {
 
   const applyAlertResult = useCallback(
     (result: AlertListResult, mode: 'replace' | 'append' = 'replace') => {
-      const nextRows =
+      const mergedRows =
         mode === 'append'
           ? appendUniqueAlerts(alertsRef.current, result.rows)
           : result.rows;
-      alertsRef.current = nextRows;
-      alertsTotalRef.current = result.total;
-      alertsHasMoreRef.current = result.hasMore;
-      alertsNextCursorRef.current = result.nextCursor;
+      const nextWindow = finalizeAlertWindow(mergedRows, result.total, mode);
+      alertsRef.current = nextWindow.rows;
+      alertsTotalRef.current = nextWindow.total;
+      alertsHasMoreRef.current = nextWindow.hasMore;
+      alertsNextCursorRef.current = nextWindow.nextCursor;
       startTransition(() => {
-        setAlerts(nextRows);
-        setAlertsTotal(result.total);
-        setAlertsHasMore(result.hasMore);
+        setAlerts(nextWindow.rows);
+        setAlertsTotal(nextWindow.total);
+        setAlertsHasMore(nextWindow.hasMore);
       });
     },
     [],
@@ -700,29 +771,20 @@ export const useMonitorConsole = (): MonitorConsoleState => {
 
     pendingAlertsRef.current = [];
     const currentAlerts = alertsRef.current;
-    let nextAlerts = currentAlerts;
-    let nextTotal = alertsTotalRef.current;
-    const seenAlertIds = new Set(currentAlerts.map((item) => item.id));
+    const mergedAlerts = prependIncomingAlerts(currentAlerts, pendingAlerts);
+    const nextAlerts = mergedAlerts.rows;
+    const nextTotal = alertsTotalRef.current + mergedAlerts.added;
 
-    for (const alert of pendingAlerts) {
-      if (!seenAlertIds.has(alert.id)) {
-        nextTotal += 1;
-        seenAlertIds.add(alert.id);
-      }
-      nextAlerts = prependUniqueAlert(nextAlerts, alert);
-    }
-
-    const hadLoadedAll = currentAlerts.length >= alertsTotalRef.current;
-    const nextHasMore = hadLoadedAll ? nextAlerts.length < nextTotal : true;
-
-    alertsRef.current = nextAlerts;
-    alertsTotalRef.current = nextTotal;
-    alertsHasMoreRef.current = nextHasMore;
+    const nextWindow = finalizeAlertWindow(nextAlerts, nextTotal, 'prepend');
+    alertsRef.current = nextWindow.rows;
+    alertsTotalRef.current = nextWindow.total;
+    alertsHasMoreRef.current = nextWindow.hasMore;
+    alertsNextCursorRef.current = nextWindow.nextCursor;
 
     startTransition(() => {
-      setAlerts(nextAlerts);
-      setAlertsTotal(nextTotal);
-      setAlertsHasMore(nextHasMore);
+      setAlerts(nextWindow.rows);
+      setAlertsTotal(nextWindow.total);
+      setAlertsHasMore(nextWindow.hasMore);
     });
   }, []);
 
@@ -856,9 +918,16 @@ export const useMonitorConsole = (): MonitorConsoleState => {
 
   const acknowledgeAlert = async (id: string) => {
     await ipcBridge.invoke('alerts.ack', { id });
-    const nextAlerts = alertsRef.current.map((item) =>
-      item.id === id ? { ...item, acknowledged: true } : item,
-    );
+    const alertIndex = alertsRef.current.findIndex((item) => item.id === id);
+    if (alertIndex < 0 || alertsRef.current[alertIndex]?.acknowledged) {
+      return;
+    }
+
+    const nextAlerts = [...alertsRef.current];
+    nextAlerts[alertIndex] = {
+      ...nextAlerts[alertIndex],
+      acknowledged: true,
+    };
     alertsRef.current = nextAlerts;
     startTransition(() => {
       setAlerts(nextAlerts);
@@ -1206,6 +1275,7 @@ export const useMonitorConsole = (): MonitorConsoleState => {
     marketQuery.cityKey,
     marketQuery.eventDate,
     marketQuery.limit,
+    marketQuery.lotteryOnly,
     marketQuery.side,
     marketQuery.sortBy,
     marketQuery.sortDir,

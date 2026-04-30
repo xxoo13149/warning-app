@@ -15,9 +15,12 @@ const buildAlert = (
   marketId: 'market-1',
   messageKey: 'liquidity_kill',
   messageParams: {
+    outcome: 'yes',
     side: 'buy',
     previous: 0.2,
     actual: 0,
+    source: 'trade_sweep',
+    reason: 'full_empty',
   },
   marketSnapshot: {
     cityName: 'Los Angeles',
@@ -39,13 +42,17 @@ describe('alert notification content', () => {
     expect(presentation.cityLabel).toContain('KLAX');
     expect(presentation.cityLabel).toContain('Los Angeles');
     expect(presentation.title).toBe('洛杉矶 · KLAX · Los Angeles · 70 至 71 华氏度');
-    expect(presentation.summary).toBe('流动性骤降：买盘从 20 美分降到 0 美分');
+    expect(presentation.summary).toBe(
+      '盘口斩杀：YES 买盘从 20 美分降到 0 美分（疑似成交扫空，该侧盘口已空）',
+    );
   });
 
   it('builds a compact city + temperature + key value notification', () => {
     const notification = buildAlertNotificationContent(buildAlert());
     expect(notification.title).toBe('洛杉矶 · KLAX · Los Angeles · 70 至 71 华氏度');
-    expect(notification.body).toBe('流动性骤降 · 买盘 20 美分 → 0 美分 · 当前价格 41 美分');
+    expect(notification.body).toBe(
+      '盘口斩杀 · YES 买盘 20 美分 → 0 美分 · 疑似成交扫空，该侧盘口已空 · 当前价格 41 美分',
+    );
   });
 
   it('keeps threshold details compact for spread alerts', () => {
@@ -93,6 +100,32 @@ describe('alert notification content', () => {
     );
 
     expect(notification.body).toBe('数据流停滞 · 90 秒未更新 · 当前价格 41 美分');
+  });
+
+  it('summarizes volume pricing alerts with price move and effective size', () => {
+    const volumeAlert: Partial<AlertPresentationSource> = {
+      ruleId: 'volume-pricing',
+      builtinKey: 'volume_pricing',
+      messageKey: 'volume_pricing',
+      messageParams: {
+        outcome: 'yes',
+        side: 'sell',
+        previous: 0.2,
+        actual: 0.4,
+        threshold: 0.1,
+        source: 'book_depth',
+        reason: 'ask_pushed_up',
+        effectiveSize: 50,
+        effectiveNotional: 20,
+      },
+    };
+    const presentation = buildAlertPresentation(buildAlert(volumeAlert));
+    const notification = buildAlertNotificationContent(buildAlert(volumeAlert));
+
+    expect(presentation.ruleLabel).toBe('带量定价');
+    expect(presentation.summary).toContain('20 美分');
+    expect(presentation.summary).toContain('40 美分');
+    expect(notification.body).toContain('有效量 50 张 / $20.00');
   });
 
   it('falls back to a short system notification title', () => {

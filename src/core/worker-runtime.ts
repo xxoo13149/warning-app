@@ -25,7 +25,7 @@ import type {
   TokenRuntimeState,
 } from './polymarket/types';
 import { PolymarketDataService } from './services/polymarket-data-service';
-import { FeedStateStore, MarketStateStore } from './state/market-state';
+import { FeedStateStore, MarketStateStore, type MarketTickSnapshot } from './state/market-state';
 import {
   formatAlertMessage,
   formatBuiltinRuleName,
@@ -66,6 +66,7 @@ import type {
   DashboardSnapshot,
   DashboardTickPayload,
   HealthErrorSource,
+  LotteryConfirmationSource,
   MarketQuery,
   MarketQueryResult,
   MarketRow,
@@ -95,7 +96,8 @@ type RulePreviewPayload = WorkerInvokePayloadMap['rules.preview'];
 
 const BUILTIN_RULE_DISPLAY_NAMES_ZH: Record<BuiltinRuleKey, string> = {
   feed_stale: '数据流停滞',
-  liquidity_kill: '流动性斩杀',
+  liquidity_kill: '盘口斩杀',
+  volume_pricing: '带量定价',
   spread_threshold: '价差过宽',
   price_change_5m: '5分钟异动',
 };
@@ -119,6 +121,26 @@ interface BubbleSnapshot {
   score: number;
   severity: MarketRow['bubbleSeverity'];
 }
+
+interface LotterySignalSnapshot {
+  referenceAsk: number;
+  currentAsk: number;
+  lift: number;
+  confirmationSource: LotteryConfirmationSource;
+  effectiveSize: number;
+  effectiveNotional: number;
+  updatedAt: string;
+}
+
+type DashboardUnackedAlertRow = Pick<
+  DbAlertEventRow,
+  'id' | 'ruleId' | 'builtinKey' | 'triggeredAt' | 'cityKey' | 'marketId' | 'acknowledged'
+>;
+
+type BubbleAlertRow = Pick<
+  DbAlertEventRow,
+  'id' | 'ruleId' | 'builtinKey' | 'triggeredAt' | 'marketId'
+>;
 
 const EMPTY_HEALTH: AppHealth = { ...DEFAULT_HEALTH };
 
@@ -176,17 +198,35 @@ const UI_RULES_SEED: AlertRule[] = [
   },
   {
     id: 'liquidity-kill',
-    name: formatBuiltinRuleName('liquidity_kill', 'zh-CN') ?? '流动性消失',
+    name: formatBuiltinRuleName('liquidity_kill', 'zh-CN') ?? '盘口斩杀',
     isBuiltin: true,
     builtinKey: 'liquidity_kill',
     metric: 'liquidity_kill',
-    operator: '<=',
-    threshold: 0.01,
-    windowSec: 60,
-    cooldownSec: 180,
-    dedupeWindowSec: 90,
+    operator: '>=',
+    threshold: 0.2,
+    windowSec: 30,
+    cooldownSec: 120,
+    dedupeWindowSec: 60,
     bubbleWeight: 90,
     severity: 'critical',
+    enabled: true,
+    soundProfileId: '',
+    liquiditySide: 'both',
+    scope: {},
+  },
+  {
+    id: 'volume-pricing',
+    name: formatBuiltinRuleName('volume_pricing', 'zh-CN') ?? '带量定价',
+    isBuiltin: true,
+    builtinKey: 'volume_pricing',
+    metric: 'volume_pricing',
+    operator: '>=',
+    threshold: 0.1,
+    windowSec: 60,
+    cooldownSec: 180,
+    dedupeWindowSec: 60,
+    bubbleWeight: 80,
+    severity: 'warning',
     enabled: true,
     soundProfileId: '',
     scope: {},
@@ -495,6 +535,15 @@ const PRICE_TICK_BATCH_INTERVAL_MS = 500;
 const PRICE_TICK_BATCH_LIMIT = 64;
 const PRICE_CHANGE_WINDOW_MS = 5 * 60 * 1000;
 const PRICE_CHANGE_WINDOW_MAX_ENTRIES = 240;
+const LOTTERY_SIGNAL_WINDOW_MS = 60 * 1000;
+const LOTTERY_SIGNAL_DEFAULT_MIN_LIFT = 0.05;
+const LOTTERY_SIGNAL_REFERENCE_ASK_MAX = 0.04;
+const LOTTERY_SIGNAL_CURRENT_ASK_MAX = 0.18;
+const LOTTERY_SIGNAL_MAX_SPREAD = 0.1;
+const LOTTERY_SIGNAL_FRESH_MS = 30_000;
+const LOTTERY_SIGNAL_MIN_NOTIONAL = 5;
+const LOTTERY_SIGNAL_MIN_SIZE = 100;
+const LOTTERY_SIGNAL_TRADE_TOLERANCE = 0.02;
 const MAINTENANCE_INTERVAL_MS = 30 * 60 * 1000;
 const STARTUP_MAINTENANCE_DELAY_MS = 15_000;
 const TICK_ARCHIVE_BATCH_SIZE = 50_000;
@@ -509,9 +558,15 @@ const CUSTOM_RULE_BUBBLE_WEIGHT = 60;
 const CURRENT_RULE_SCAN_ALERT_LIMIT = 80;
 const STARTUP_RULE_SCAN_MAX_STATE_AGE_MS = 90 * 1000;
 const STORAGE_COMPACTION_PRUNE_THRESHOLD = 10_000;
+const MARKET_HISTORY_REQUIRED_METRICS = new Set<EngineAlertRule['metric']>([
+  'price_change_pct',
+  'liquidity_kill',
+  'volume_pricing',
+]);
 const BUBBLE_WEIGHT_DEFAULTS: Record<BuiltinRuleKey, number> = {
   feed_stale: 95,
   liquidity_kill: 90,
+  volume_pricing: 80,
   spread_threshold: 70,
   price_change_5m: 55,
 };
@@ -611,6 +666,21 @@ const marketRowMatchesSearch = (row: MarketRow, rawSearchTerm: string): boolean 
   ].some((value) => marketFieldMatchesSearch(value, searchTerm, compactSearchTerm));
 };
 
+const resolveRequiredMarketHistoryWindowMs = (
+  rules: readonly Pick<EngineAlertRule, 'enabled' | 'metric' | 'windowSec'>[],
+): number =>
+  rules.reduce((maxWindowMs, rule) => {
+    if (!rule.enabled || !MARKET_HISTORY_REQUIRED_METRICS.has(rule.metric)) {
+      return maxWindowMs;
+    }
+
+    const windowSec =
+      typeof rule.windowSec === 'number' && Number.isFinite(rule.windowSec)
+        ? Math.max(0, Math.trunc(rule.windowSec))
+        : 0;
+    return Math.max(maxWindowMs, windowSec * 1000);
+  }, 0);
+
 const getTodayDateKey = (): string => new Date().toISOString().slice(0, 10);
 
 const isDecisionUsefulMarketRow = (row: MarketRow, today: string): boolean =>
@@ -651,7 +721,7 @@ export class WorkerRuntime {
   private readonly port: MessagePort;
   private readonly repository: WeatherMonitorRepository;
   private readonly dataService: PolymarketDataService;
-  private readonly marketState = new MarketStateStore();
+  private readonly marketState = new MarketStateStore(0);
   private readonly feedState = new FeedStateStore();
   private readonly alertEngine = new AlertEngine(this.marketState);
 
@@ -668,7 +738,12 @@ export class WorkerRuntime {
   private pendingPriceTicks: NewPriceTick[] = [];
   private priceTickFlushTimer?: ReturnType<typeof setTimeout>;
   private priceWindowByToken = new Map<string, PriceWindowEntry[]>();
+  private latestBubbleAlertByMarketId = new Map<string, BubbleAlertRow>();
   private bubbleSnapshotByMarketId = new Map<string, BubbleSnapshot>();
+  private unackedAlertById = new Map<string, DashboardUnackedAlertRow>();
+  private unackedAlertCountByMarketId = new Map<string, number>();
+  private unackedAlertCountByCityKey = new Map<string, number>();
+  private latestUnackedAlertByMarketId = new Map<string, DashboardUnackedAlertRow>();
   private bubbleScoreUpdatedAt = new Date(0).toISOString();
   private bubbleScoreTimer?: ReturnType<typeof setInterval>;
   private serviceStarted = false;
@@ -892,9 +967,16 @@ export class WorkerRuntime {
   private refreshRulesSync(): void {
     const settings = this.readSettings();
     const storedRules = this.repository.queryAlertRules(false).map(normalizeLegacyEngineRule);
-    this.uiRules = storedRules.map((rule) => mapEngineRuleToUi(rule, settings));
-    this.engineRules = this.uiRules.map((rule) => mapUiRuleToEngine(rule));
+    this.applyUiRules(storedRules.map((rule) => mapEngineRuleToUi(rule, settings)));
     this.repository.upsertAlertRules(this.engineRules);
+  }
+
+  private applyUiRules(nextUiRules: AlertRule[]): void {
+    this.uiRules = nextUiRules;
+    this.engineRules = nextUiRules.map((rule) => mapUiRuleToEngine(rule));
+    this.marketState.setHistoryWindow(
+      Math.max(LOTTERY_SIGNAL_WINDOW_MS, resolveRequiredMarketHistoryWindowMs(this.engineRules)),
+    );
   }
 
   private startBubbleScoreLoop(): void {
@@ -902,54 +984,61 @@ export class WorkerRuntime {
       return;
     }
     this.bubbleScoreTimer = setInterval(() => {
-      this.recomputeBubbleScores();
-      this.emitBubbleScoreTicks();
+      const computedAt = Date.now();
+      const changedMarketIds = this.recomputeBubbleScores(
+        Array.from(this.latestBubbleAlertByMarketId.entries())
+          .filter(([marketId, alert]) => {
+            const snapshot = this.bubbleSnapshotByMarketId.get(marketId);
+            return (
+              snapshot?.severity === 'critical' &&
+              computedAt - alert.triggeredAt > BUBBLE_STRONG_ALERT_WINDOW_MS
+            );
+          })
+          .map(([marketId]) => marketId),
+        computedAt,
+      );
+      if (changedMarketIds.length > 0) {
+        this.emitBubbleScoreTicks(changedMarketIds);
+      }
     }, BUBBLE_SCORE_RECOMPUTE_INTERVAL_MS);
     this.bubbleScoreTimer.unref?.();
   }
 
-  private recomputeBubbleScores(): void {
-    const computedAt = Date.now();
-    const alertRows = this.repository.queryRecentAlertEventsForScoring(
-      BUBBLE_ALERT_HISTORY_START_MS,
-    );
+  private recomputeBubbleScores(
+    marketIds?: Iterable<string>,
+    computedAt = Date.now(),
+  ): string[] {
     const ruleById = new Map(this.uiRules.map((rule) => [rule.id, rule]));
-    const latestAlertByMarketId = new Map<string, (typeof alertRows)[number]>();
+    const ids = marketIds
+      ? Array.from(new Set(marketIds)).filter((marketId) => this.trackedMarketById.has(marketId))
+      : Array.from(
+          new Set([
+            ...this.latestBubbleAlertByMarketId.keys(),
+            ...this.bubbleSnapshotByMarketId.keys(),
+          ]),
+        );
+    const changedMarketIds: string[] = [];
 
-    for (const alert of alertRows) {
-      if (!alert.marketId) {
-        continue;
+    for (const marketId of ids) {
+      const alert = this.latestBubbleAlertByMarketId.get(marketId);
+      const nextSnapshot = alert
+        ? buildBubbleSnapshotFromAlert(alert, computedAt, ruleById)
+        : undefined;
+      const previousSnapshot = this.bubbleSnapshotByMarketId.get(marketId);
+
+      if (nextSnapshot) {
+        this.bubbleSnapshotByMarketId.set(marketId, nextSnapshot);
+      } else {
+        this.bubbleSnapshotByMarketId.delete(marketId);
       }
 
-      const current = latestAlertByMarketId.get(alert.marketId);
-      if (!current || alert.triggeredAt > current.triggeredAt) {
-        latestAlertByMarketId.set(alert.marketId, alert);
+      if (!sameBubbleSnapshot(previousSnapshot, nextSnapshot)) {
+        changedMarketIds.push(marketId);
       }
     }
 
-    const next = new Map<string, BubbleSnapshot>();
-    for (const [marketId, alert] of latestAlertByMarketId.entries()) {
-      const ageMs = computedAt - alert.triggeredAt;
-      const severity = resolveBubbleSeverityFromAlertAge(ageMs);
-      if (!severity) {
-        continue;
-      }
-
-      const weight = resolveBubbleWeight(
-        ruleById.get(alert.ruleId),
-        (alert.builtinKey as BuiltinRuleKey | null | undefined) ?? undefined,
-      );
-      const scoreMultiplier = severity === 'critical' ? 1 : BUBBLE_WEAK_SCORE_MULTIPLIER;
-      const score = Math.min(BUBBLE_SCORE_MAX, weight * scoreMultiplier);
-
-      next.set(marketId, {
-        score: Number(score.toFixed(2)),
-        severity,
-      });
-    }
-
-    this.bubbleSnapshotByMarketId = next;
     this.bubbleScoreUpdatedAt = new Date(computedAt).toISOString();
+    return changedMarketIds;
   }
 
   private emitBubbleScoreTicks(marketIds?: Iterable<string>): void {
@@ -1150,6 +1239,8 @@ export class WorkerRuntime {
     this.refreshCityIndex();
     this.refreshTrackedMarketIndex();
     this.refreshLatestTokenStateIndex();
+    this.refreshUnackedAlertIndex();
+    this.refreshBubbleAlertIndex();
   }
 
   private refreshCityIndex(): void {
@@ -1211,6 +1302,104 @@ export class WorkerRuntime {
     this.latestTokenStateById = new Map(states.map((state) => [state.tokenId, state]));
   }
 
+  private refreshUnackedAlertIndex(): void {
+    this.unackedAlertById = new Map();
+    this.unackedAlertCountByMarketId = new Map();
+    this.unackedAlertCountByCityKey = new Map();
+    this.latestUnackedAlertByMarketId = new Map();
+
+    for (const row of this.queryAllAlertEventRows({ acknowledged: false })) {
+      this.recordUnackedAlert({
+        id: row.id,
+        ruleId: row.ruleId,
+        builtinKey: row.builtinKey,
+        triggeredAt: row.triggeredAt,
+        cityKey: row.cityKey,
+        marketId: row.marketId,
+        acknowledged: row.acknowledged,
+      });
+    }
+  }
+
+  private refreshBubbleAlertIndex(): void {
+    this.latestBubbleAlertByMarketId = new Map();
+
+    for (const row of this.repository.queryRecentAlertEventsForScoring(BUBBLE_ALERT_HISTORY_START_MS)) {
+      this.recordBubbleAlert({
+        id: row.id,
+        ruleId: row.ruleId,
+        builtinKey: row.builtinKey,
+        triggeredAt: row.triggeredAt,
+        marketId: row.marketId,
+      });
+    }
+  }
+
+  private recordBubbleAlert(row: BubbleAlertRow): boolean {
+    if (!row.marketId) {
+      return false;
+    }
+
+    const current = this.latestBubbleAlertByMarketId.get(row.marketId);
+    if (current && !isNewerBubbleAlert(row, current)) {
+      return false;
+    }
+
+    this.latestBubbleAlertByMarketId.set(row.marketId, row);
+    return true;
+  }
+
+  private recordUnackedAlert(row: DashboardUnackedAlertRow): void {
+    if (row.acknowledged || this.unackedAlertById.has(row.id)) {
+      return;
+    }
+
+    this.unackedAlertById.set(row.id, row);
+    incrementDashboardAlertCounter(this.unackedAlertCountByCityKey, row.cityKey);
+    incrementDashboardAlertCounter(this.unackedAlertCountByMarketId, row.marketId);
+
+    if (!row.marketId) {
+      return;
+    }
+
+    const current = this.latestUnackedAlertByMarketId.get(row.marketId);
+    if (!current || isNewerDashboardAlert(row, current)) {
+      this.latestUnackedAlertByMarketId.set(row.marketId, row);
+    }
+  }
+
+  private removeUnackedAlert(id: string): void {
+    const row = this.unackedAlertById.get(id);
+    if (!row) {
+      return;
+    }
+
+    this.unackedAlertById.delete(id);
+    decrementDashboardAlertCounter(this.unackedAlertCountByCityKey, row.cityKey);
+    decrementDashboardAlertCounter(this.unackedAlertCountByMarketId, row.marketId);
+
+    if (!row.marketId || this.latestUnackedAlertByMarketId.get(row.marketId)?.id !== id) {
+      return;
+    }
+
+    let nextLatest: DashboardUnackedAlertRow | undefined;
+    for (const candidate of this.unackedAlertById.values()) {
+      if (candidate.marketId !== row.marketId) {
+        continue;
+      }
+      if (!nextLatest || isNewerDashboardAlert(candidate, nextLatest)) {
+        nextLatest = candidate;
+      }
+    }
+
+    if (nextLatest) {
+      this.latestUnackedAlertByMarketId.set(row.marketId, nextLatest);
+      return;
+    }
+
+    this.latestUnackedAlertByMarketId.delete(row.marketId);
+  }
+
   private upsertLatestTokenStateIndex(states: DbLatestTokenState[]): void {
     for (const state of states) {
       this.latestTokenStateById.set(state.tokenId, state);
@@ -1270,8 +1459,19 @@ export class WorkerRuntime {
       side: meta.side,
       timestamp,
       lastTradePrice: tokenState.lastTradePrice,
+      lastTradeSide: tokenState.lastTradeSide,
+      lastTradeSize: tokenState.lastTradeSize,
+      lastTradeAt: tokenState.lastTradeAt,
       bestBid: tokenState.bestBid,
+      bestBidSize: tokenState.bestBidSize,
       bestAsk: tokenState.bestAsk,
+      bestAskSize: tokenState.bestAskSize,
+      bidLevelCount: tokenState.bidLevelCount,
+      askLevelCount: tokenState.askLevelCount,
+      bidVisibleSize: tokenState.bidVisibleSize,
+      askVisibleSize: tokenState.askVisibleSize,
+      removedBidEdge: tokenState.removedBidEdge,
+      removedAskEdge: tokenState.removedAskEdge,
       spread: tokenState.spread,
       lastMessageAt: timestamp,
     };
@@ -1345,7 +1545,7 @@ export class WorkerRuntime {
     const ruleById = new Map(this.uiRules.map((rule) => [rule.id, rule]));
     const enriched = triggers.map((trigger) => {
       const marketSnapshot = trigger.marketId
-        ? this.buildAlertMarketSnapshot(trigger.marketId)
+        ? this.buildAlertMarketSnapshot(trigger.marketId, trigger.tokenId)
         : trigger.marketSnapshot;
       const message = formatAlertMessage('zh-CN', {
         message: trigger.message,
@@ -1360,7 +1560,31 @@ export class WorkerRuntime {
       };
     });
     this.repository.insertAlertEvents(enriched);
-    this.recomputeBubbleScores();
+    const bubbleDirtyMarketIds: string[] = [];
+    for (const trigger of enriched) {
+      this.recordUnackedAlert({
+        id: trigger.id,
+        ruleId: trigger.ruleId,
+        builtinKey: trigger.builtinKey ?? null,
+        triggeredAt: trigger.triggeredAt,
+        cityKey: trigger.cityKey ?? null,
+        marketId: trigger.marketId ?? null,
+        acknowledged: false,
+      });
+      if (
+        this.recordBubbleAlert({
+          id: trigger.id,
+          ruleId: trigger.ruleId,
+          builtinKey: trigger.builtinKey ?? null,
+          triggeredAt: trigger.triggeredAt,
+          marketId: trigger.marketId ?? null,
+        }) &&
+        trigger.marketId
+      ) {
+        bubbleDirtyMarketIds.push(trigger.marketId);
+      }
+    }
+    this.recomputeBubbleScores(bubbleDirtyMarketIds);
     this.emitBubbleScoreTicks(
       enriched
         .map((trigger) => trigger.marketId)
@@ -1462,6 +1686,7 @@ export class WorkerRuntime {
         if (!meta) {
           continue;
         }
+        const latest = this.marketState.getLatest(state.tokenId);
 
         appendTriggers(
           this.alertEngine.evaluateMarketTick(
@@ -1476,10 +1701,21 @@ export class WorkerRuntime {
               eventId: meta.eventId,
               side: meta.side,
               timestamp: nowMs,
-              lastTradePrice: state.lastTradePrice ?? undefined,
-              bestBid: state.bestBid ?? undefined,
-              bestAsk: state.bestAsk ?? undefined,
-              spread: state.spread ?? undefined,
+              lastTradePrice: latest?.lastTradePrice ?? state.lastTradePrice ?? undefined,
+              lastTradeSide: latest?.lastTradeSide,
+              lastTradeSize: latest?.lastTradeSize,
+              lastTradeAt: latest?.lastTradeAt,
+              bestBid: latest?.bestBid ?? state.bestBid ?? undefined,
+              bestBidSize: latest?.bestBidSize,
+              bestAsk: latest?.bestAsk ?? state.bestAsk ?? undefined,
+              bestAskSize: latest?.bestAskSize,
+              bidLevelCount: latest?.bidLevelCount,
+              askLevelCount: latest?.askLevelCount,
+              bidVisibleSize: latest?.bidVisibleSize,
+              askVisibleSize: latest?.askVisibleSize,
+              removedBidEdge: latest?.removedBidEdge,
+              removedAskEdge: latest?.removedAskEdge,
+              spread: latest?.spread ?? state.spread ?? undefined,
               lastMessageAt: state.lastMessageAt,
             },
             nowMs,
@@ -1511,6 +1747,9 @@ export class WorkerRuntime {
     if (query?.watchlistedOnly) {
       filtered = filtered.filter((row) => row.watchlisted);
     }
+    if (query?.lotteryOnly) {
+      filtered = filtered.filter((row) => row.lotteryCandidate === true);
+    }
     if (query?.side && query.side !== 'BOTH') {
       filtered = filtered.filter(
         (row) => row.side === query.side || row.side === 'BOTH',
@@ -1534,7 +1773,9 @@ export class WorkerRuntime {
       }
       const direction = sortDir === 'asc' ? 1 : -1;
       const toComparable = (row: MarketRow): number =>
-        sortBy === 'volume24h'
+        sortBy === 'lotteryLift'
+          ? row.lotteryLift ?? -1
+          : sortBy === 'volume24h'
           ? row.volume24h
           : sortBy === 'change5m'
             ? row.change5m
@@ -1583,32 +1824,7 @@ export class WorkerRuntime {
     const rowsForDate = selectedDate
       ? rows.filter((row) => row.eventDate === selectedDate)
       : [];
-    const unackedAlerts = this.queryAllAlertEventRows({ acknowledged: false });
-    const unackedCountByMarketId = new Map<string, number>();
-    const unackedCountByCityKey = new Map<string, number>();
-    const alertsByMarketId = new Map<string, typeof unackedAlerts>();
     const ruleById = new Map(this.uiRules.map((rule) => [rule.id, rule]));
-
-    for (const alert of unackedAlerts) {
-      if (alert.cityKey) {
-        unackedCountByCityKey.set(
-          alert.cityKey,
-          (unackedCountByCityKey.get(alert.cityKey) ?? 0) + 1,
-        );
-      }
-
-      if (!alert.marketId) {
-        continue;
-      }
-
-      unackedCountByMarketId.set(
-        alert.marketId,
-        (unackedCountByMarketId.get(alert.marketId) ?? 0) + 1,
-      );
-      const items = alertsByMarketId.get(alert.marketId) ?? [];
-      items.push(alert);
-      alertsByMarketId.set(alert.marketId, items);
-    }
 
     const rowsByCityKey = new Map<string, MarketRow[]>();
     for (const row of rowsForDate) {
@@ -1623,8 +1839,8 @@ export class WorkerRuntime {
         compareDashboardMarketRows(
           left,
           right,
-          unackedCountByMarketId.get(left.marketId) ?? 0,
-          unackedCountByMarketId.get(right.marketId) ?? 0,
+          this.unackedAlertCountByMarketId.get(left.marketId) ?? 0,
+          this.unackedAlertCountByMarketId.get(right.marketId) ?? 0,
         ),
       );
       const dominantMarket = rankedMarkets[0];
@@ -1646,9 +1862,7 @@ export class WorkerRuntime {
             : current,
         'none',
       );
-      const dominantAlert = [...(alertsByMarketId.get(dominantMarket.marketId) ?? [])].sort(
-        compareDashboardAlertRows,
-      )[0];
+      const dominantAlert = this.latestUnackedAlertByMarketId.get(dominantMarket.marketId);
       const updatedAtMs = Math.max(...cityRows.map((row) => parseIsoTime(row.updatedAt)));
 
       summaries.push({
@@ -1658,7 +1872,7 @@ export class WorkerRuntime {
         eventDate: selectedDate,
         marketCount: cityRows.length,
         watchlisted: cityRows.some((row) => row.watchlisted),
-        unackedAlertCount: unackedCountByCityKey.get(cityKey) ?? 0,
+        unackedAlertCount: this.unackedAlertCountByCityKey.get(cityKey) ?? 0,
         cityBubbleScore: Number(cityBubbleScore.toFixed(2)),
         cityBubbleSeverity,
         dominantMarketId: dominantMarket.marketId,
@@ -1791,6 +2005,7 @@ export class WorkerRuntime {
     let updated = 0;
     for (const id of ids) {
       this.repository.acknowledgeAlertEvent(id);
+      this.removeUnackedAlert(id);
       updated += 1;
     }
     if (updated > 0) {
@@ -1831,7 +2046,6 @@ export class WorkerRuntime {
     const ordered = [...rows].sort(
       (left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt),
     );
-    const scopeSide = rule.scope?.side ?? 'BOTH';
 
     return {
       matchedCityCount: new Set(rows.map((row) => row.cityKey)).size,
@@ -1842,7 +2056,7 @@ export class WorkerRuntime {
         cityName: row.cityName,
         eventDate: row.eventDate,
         temperatureBand: row.temperatureBand,
-        side: scopeSide,
+        side: row.side,
         yesPrice: row.yesPrice,
         bestBid: row.bestBid,
         bestAsk: row.bestAsk,
@@ -1855,12 +2069,17 @@ export class WorkerRuntime {
   private saveRules(payload: RuleSavePayload): { rows: AlertRule[] } {
     const nextRules = normalizeRuleSavePayload(payload).map((rule) => ({
       ...rule,
+      operator: rule.metric === 'liquidity_kill' || rule.metric === 'volume_pricing' ? '>=' : rule.operator,
       dedupeWindowSec:
         typeof rule.dedupeWindowSec === 'number' && Number.isFinite(rule.dedupeWindowSec)
           ? Math.max(0, Math.trunc(rule.dedupeWindowSec))
           : Math.max(30, Math.floor(rule.cooldownSec / 2)),
       bubbleWeight: resolveBubbleWeight(rule, rule.builtinKey),
       soundProfileId: rule.soundProfileId ?? '',
+      liquiditySide:
+        rule.metric === 'liquidity_kill'
+          ? normalizeLiquiditySide(rule.liquiditySide) ?? 'both'
+          : normalizeLiquiditySide(rule.liquiditySide),
       isBuiltin: rule.isBuiltin ?? Boolean(rule.builtinKey),
       scope: {
         cityKey: rule.scope?.cityKey ?? '',
@@ -1881,14 +2100,15 @@ export class WorkerRuntime {
             }
           : undefined,
     }));
-    this.uiRules = nextRules;
-    this.engineRules = nextRules.map((rule) => mapUiRuleToEngine(rule));
+    this.applyUiRules(nextRules);
     this.repository.upsertAlertRules(this.engineRules);
     this.runCurrentRuleCheck(CURRENT_RULE_SCAN_ALERT_LIMIT, {
       source: 'rules-save-scan',
     });
-    this.recomputeBubbleScores();
-    this.emitBubbleScoreTicks();
+    const changedBubbleMarketIds = this.recomputeBubbleScores();
+    if (changedBubbleMarketIds.length > 0) {
+      this.emitBubbleScoreTicks(changedBubbleMarketIds);
+    }
     this.queueDashboardTick();
     return { rows: [...this.uiRules] };
   }
@@ -2166,6 +2386,95 @@ export class WorkerRuntime {
       .filter((row): row is MarketRow => Boolean(row));
   }
 
+  private computeLotterySignal(
+    tokenId: string,
+    asOfTimestamp = Date.now(),
+  ): LotterySignalSnapshot | null {
+    const latest = this.marketState.getLatest(tokenId);
+    if (!latest) {
+      return null;
+    }
+
+    const currentAsk = normalizeOptionalNumber(latest.bestAsk);
+    if (
+      currentAsk === undefined ||
+      currentAsk <= 0 ||
+      currentAsk > LOTTERY_SIGNAL_CURRENT_ASK_MAX
+    ) {
+      return null;
+    }
+
+    if (
+      latest.lastMessageAt !== undefined &&
+      asOfTimestamp - latest.lastMessageAt > LOTTERY_SIGNAL_FRESH_MS
+    ) {
+      return null;
+    }
+
+    const spread = normalizeOptionalNumber(latest.spread);
+    if (spread !== undefined && spread > LOTTERY_SIGNAL_MAX_SPREAD) {
+      return null;
+    }
+
+    const referenceAsk = this.resolveLotteryReferenceAsk(tokenId, latest, currentAsk, asOfTimestamp);
+    if (referenceAsk === undefined) {
+      return null;
+    }
+
+    const lift = Number((currentAsk - referenceAsk).toFixed(6));
+    if (lift < resolveLotteryMinLift(referenceAsk)) {
+      return null;
+    }
+
+    const confirmation = resolveLotteryConfirmation(latest, referenceAsk, currentAsk, asOfTimestamp);
+    if (!confirmation) {
+      return null;
+    }
+
+    return {
+      referenceAsk,
+      currentAsk,
+      lift,
+      confirmationSource: confirmation.source,
+      effectiveSize: confirmation.effectiveSize,
+      effectiveNotional: confirmation.effectiveNotional,
+      updatedAt: new Date(latest.timestamp).toISOString(),
+    };
+  }
+
+  private resolveLotteryReferenceAsk(
+    tokenId: string,
+    latest: MarketTickSnapshot,
+    currentAsk: number,
+    asOfTimestamp: number,
+  ): number | undefined {
+    const edgeReference = normalizeOptionalNumber(latest.removedAskEdge?.previousPrice);
+    if (
+      edgeReference !== undefined &&
+      edgeReference <= LOTTERY_SIGNAL_REFERENCE_ASK_MAX &&
+      currentAsk - edgeReference >= resolveLotteryMinLift(edgeReference)
+    ) {
+      return edgeReference;
+    }
+
+    const history = this.marketState
+      .getHistory(tokenId, LOTTERY_SIGNAL_WINDOW_MS, asOfTimestamp)
+      .filter((entry) => entry.timestamp < asOfTimestamp);
+
+    for (let index = history.length - 1; index >= 0; index -= 1) {
+      const candidateAsk = normalizeOptionalNumber(history[index]?.bestAsk);
+      if (
+        candidateAsk !== undefined &&
+        candidateAsk <= LOTTERY_SIGNAL_REFERENCE_ASK_MAX &&
+        currentAsk - candidateAsk >= resolveLotteryMinLift(candidateAsk)
+      ) {
+        return candidateAsk;
+      }
+    }
+
+    return undefined;
+  }
+
   private buildMarketRow(
     marketId: string,
     marketSnapshot?: DbTrackedMarket,
@@ -2205,6 +2514,7 @@ export class WorkerRuntime {
       asOfTimestamp,
     );
     const bubbleSnapshot = this.bubbleSnapshotByMarketId.get(market.marketId);
+    const lotterySignal = this.computeLotterySignal(market.tokenYesId, asOfTimestamp);
 
     const updatedAt = new Date(
       Math.max(
@@ -2237,23 +2547,38 @@ export class WorkerRuntime {
       bubbleUpdatedAt: this.bubbleScoreUpdatedAt,
       updatedAt,
       watchlisted: market.pinned,
+      lotteryCandidate: Boolean(lotterySignal),
+      lotteryReferenceAsk: lotterySignal?.referenceAsk ?? null,
+      lotteryCurrentAsk: lotterySignal?.currentAsk ?? null,
+      lotteryLift: lotterySignal?.lift ?? null,
+      lotteryConfirmationSource: lotterySignal?.confirmationSource ?? null,
+      lotteryEffectiveSize: lotterySignal?.effectiveSize ?? null,
+      lotteryEffectiveNotional: lotterySignal?.effectiveNotional ?? null,
+      lotteryUpdatedAt: lotterySignal?.updatedAt ?? null,
     };
   }
 
-  private buildAlertMarketSnapshot(marketId: string): AlertMarketSnapshot | undefined {
+  private buildAlertMarketSnapshot(marketId: string, tokenId?: string): AlertMarketSnapshot | undefined {
     const row = this.buildMarketRow(marketId);
     if (!row) {
       return undefined;
     }
+    const tokenLatest = tokenId ? this.marketState.getLatest(tokenId) : undefined;
     return {
       cityName: row.cityName,
       airportCode: row.airportCode,
       eventDate: row.eventDate,
       temperatureBand: row.temperatureBand,
       yesPrice: row.yesPrice,
-      bestBid: row.bestBid,
-      bestAsk: row.bestAsk,
-      spread: row.spread,
+      lastTradePrice: tokenLatest?.lastTradePrice ?? null,
+      lastTradeSize: tokenLatest?.lastTradeSize ?? null,
+      bestBid: tokenLatest?.bestBid ?? row.bestBid,
+      bestBidSize: tokenLatest?.bestBidSize ?? null,
+      bestAsk: tokenLatest?.bestAsk ?? row.bestAsk,
+      bestAskSize: tokenLatest?.bestAskSize ?? null,
+      bidVisibleSize: tokenLatest?.bidVisibleSize ?? null,
+      askVisibleSize: tokenLatest?.askVisibleSize ?? null,
+      spread: tokenLatest?.spread ?? row.spread,
       change5m: row.change5m,
     };
   }
@@ -2565,6 +2890,14 @@ export class WorkerRuntime {
       };
     }
 
+    this.refreshUnackedAlertIndex();
+    this.refreshBubbleAlertIndex();
+    const changedBubbleMarketIds = this.recomputeBubbleScores();
+    if (changedBubbleMarketIds.length > 0) {
+      this.emitBubbleScoreTicks(changedBubbleMarketIds);
+      this.queueDashboardTick();
+    }
+
     if (options?.allowCompaction && prunedRows >= STORAGE_COMPACTION_PRUNE_THRESHOLD) {
       this.repository.compactDatabase();
       return {
@@ -2738,6 +3071,97 @@ function normalizeWorkerDiagnostic(value: string | null | undefined): string | n
   return value;
 }
 
+function resolveLotteryConfirmation(
+  current: MarketTickSnapshot,
+  referenceAsk: number,
+  currentAsk: number,
+  nowMs: number,
+): {
+  source: LotteryConfirmationSource;
+  effectiveSize: number;
+  effectiveNotional: number;
+} | null {
+  const edgeSize = normalizeOptionalNumber(current.removedAskEdge?.previousSize ?? undefined);
+  const edgePrice = normalizeOptionalNumber(current.removedAskEdge?.previousPrice);
+  if (
+    edgeSize !== undefined &&
+    edgePrice !== undefined &&
+    Math.abs(edgePrice - referenceAsk) <= LOTTERY_SIGNAL_TRADE_TOLERANCE
+  ) {
+    const edgeNotional = edgeSize * edgePrice;
+    if (edgeSize >= LOTTERY_SIGNAL_MIN_SIZE || edgeNotional >= LOTTERY_SIGNAL_MIN_NOTIONAL) {
+      return {
+        source: 'edge_volume',
+        effectiveSize: edgeSize,
+        effectiveNotional: edgeNotional,
+      };
+    }
+  }
+
+  const lastTradeSize = normalizeOptionalNumber(current.lastTradeSize);
+  const lastTradePrice = normalizeOptionalNumber(current.lastTradePrice);
+  const lastTradeAt = current.lastTradeAt;
+  if (
+    lastTradeSize !== undefined &&
+    lastTradePrice !== undefined &&
+    lastTradeAt !== undefined &&
+    nowMs - lastTradeAt >= 0 &&
+    nowMs - lastTradeAt <= LOTTERY_SIGNAL_WINDOW_MS &&
+    lastTradePrice >= referenceAsk - LOTTERY_SIGNAL_TRADE_TOLERANCE &&
+    lastTradePrice <= currentAsk + LOTTERY_SIGNAL_TRADE_TOLERANCE
+  ) {
+    const tradeNotional = lastTradeSize * lastTradePrice;
+    if (lastTradeSize >= LOTTERY_SIGNAL_MIN_SIZE || tradeNotional >= LOTTERY_SIGNAL_MIN_NOTIONAL) {
+      return {
+        source: 'trade_confirmed',
+        effectiveSize: lastTradeSize,
+        effectiveNotional: tradeNotional,
+      };
+    }
+  }
+
+  const askSize = normalizeOptionalNumber(current.bestAskSize);
+  if (askSize !== undefined) {
+    const askNotional = askSize * currentAsk;
+    if (askSize >= LOTTERY_SIGNAL_MIN_SIZE || askNotional >= LOTTERY_SIGNAL_MIN_NOTIONAL) {
+      return {
+        source: 'book_depth',
+        effectiveSize: askSize,
+        effectiveNotional: askNotional,
+      };
+    }
+  }
+
+  const visibleAskSize = normalizeOptionalNumber(current.askVisibleSize);
+  if (visibleAskSize !== undefined) {
+    const visibleNotional = visibleAskSize * currentAsk;
+    if (
+      visibleAskSize >= LOTTERY_SIGNAL_MIN_SIZE ||
+      visibleNotional >= LOTTERY_SIGNAL_MIN_NOTIONAL
+    ) {
+      return {
+        source: 'book_depth',
+        effectiveSize: visibleAskSize,
+        effectiveNotional: visibleNotional,
+      };
+    }
+  }
+
+  return null;
+}
+
+function resolveLotteryMinLift(referenceAsk: number): number {
+  if (referenceAsk <= 0.02) {
+    return 0.03;
+  }
+
+  if (referenceAsk <= LOTTERY_SIGNAL_REFERENCE_ASK_MAX) {
+    return 0.04;
+  }
+
+  return LOTTERY_SIGNAL_DEFAULT_MIN_LIFT;
+}
+
 function parseIsoTime(value: string | null | undefined): number {
   if (!value) {
     return 0;
@@ -2751,6 +3175,83 @@ function compareDashboardAlertRows(
   right: { triggeredAt: number },
 ): number {
   return right.triggeredAt - left.triggeredAt;
+}
+
+function incrementDashboardAlertCounter(
+  map: Map<string, number>,
+  key: string | null | undefined,
+): void {
+  if (!key) {
+    return;
+  }
+  map.set(key, (map.get(key) ?? 0) + 1);
+}
+
+function decrementDashboardAlertCounter(
+  map: Map<string, number>,
+  key: string | null | undefined,
+): void {
+  if (!key) {
+    return;
+  }
+
+  const nextValue = (map.get(key) ?? 0) - 1;
+  if (nextValue > 0) {
+    map.set(key, nextValue);
+    return;
+  }
+
+  map.delete(key);
+}
+
+function isNewerDashboardAlert(
+  left: DashboardUnackedAlertRow,
+  right: DashboardUnackedAlertRow,
+): boolean {
+  if (left.triggeredAt !== right.triggeredAt) {
+    return left.triggeredAt > right.triggeredAt;
+  }
+
+  return left.id.localeCompare(right.id) > 0;
+}
+
+function isNewerBubbleAlert(left: BubbleAlertRow, right: BubbleAlertRow): boolean {
+  if (left.triggeredAt !== right.triggeredAt) {
+    return left.triggeredAt > right.triggeredAt;
+  }
+
+  return left.id.localeCompare(right.id) > 0;
+}
+
+function sameBubbleSnapshot(
+  left: BubbleSnapshot | undefined,
+  right: BubbleSnapshot | undefined,
+): boolean {
+  return left?.severity === right?.severity && left?.score === right?.score;
+}
+
+function buildBubbleSnapshotFromAlert(
+  alert: BubbleAlertRow,
+  computedAt: number,
+  ruleById: Map<string, AlertRule>,
+): BubbleSnapshot | undefined {
+  const ageMs = computedAt - alert.triggeredAt;
+  const severity = resolveBubbleSeverityFromAlertAge(ageMs);
+  if (!severity) {
+    return undefined;
+  }
+
+  const weight = resolveBubbleWeight(
+    ruleById.get(alert.ruleId),
+    (alert.builtinKey as BuiltinRuleKey | null | undefined) ?? undefined,
+  );
+  const scoreMultiplier = severity === 'critical' ? 1 : BUBBLE_WEAK_SCORE_MULTIPLIER;
+  const score = Math.min(BUBBLE_SCORE_MAX, weight * scoreMultiplier);
+
+  return {
+    score: Number(score.toFixed(2)),
+    severity,
+  };
 }
 
 function compareDashboardMarketRows(
@@ -2852,7 +3353,11 @@ function resolveBubbleSeverityFromAlertAge(
 function mapUiRuleToEngine(rule: AlertRule): EngineAlertRule {
   const metric = mapUiMetricToEngine(rule.metric);
   const operator =
-    rule.operator === 'crosses' ? 'crosses_above' : (rule.operator as EngineAlertRule['operator']);
+    metric === 'liquidity_kill' || metric === 'volume_pricing'
+      ? '>='
+      : rule.operator === 'crosses'
+        ? 'crosses_above'
+        : (rule.operator as EngineAlertRule['operator']);
   const builtinKey = rule.builtinKey ?? inferBuiltinRuleKey(rule.id);
   const dedupeWindowSec =
     typeof rule.dedupeWindowSec === 'number' && Number.isFinite(rule.dedupeWindowSec)
@@ -2874,6 +3379,7 @@ function mapUiRuleToEngine(rule: AlertRule): EngineAlertRule {
     bubbleWeight: resolveBubbleWeight(rule, builtinKey),
     severity: uiToEngineSeverity(rule.severity),
     soundProfileId: rule.soundProfileId || undefined,
+    liquiditySide: normalizeLiquiditySide(rule.liquiditySide),
     scope: {
       cityKey: rule.scope?.cityKey || undefined,
       seriesSlug: rule.scope?.seriesSlug || undefined,
@@ -2904,9 +3410,11 @@ function mapEngineRuleToUi(
     builtinKey,
     metric: mapEngineMetricToUi(metric),
     operator:
-      rule.operator === 'crosses_above' || rule.operator === 'crosses_below'
-        ? 'crosses'
-        : (rule.operator as AlertRule['operator']),
+      metric === 'liquidity_kill' || metric === 'volume_pricing'
+        ? '>='
+        : rule.operator === 'crosses_above' || rule.operator === 'crosses_below'
+          ? 'crosses'
+          : (rule.operator as AlertRule['operator']),
     threshold: rule.threshold,
     windowSec: rule.windowSec,
     cooldownSec: rule.cooldownSec,
@@ -2915,6 +3423,7 @@ function mapEngineRuleToUi(
     severity: severityToUi(rule.severity),
     enabled: rule.enabled,
     soundProfileId: rule.soundProfileId ?? '',
+    liquiditySide: normalizeLiquiditySide(rule.liquiditySide),
     scope: {
       cityKey: rule.scope?.cityKey ?? '',
       seriesSlug: rule.scope?.seriesSlug ?? '',
@@ -2932,15 +3441,69 @@ function normalizeLegacyEngineRule(rule: EngineAlertRule): EngineAlertRule {
   const metric = normalizeLegacyEngineMetric(rule.metric as string);
   const builtinKey = rule.builtinKey ?? inferBuiltinRuleKey(rule.id);
   const bubbleWeight = resolveBubbleWeight(rule, builtinKey);
-  if (metric === rule.metric && builtinKey === rule.builtinKey && bubbleWeight === rule.bubbleWeight) {
-    return rule;
-  }
-  return {
+  const normalizedRule: EngineAlertRule = {
     ...rule,
     metric,
+    operator: metric === 'liquidity_kill' || metric === 'volume_pricing' ? '>=' : rule.operator,
     isBuiltin: rule.isBuiltin ?? Boolean(builtinKey),
     builtinKey,
     bubbleWeight,
+    liquiditySide: normalizeLiquiditySide(rule.liquiditySide),
+  };
+  const harmonizedRule = harmonizeBuiltinRuleDefaults(normalizedRule);
+  if (
+    harmonizedRule.metric === rule.metric &&
+    harmonizedRule.builtinKey === rule.builtinKey &&
+    harmonizedRule.bubbleWeight === rule.bubbleWeight &&
+    harmonizedRule.operator === rule.operator &&
+    harmonizedRule.threshold === rule.threshold &&
+    harmonizedRule.windowSec === rule.windowSec &&
+    harmonizedRule.cooldownSec === rule.cooldownSec &&
+    harmonizedRule.dedupeWindowSec === rule.dedupeWindowSec &&
+    harmonizedRule.liquiditySide === rule.liquiditySide
+  ) {
+    return harmonizedRule;
+  }
+  return harmonizedRule;
+}
+
+function normalizeLiquiditySide(
+  side: 'buy' | 'sell' | 'both' | null | undefined,
+): 'buy' | 'sell' | 'both' | undefined {
+  if (side === 'buy' || side === 'sell' || side === 'both') {
+    return side;
+  }
+  return undefined;
+}
+
+function harmonizeBuiltinRuleDefaults(rule: EngineAlertRule): EngineAlertRule {
+  if (rule.builtinKey !== 'liquidity_kill') {
+    return rule;
+  }
+
+  const looksLegacyDefault =
+    (rule.operator === '<=' || rule.operator === '<') &&
+    Math.abs(rule.threshold - 0.01) < Number.EPSILON &&
+    rule.windowSec === 60 &&
+    rule.cooldownSec === 180 &&
+    rule.dedupeWindowSec === 90;
+
+  if (!looksLegacyDefault) {
+    return {
+      ...rule,
+      liquiditySide: normalizeLiquiditySide(rule.liquiditySide) ?? 'both',
+    };
+  }
+
+  return {
+    ...rule,
+    name: formatBuiltinRuleName('liquidity_kill', 'zh-CN') ?? rule.name,
+    operator: '>=',
+    threshold: 0.2,
+    windowSec: 30,
+    cooldownSec: 120,
+    dedupeWindowSec: 60,
+    liquiditySide: 'both',
   };
 }
 
@@ -2954,6 +3517,8 @@ function inferBuiltinRuleKey(ruleId: string): BuiltinRuleKey | undefined {
       return 'feed_stale';
     case 'liquidity-kill':
       return 'liquidity_kill';
+    case 'volume-pricing':
+      return 'volume_pricing';
     default:
       return undefined;
   }
@@ -2972,6 +3537,10 @@ function mapUiMetricToEngine(metric: AlertRule['metric']): EngineAlertRule['metr
     case 'liquidity-kill':
     case 'liquiditykill':
       return 'liquidity_kill';
+    case 'volume_pricing':
+    case 'volume-pricing':
+    case 'volumepricing':
+      return 'volume_pricing';
     case 'feed_stale':
     case 'feed-stale':
       return 'feed_stale';
@@ -2999,6 +3568,10 @@ function normalizeLegacyEngineMetric(metric: string): EngineAlertRule['metric'] 
     case 'liquidity-kill':
     case 'liquiditykill':
       return 'liquidity_kill';
+    case 'volume_pricing':
+    case 'volume-pricing':
+    case 'volumepricing':
+      return 'volume_pricing';
     case 'spread_threshold':
     case 'spread':
     case 'bidask_gap':
@@ -3017,6 +3590,8 @@ function mapEngineMetricToUi(metric: EngineAlertRule['metric']): AlertRule['metr
       return 'feed_stale';
     case 'liquidity_kill':
       return 'liquidity_kill';
+    case 'volume_pricing':
+      return 'volume_pricing';
     case 'spread_threshold':
     default:
       return 'spread';

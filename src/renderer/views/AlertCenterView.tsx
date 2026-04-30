@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { useI18n } from '../i18n';
 import type { AlertEvent } from '../types/contracts';
@@ -21,6 +21,11 @@ interface AlertCenterViewProps {
 interface AlertViewModel {
   alert: AlertEvent;
   presentation: AlertPresentation;
+}
+
+interface AlertModelCacheEntry {
+  source: AlertEvent;
+  model: AlertViewModel;
 }
 
 interface FilterOption {
@@ -99,6 +104,10 @@ const ALERT_SORT_OPTIONS: Array<{ value: AlertSortKey; label: string }> = [
   { value: 'city', label: pageText.sortCity },
   { value: 'rule', label: pageText.sortRule },
 ];
+const ALERT_CARD_ESTIMATED_HEIGHT = 286;
+const ALERT_CARD_GAP = 10;
+const ALERT_CARD_OVERSCAN = 4;
+const ALERT_LIST_VIEWPORT_HEIGHT_FALLBACK = 760;
 
 const countBy = (items: AlertViewModel[], getKey: (item: AlertViewModel) => string) => {
   const counts = new Map<string, number>();
@@ -232,6 +241,131 @@ const sanitizeCardDetail = (detail: string | null, notificationBody: string) => 
   return parts.length > 0 ? parts.join(' · ') : null;
 };
 
+const buildAlertModels = (
+  alerts: AlertEvent[],
+  cache: Map<string, AlertModelCacheEntry>,
+): AlertViewModel[] => {
+  const nextIds = new Set<string>();
+  const models: AlertViewModel[] = [];
+
+  for (const alert of alerts) {
+    nextIds.add(alert.id);
+    const cached = cache.get(alert.id);
+    if (cached && cached.source === alert) {
+      models.push(cached.model);
+      continue;
+    }
+
+    const model = {
+      alert,
+      presentation: buildAlertPresentation(alert),
+    } satisfies AlertViewModel;
+    cache.set(alert.id, { source: alert, model });
+    models.push(model);
+  }
+
+  for (const id of cache.keys()) {
+    if (!nextIds.has(id)) {
+      cache.delete(id);
+    }
+  }
+
+  return models;
+};
+
+interface AlertCenterCardProps {
+  model: AlertViewModel;
+  highlighted: boolean;
+  formatDateTime: (value: string) => string;
+  registerCard: (id: string, node: HTMLElement | null) => void;
+}
+
+const AlertCenterCard = ({
+  model,
+  highlighted,
+  formatDateTime,
+  registerCard,
+}: AlertCenterCardProps) => {
+  const { alert, presentation } = model;
+  const notificationContent = buildAlertNotificationContent(alert);
+  const temperatureBand = getPresentationContextValue(presentation, pageText.band);
+  const marketId = getPresentationContextValue(presentation, pageText.marketId);
+  const detailText = sanitizeCardDetail(presentation.detail, notificationContent.body);
+  const badges = [
+    presentation.alertLabel,
+    ...(temperatureBand ? [`温区: ${temperatureBand}`] : []),
+  ];
+  const visibleFacts = presentation.facts
+    .filter((fact) => !notificationContent.body.includes(fact.value))
+    .slice(0, 4);
+  const quickFacts = [
+    { label: pageText.city, value: presentation.cityLabel },
+    ...(temperatureBand ? [{ label: pageText.band, value: temperatureBand }] : []),
+    { label: pageText.rule, value: presentation.ruleLabel },
+    ...(marketId ? [{ label: pageText.marketId, value: marketId }] : []),
+  ];
+
+  return (
+    <article
+      ref={(node) => registerCard(alert.id, node)}
+      id={`alert-center-card-${alert.id}`}
+      className={`alert-center-card ${
+        highlighted ? 'alert-center-card--focused' : ''
+      }`}
+      tabIndex={highlighted ? -1 : undefined}
+    >
+      <div className="alert-center-card__main">
+        <div className="alert-center-card__top">
+          <div className="alert-center-card__header-copy">
+            <div className="alert-center-card__badges">
+              {badges.map((badge) => (
+                <span key={`${alert.id}-${badge}`} className="alert-center-card__status">
+                  {badge}
+                </span>
+              ))}
+            </div>
+            <h3>{notificationContent.title}</h3>
+            <p className="alert-center-card__summary alert-center-card__summary--lead">
+              {notificationContent.body}
+            </p>
+          </div>
+          <time className="alert-center-card__time" dateTime={alert.triggeredAt}>
+            {formatDateTime(alert.triggeredAt)}
+          </time>
+        </div>
+
+        {detailText ? <p className="alert-center-card__detail">{detailText}</p> : null}
+
+        {visibleFacts.length > 0 ? (
+          <div className="alert-center-card__facts" aria-label={pageText.facts}>
+            {visibleFacts.map((fact, index) => (
+              <div
+                key={`${alert.id}-${fact.label}-${fact.value}`}
+                className={`alert-center-fact ${index === 0 ? 'is-primary' : ''} ${
+                  fact.tone ? `alert-center-fact--${fact.tone}` : ''
+                }`}
+              >
+                <span>{fact.label}</span>
+                <strong>{fact.value}</strong>
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </div>
+
+      <aside className="alert-center-card__context" aria-label={pageText.context}>
+        <span>{pageText.context}</span>
+        {quickFacts.map((item) => (
+          <div key={`${alert.id}-${item.label}`}>
+            <small>{item.label}</small>
+            <strong>{item.value}</strong>
+          </div>
+        ))}
+      </aside>
+    </article>
+  );
+};
+
 const renderFilterChips = (
   label: string,
   options: FilterOption[],
@@ -342,21 +476,22 @@ export const AlertCenterView = ({
 }: AlertCenterViewProps) => {
   const { formatDateTime } = useI18n();
   const persistedState = useMemo(readPersistedAlertCenterState, []);
+  const alertModelCacheRef = useRef(new Map<string, AlertModelCacheEntry>());
+  const listViewportRef = useRef<HTMLDivElement | null>(null);
+  const alertCardNodesRef = useRef(new Map<string, HTMLElement>());
+  const alertCardHeightsRef = useRef(new Map<string, number>());
   const [ruleFilter, setRuleFilter] = useState(persistedState.ruleFilter);
   const [cityFilter, setCityFilter] = useState(persistedState.cityFilter);
   const [ruleSearch, setRuleSearch] = useState(persistedState.ruleSearch);
   const [citySearch, setCitySearch] = useState(persistedState.citySearch);
   const [sortBy, setSortBy] = useState<AlertSortKey>(persistedState.sortBy);
   const [highlightedAlertId, setHighlightedAlertId] = useState<string | null>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(ALERT_LIST_VIEWPORT_HEIGHT_FALLBACK);
+  const [layoutVersion, setLayoutVersion] = useState(0);
 
   const alertModels = useMemo<AlertViewModel[]>(
-    () =>
-      [...alerts]
-        .map((alert) => ({
-          alert,
-          presentation: buildAlertPresentation(alert),
-        }))
-        .sort(compareAlertTime),
+    () => buildAlertModels(alerts, alertModelCacheRef.current),
     [alerts],
   );
 
@@ -370,15 +505,14 @@ export const AlertCenterView = ({
   );
 
   const visibleAlerts = useMemo(
-    () =>
-      sortAlertModels(
-        alertModels.filter(
-          (item) =>
-            (ruleFilter === 'all' || item.presentation.ruleLabel === ruleFilter) &&
-            (cityFilter === 'all' || item.presentation.cityLabel === cityFilter),
-        ),
-        sortBy,
-      ),
+    () => {
+      const filtered = alertModels.filter(
+        (item) =>
+          (ruleFilter === 'all' || item.presentation.ruleLabel === ruleFilter) &&
+          (cityFilter === 'all' || item.presentation.cityLabel === cityFilter),
+      );
+      return sortBy === 'latest' ? filtered : sortAlertModels(filtered, sortBy);
+    },
     [alertModels, cityFilter, ruleFilter, sortBy],
   );
 
@@ -426,6 +560,126 @@ export const AlertCenterView = ({
     : pageText.empty;
   const shouldShowPagination =
     hasMore || alerts.length > 0 || total > 0 || Boolean(loadMoreError);
+  const registerAlertCard = useCallback((id: string, node: HTMLElement | null) => {
+    if (node) {
+      alertCardNodesRef.current.set(id, node);
+      return;
+    }
+    alertCardNodesRef.current.delete(id);
+  }, []);
+
+  useEffect(() => {
+    const viewport = listViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+
+    const syncViewportHeight = () => {
+      const nextHeight = viewport.clientHeight;
+      if (nextHeight > 0) {
+        setViewportHeight((current) => (current === nextHeight ? current : nextHeight));
+      }
+    };
+
+    syncViewportHeight();
+    if (typeof ResizeObserver === 'undefined') {
+      return;
+    }
+
+    const observer = new ResizeObserver(() => {
+      syncViewportHeight();
+    });
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const liveIds = new Set(alerts.map((alert) => alert.id));
+    for (const id of alertCardHeightsRef.current.keys()) {
+      if (!liveIds.has(id)) {
+        alertCardHeightsRef.current.delete(id);
+      }
+    }
+    for (const id of alertCardNodesRef.current.keys()) {
+      if (!liveIds.has(id)) {
+        alertCardNodesRef.current.delete(id);
+      }
+    }
+  }, [alerts]);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      let changed = false;
+      for (const [id, node] of alertCardNodesRef.current.entries()) {
+        const nextHeight = Math.ceil(node.getBoundingClientRect().height);
+        if (!nextHeight || alertCardHeightsRef.current.get(id) === nextHeight) {
+          continue;
+        }
+        alertCardHeightsRef.current.set(id, nextHeight);
+        changed = true;
+      }
+      if (changed) {
+        setLayoutVersion((current) => current + 1);
+      }
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+    };
+  }, [viewportHeight, visibleAlerts]);
+
+  const virtualLayout = useMemo(() => {
+    const offsets: number[] = [];
+    const heights: number[] = [];
+    let cursor = 0;
+
+    for (const item of visibleAlerts) {
+      offsets.push(cursor);
+      const height = alertCardHeightsRef.current.get(item.alert.id) ?? ALERT_CARD_ESTIMATED_HEIGHT;
+      heights.push(height);
+      cursor += height + ALERT_CARD_GAP;
+    }
+
+    const totalHeight = cursor > 0 ? cursor - ALERT_CARD_GAP : 0;
+    const overscanPx = ALERT_CARD_ESTIMATED_HEIGHT * ALERT_CARD_OVERSCAN;
+    const viewportBottom = scrollTop + viewportHeight;
+    let startIndex = 0;
+    while (startIndex < visibleAlerts.length) {
+      const itemBottom = offsets[startIndex] + heights[startIndex];
+      if (itemBottom >= scrollTop - overscanPx) {
+        break;
+      }
+      startIndex += 1;
+    }
+
+    let endIndex = startIndex;
+    while (endIndex < visibleAlerts.length) {
+      if (offsets[endIndex] > viewportBottom + overscanPx) {
+        break;
+      }
+      endIndex += 1;
+    }
+
+    return {
+      offsets,
+      heights,
+      totalHeight,
+      startIndex,
+      endIndex,
+    };
+  }, [layoutVersion, scrollTop, viewportHeight, visibleAlerts]);
+
+  const virtualItems = useMemo(
+    () =>
+      visibleAlerts.slice(virtualLayout.startIndex, virtualLayout.endIndex).map((item, index) => {
+        const itemIndex = virtualLayout.startIndex + index;
+        return {
+          item,
+          top: virtualLayout.offsets[itemIndex] ?? 0,
+        };
+      }),
+    [visibleAlerts, virtualLayout.endIndex, virtualLayout.offsets, virtualLayout.startIndex],
+  );
 
   useEffect(() => {
     if (ruleFilter !== 'all' && !ruleOptions.some((option) => option.value === ruleFilter)) {
@@ -470,13 +724,45 @@ export const AlertCenterView = ({
   }, [focusAlertId]);
 
   useEffect(() => {
-    if (!highlightedAlertId || !visibleAlerts.some((item) => item.alert.id === highlightedAlertId)) {
+    const viewport = listViewportRef.current;
+    if (!viewport) {
       return;
+    }
+
+    viewport.scrollTop = 0;
+    setScrollTop(0);
+  }, [cityFilter, ruleFilter, sortBy]);
+
+  useEffect(() => {
+    if (!highlightedAlertId) {
+      return;
+    }
+
+    const highlightedIndex = visibleAlerts.findIndex((item) => item.alert.id === highlightedAlertId);
+    if (highlightedIndex < 0) {
+      return;
+    }
+
+    const viewport = listViewportRef.current;
+    if (viewport) {
+      const top = virtualLayout.offsets[highlightedIndex] ?? 0;
+      const height =
+        virtualLayout.heights[highlightedIndex] ?? ALERT_CARD_ESTIMATED_HEIGHT;
+      const bottom = top + height;
+      const viewportBottom = viewport.scrollTop + viewportHeight;
+      if (top < viewport.scrollTop || bottom > viewportBottom) {
+        const nextTop = Math.max(top - 24, 0);
+        if (typeof viewport.scrollTo === 'function') {
+          viewport.scrollTo({ top: nextTop, behavior: 'smooth' });
+        } else {
+          viewport.scrollTop = nextTop;
+        }
+        setScrollTop(nextTop);
+      }
     }
 
     const frame = window.requestAnimationFrame(() => {
       const target = document.getElementById(`alert-center-card-${highlightedAlertId}`);
-      target?.scrollIntoView({ block: 'center', behavior: 'smooth' });
       target?.focus({ preventScroll: true });
     });
     const timeout = window.setTimeout(() => {
@@ -487,7 +773,7 @@ export const AlertCenterView = ({
       window.cancelAnimationFrame(frame);
       window.clearTimeout(timeout);
     };
-  }, [highlightedAlertId, visibleAlerts]);
+  }, [highlightedAlertId, viewportHeight, virtualLayout.heights, virtualLayout.offsets, visibleAlerts]);
 
   return (
     <section className="workspace">
@@ -583,91 +869,25 @@ export const AlertCenterView = ({
           </div>
 
           {visibleAlerts.length > 0 ? (
-            <div className="alert-center-list">
-              {visibleAlerts.map(({ alert, presentation }) => {
-                const notificationContent = buildAlertNotificationContent(alert);
-                const temperatureBand = getPresentationContextValue(presentation, pageText.band);
-                const marketId = getPresentationContextValue(presentation, pageText.marketId);
-                const detailText = sanitizeCardDetail(
-                  presentation.detail,
-                  notificationContent.body,
-                );
-                const badges = [
-                  presentation.alertLabel,
-                  ...(temperatureBand ? [`温区: ${temperatureBand}`] : []),
-                ];
-                const visibleFacts = presentation.facts
-                  .filter((fact) => !notificationContent.body.includes(fact.value))
-                  .slice(0, 4);
-                const quickFacts = [
-                  { label: pageText.city, value: presentation.cityLabel },
-                  ...(temperatureBand ? [{ label: pageText.band, value: temperatureBand }] : []),
-                  { label: pageText.rule, value: presentation.ruleLabel },
-                  ...(marketId ? [{ label: pageText.marketId, value: marketId }] : []),
-                ];
-
-                return (
-                  <article
-                    key={alert.id}
-                    id={`alert-center-card-${alert.id}`}
-                    className={`alert-center-card ${
-                      highlightedAlertId === alert.id ? 'alert-center-card--focused' : ''
-                    }`}
-                    tabIndex={highlightedAlertId === alert.id ? -1 : undefined}
-                  >
-                    <div className="alert-center-card__main">
-                      <div className="alert-center-card__top">
-                        <div className="alert-center-card__header-copy">
-                          <div className="alert-center-card__badges">
-                            {badges.map((badge) => (
-                              <span key={`${alert.id}-${badge}`} className="alert-center-card__status">
-                                {badge}
-                              </span>
-                            ))}
-                          </div>
-                          <h3>{notificationContent.title}</h3>
-                          <p className="alert-center-card__summary alert-center-card__summary--lead">
-                            {notificationContent.body}
-                          </p>
-                        </div>
-                        <time className="alert-center-card__time" dateTime={alert.triggeredAt}>
-                          {formatDateTime(alert.triggeredAt)}
-                        </time>
-                      </div>
-
-                      {detailText ? (
-                        <p className="alert-center-card__detail">{detailText}</p>
-                      ) : null}
-
-                      {visibleFacts.length > 0 ? (
-                        <div className="alert-center-card__facts" aria-label={pageText.facts}>
-                          {visibleFacts.map((fact, index) => (
-                            <div
-                              key={`${alert.id}-${fact.label}-${fact.value}`}
-                              className={`alert-center-fact ${index === 0 ? 'is-primary' : ''} ${
-                                fact.tone ? `alert-center-fact--${fact.tone}` : ''
-                              }`}
-                            >
-                              <span>{fact.label}</span>
-                              <strong>{fact.value}</strong>
-                            </div>
-                          ))}
-                        </div>
-                      ) : null}
+            <div className="alert-center-list-shell">
+              <div
+                ref={listViewportRef}
+                className="alert-center-list-viewport"
+                onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+              >
+                <div className="alert-center-list" style={{ height: virtualLayout.totalHeight }}>
+                  {virtualItems.map(({ item, top }) => (
+                    <div key={item.alert.id} className="alert-center-list__row" style={{ top }}>
+                      <AlertCenterCard
+                        model={item}
+                        highlighted={highlightedAlertId === item.alert.id}
+                        formatDateTime={formatDateTime}
+                        registerCard={registerAlertCard}
+                      />
                     </div>
-
-                    <aside className="alert-center-card__context" aria-label={pageText.context}>
-                      <span>{pageText.context}</span>
-                      {quickFacts.map((item) => (
-                        <div key={`${alert.id}-${item.label}`}>
-                          <small>{item.label}</small>
-                          <strong>{item.value}</strong>
-                        </div>
-                      ))}
-                    </aside>
-                  </article>
-                );
-              })}
+                  ))}
+                </div>
+              </div>
             </div>
           ) : (
             <div className="alert-center-empty">{emptyStateText}</div>

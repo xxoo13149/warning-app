@@ -1,4 +1,16 @@
 export type Side = 'BUY' | 'SELL';
+export type OrderBookLiquidityEdgeSource = 'price_change' | 'book' | 'fallback';
+export type LiquidityBookSide = 'buy' | 'sell';
+
+export interface OrderBookEdgeSnapshot {
+  previousPrice: number;
+  previousSize: number | null;
+  currentPrice: number | null;
+  currentSize: number | null;
+  levelCountAfter: number;
+  visibleSizeAfter: number;
+  source: OrderBookLiquidityEdgeSource;
+}
 
 export interface CityConfig {
   cityKey: string;
@@ -203,11 +215,22 @@ export interface ShardStatusEvent {
 export interface TokenRuntimeState {
   tokenId: string;
   bestBid?: number;
+  bestBidSize?: number;
   bestAsk?: number;
+  bestAskSize?: number;
   lastTradePrice?: number;
+  lastTradeSide?: LiquidityBookSide;
+  lastTradeSize?: number;
+  lastTradeAt?: number;
   spread?: number;
   bookBestBid?: number;
   bookBestAsk?: number;
+  bidLevelCount?: number;
+  askLevelCount?: number;
+  bidVisibleSize?: number;
+  askVisibleSize?: number;
+  removedBidEdge?: OrderBookEdgeSnapshot;
+  removedAskEdge?: OrderBookEdgeSnapshot;
   lastEventType?: string;
   updatedAt: number;
 }

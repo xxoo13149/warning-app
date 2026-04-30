@@ -23,6 +23,7 @@ vi.mock('../../src/core/db/repository', () => {
     insertPriceTicks = vi.fn(() => undefined);
     prunePriceTicks = vi.fn(() => 0);
     pruneAlertEvents = vi.fn(() => 0);
+    queryRecentAlertEventsForScoring = vi.fn(() => []);
     checkpointWal = vi.fn(() => undefined);
     compactDatabase = vi.fn(() => undefined);
 

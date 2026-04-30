@@ -28,6 +28,7 @@ import { detectSystemProxyUrl } from './services/system-proxy';
 import { AppTray } from './services/tray-service';
 import { createRuntimeLogger } from './services/runtime-log';
 import { LifecycleRunGate } from './services/lifecycle-run-gate';
+import { RuntimeMemoryTelemetryService } from './services/runtime-memory-telemetry';
 import {
   APPLICATION_QUITTING_REASON,
   deriveStartupProgressPhase,
@@ -183,6 +184,7 @@ export const bootstrapAppShell = async (runtimePaths: RuntimePaths): Promise<voi
     runtimePaths.logsDir,
     'notification',
   );
+  const runtimeMemoryTelemetry = new RuntimeMemoryTelemetryService();
 
   const audioWindow = new HiddenAudioWindow();
   const tray = new AppTray();
@@ -272,6 +274,13 @@ export const bootstrapAppShell = async (runtimePaths: RuntimePaths): Promise<voi
   const emitRuntimeSnapshot = (): void => {
     emitEvent('app.controlState', getState().controlState);
     emitEvent('app.health', getState().health);
+  };
+
+  const attachMemoryTelemetry = (
+    health: RuntimeState['health'],
+  ): RuntimeState['health'] => {
+    const memoryTelemetry = runtimeMemoryTelemetry.getLatestSnapshot();
+    return memoryTelemetry ? { ...health, memoryTelemetry } : health;
   };
 
   const runTrayRuntimeAction = async (
@@ -393,12 +402,13 @@ export const bootstrapAppShell = async (runtimePaths: RuntimePaths): Promise<voi
   };
 
   const setHealth = (nextHealth: RuntimeState['health']): void => {
+    const healthWithTelemetry = attachMemoryTelemetry(nextHealth);
     setState((previous) => ({
       ...previous,
-      health: nextHealth,
+      health: healthWithTelemetry,
     }));
-    emitEvent('app.health', nextHealth);
-    syncStartupStatusWithHealth(nextHealth);
+    emitEvent('app.health', healthWithTelemetry);
+    syncStartupStatusWithHealth(healthWithTelemetry);
   };
 
   const updateStartupStatus = (
@@ -982,6 +992,11 @@ export const bootstrapAppShell = async (runtimePaths: RuntimePaths): Promise<voi
       showWindow(shellState.mainWindow);
       focusMainWindowOnReady = false;
     }
+    void runtimeMemoryTelemetry
+      .captureSnapshot()
+      .then(() => {
+        setHealth(getState().health);
+      });
     audioWindow.create();
 
     tray.create({
@@ -1007,6 +1022,7 @@ export const bootstrapAppShell = async (runtimePaths: RuntimePaths): Promise<voi
     detachRuntimeEventForwarders = registerIpcHandlers({
       coreClient,
       runtimePaths,
+      memoryTelemetryService: runtimeMemoryTelemetry,
       getRuntimeState: getState,
       setRuntimeState: setState,
       setRuntimeHealth: setHealth,

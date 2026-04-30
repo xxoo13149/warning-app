@@ -115,6 +115,24 @@ afterEach(async () => {
 });
 
 describe('AlertCenterView', () => {
+  it('virtualizes long alert histories instead of rendering every card at once', async () => {
+    const alerts = Array.from({ length: 40 }, (_, index) =>
+      buildAlert(String(index + 1), {
+        triggeredAt: new Date(Date.UTC(2026, 3, 24, 1, 0, 40 - index)).toISOString(),
+      }),
+    );
+
+    await renderView({
+      alerts,
+      total: alerts.length,
+    });
+
+    const renderedCards = container?.querySelectorAll('.alert-center-card') ?? [];
+    expect(renderedCards.length).toBeGreaterThan(0);
+    expect(renderedCards.length).toBeLessThan(alerts.length);
+    expect(container?.textContent).toContain('market-1');
+  });
+
   it('keeps a clickable load-more path when filters temporarily empty the visible alerts', async () => {
     const onLoadMore = vi.fn();
     const alerts = [
@@ -130,7 +148,7 @@ describe('AlertCenterView', () => {
     });
 
     await clickButton('北京');
-    await clickButton('流动性骤降');
+    await clickButton('盘口斩杀');
 
     expect(container?.querySelectorAll('.alert-center-card').length).toBe(0);
     expect(container?.textContent).toContain('继续加载更早历史');

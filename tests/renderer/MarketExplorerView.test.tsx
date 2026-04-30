@@ -41,7 +41,14 @@ const buildMarket = (index: number, overrides: Partial<MarketRow> = {}): MarketR
   };
 };
 
-const renderView = async (rows: MarketRow[], query: MarketQuery = {}) => {
+const renderView = async (
+  rows: MarketRow[],
+  query: MarketQuery = {},
+  handlers: Partial<{
+    onQueryChange: (next: Partial<MarketQuery>) => void;
+    onRefresh: () => void;
+  }> = {},
+) => {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -52,8 +59,8 @@ const renderView = async (rows: MarketRow[], query: MarketQuery = {}) => {
           rows={rows}
           total={rows.length}
           query={query}
-          onQueryChange={vi.fn()}
-          onRefresh={vi.fn()}
+          onQueryChange={handlers.onQueryChange ?? vi.fn()}
+          onRefresh={handlers.onRefresh ?? vi.fn()}
         />
       </LocaleProvider>,
     );
@@ -79,7 +86,7 @@ describe('MarketExplorerView', () => {
 
     expect(view.querySelectorAll('.market-city-group')).toHaveLength(8);
     expect(view.querySelectorAll('.market-band')).toHaveLength(48);
-    expect(view.textContent).toContain('输入城市、机场代码或中文名继续筛选');
+    expect(view.querySelectorAll('.market-explorer-limit-hint').length).toBeGreaterThan(0);
 
     const preciseButton = view.querySelectorAll('.market-explorer-view-toggle button')[1];
     await act(async () => {
@@ -87,6 +94,43 @@ describe('MarketExplorerView', () => {
     });
 
     expect(view.querySelectorAll('tbody .market-table-row')).toHaveLength(80);
-    expect(view.textContent).toContain('精确列表已限制展示前 80 行');
+    expect(view.querySelectorAll('.market-explorer-limit-hint').length).toBeGreaterThan(0);
+  });
+
+  it('exposes a lottery preset and highlights ultra-low-price lift details', async () => {
+    const onQueryChange = vi.fn();
+    const rows = [
+      buildMarket(0, {
+        lotteryCandidate: true,
+        lotteryReferenceAsk: 0.02,
+        lotteryCurrentAsk: 0.05,
+        lotteryLift: 0.03,
+        lotteryConfirmationSource: 'trade_confirmed',
+        lotteryEffectiveSize: 120,
+        lotteryEffectiveNotional: 6,
+        lotteryUpdatedAt: '2026-04-25T00:05:00.000Z',
+      }),
+      buildMarket(1),
+    ];
+
+    const view = await renderView(rows, {}, { onQueryChange });
+
+    expect(view.querySelector('.market-band__badge--lottery')?.textContent).toContain('+');
+    expect(view.querySelector('.market-inspector__lottery')).not.toBeNull();
+
+    const lotteryPreset = view.querySelectorAll('.market-explorer-preset')[1];
+    await act(async () => {
+      lotteryPreset?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(onQueryChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        lotteryOnly: true,
+        watchlistedOnly: undefined,
+        side: undefined,
+        sortBy: 'lotteryLift',
+        sortDir: 'desc',
+      }),
+    );
   });
 });

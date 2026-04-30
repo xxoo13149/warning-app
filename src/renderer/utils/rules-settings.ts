@@ -168,14 +168,16 @@ const BUILTIN_RULE_NAME_FALLBACKS: Record<NonNullable<AlertRule['builtinKey']>, 
   price_change_5m: '5 分钟价格异动',
   spread_threshold: '买卖价差过宽',
   feed_stale: '数据停更提醒',
-  liquidity_kill: '流动性骤降',
+  liquidity_kill: '盘口斩杀',
+  volume_pricing: '带量定价',
 };
 
 export const RULE_METRIC_LABELS: Record<AlertRule['metric'], string> = {
   price: '价格',
   change5m: '5 分钟涨跌幅',
   spread: '买卖价差',
-  liquidity_kill: '流动性骤降',
+  liquidity_kill: '盘口斩杀',
+  volume_pricing: '带量定价',
   bidask_gap: '买卖盘缺口',
   new_market: '新市场上线',
   resolved: '市场已结算',
@@ -239,6 +241,21 @@ const RULE_TEMPLATE_DEFINITIONS = [
       cooldownSec: 180,
       dedupeWindowSec: 90,
       bubbleWeight: 70,
+      severity: 'warning',
+    },
+  },
+  {
+    key: 'volume-pricing',
+    label: '带量定价',
+    description: '卖一在短时间内被推高，并且有成交或盘口量确认时提醒。',
+    overrides: {
+      metric: 'volume_pricing',
+      operator: '>=',
+      threshold: 0.1,
+      windowSec: 60,
+      cooldownSec: 180,
+      dedupeWindowSec: 60,
+      bubbleWeight: 80,
       severity: 'warning',
     },
   },
@@ -321,13 +338,30 @@ const BUILTIN_RULE_DEFAULTS: Omit<AlertRule, 'soundProfileId'>[] = [
     isBuiltin: true,
     builtinKey: 'liquidity_kill',
     metric: 'liquidity_kill',
-    operator: '<=',
-    threshold: 0.01,
-    windowSec: 60,
-    cooldownSec: 180,
-    dedupeWindowSec: 90,
+    operator: '>=',
+    threshold: 0.2,
+    windowSec: 30,
+    cooldownSec: 120,
+    dedupeWindowSec: 60,
     bubbleWeight: 90,
     severity: 'critical',
+    enabled: true,
+    liquiditySide: 'both',
+    scope: {},
+  },
+  {
+    id: 'volume-pricing',
+    name: formatBuiltinRuleNameZh('volume_pricing') ?? BUILTIN_RULE_NAME_FALLBACKS.volume_pricing,
+    isBuiltin: true,
+    builtinKey: 'volume_pricing',
+    metric: 'volume_pricing',
+    operator: '>=',
+    threshold: 0.1,
+    windowSec: 60,
+    cooldownSec: 180,
+    dedupeWindowSec: 60,
+    bubbleWeight: 80,
+    severity: 'warning',
     enabled: true,
     scope: {},
   },
@@ -353,6 +387,17 @@ const formatRuleSideLabel = (side: OrderSide) => {
       return '否';
     default:
       return '双边';
+  }
+};
+
+export const formatLiquiditySideLabel = (side: AlertRule['liquiditySide']) => {
+  switch (side) {
+    case 'buy':
+      return '买盘';
+    case 'sell':
+      return '卖盘';
+    default:
+      return '买卖盘';
   }
 };
 
@@ -402,6 +447,7 @@ export const normalizeRuleDraft = (rule: AlertRule): AlertRule => {
   const nextRule: AlertRule = {
     ...rule,
     name: cleanText(rule.name),
+    operator: rule.metric === 'liquidity_kill' || rule.metric === 'volume_pricing' ? '>=' : rule.operator,
     threshold: Number.isFinite(rule.threshold) ? rule.threshold : 0,
     windowSec: Number.isFinite(rule.windowSec) ? Math.max(1, Math.trunc(rule.windowSec)) : 60,
     cooldownSec: Number.isFinite(rule.cooldownSec) ? Math.max(0, Math.trunc(rule.cooldownSec)) : 60,
@@ -411,6 +457,12 @@ export const normalizeRuleDraft = (rule: AlertRule): AlertRule => {
     bubbleWeight: Number.isFinite(rule.bubbleWeight) ? Math.max(0, rule.bubbleWeight) : 60,
     severity: UNIFIED_RULE_SEVERITY,
     soundProfileId: cleanText(rule.soundProfileId),
+    liquiditySide:
+      rule.liquiditySide === 'buy' || rule.liquiditySide === 'sell' || rule.liquiditySide === 'both'
+        ? rule.liquiditySide
+        : rule.metric === 'liquidity_kill'
+          ? 'both'
+          : undefined,
     scope: normalizeScope(rule.scope),
   };
 
@@ -539,6 +591,7 @@ const formatRuleThresholdValue = (rule: AlertRule) => {
   switch (rule.metric) {
     case 'price':
     case 'liquidity_kill':
+    case 'volume_pricing':
       return `${Math.round(rule.threshold * 100)} 分`;
     case 'spread':
       return `${(rule.threshold * 100).toFixed(1).replace(/\.0$/, '')}%`;
@@ -563,7 +616,9 @@ export const buildRuleConditionSummary = (rule: AlertRule) => {
     case 'spread':
       return `买卖价差${operatorLabel}${thresholdLabel}时提醒`;
     case 'liquidity_kill':
-      return `流动性指标${operatorLabel}${thresholdLabel}时提醒`;
+      return `${formatLiquiditySideLabel(rule.liquiditySide)}顶档被清空，且被清空价位${operatorLabel}${thresholdLabel}时提醒`;
+    case 'volume_pricing':
+      return `卖一在${formatRuleDuration(rule.windowSec)}内带量推高${operatorLabel}${thresholdLabel}时提醒`;
     case 'bidask_gap':
       return `买卖盘缺口${operatorLabel}${thresholdLabel}时提醒`;
     case 'new_market':
@@ -1060,6 +1115,7 @@ const RULE_GROUP_ORDER: Record<RuleDraftGroupKey, readonly string[]> = {
     'change5m',
     'spread',
     'liquidity_kill',
+    'volume_pricing',
     'bidask_gap',
     'new_market',
     'resolved',

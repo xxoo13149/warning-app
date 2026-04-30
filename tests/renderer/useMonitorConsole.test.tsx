@@ -4,7 +4,10 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { useMonitorConsole } from '../../src/renderer/hooks/useMonitorConsole';
+import {
+  ALERT_RENDER_BUFFER_LIMIT,
+  useMonitorConsole,
+} from '../../src/renderer/hooks/useMonitorConsole';
 import { LocaleProvider } from '../../src/renderer/i18n';
 import type {
   AppControlState,
@@ -815,6 +818,69 @@ describe('useMonitorConsole market hydration', () => {
     expect(latestState?.alerts).toEqual([incomingAlertB, incomingAlertA, firstAlert, secondAlert]);
     expect(latestState?.alertsTotal).toBe(4);
     expect(latestState?.alertsHasMore).toBe(false);
+  });
+
+  it('caps the live alert buffer while keeping older history pageable', async () => {
+    queueResponses(
+      'alerts.list',
+      {
+        rows: [],
+        total: 0,
+        hasMore: false,
+      } satisfies AlertListResult,
+      {
+        rows: [
+          buildAlert({
+            id: 'alert-backfill',
+            triggeredAt: '2026-04-22T23:59:00.000Z',
+          }),
+        ],
+        total: ALERT_RENDER_BUFFER_LIMIT + 6,
+        hasMore: false,
+      } satisfies AlertListResult,
+    );
+
+    await renderHarness();
+
+    await act(async () => {
+      for (let index = 0; index < ALERT_RENDER_BUFFER_LIMIT + 5; index += 1) {
+        emit(
+          'alerts.new',
+          buildAlert({
+            id: `alert-live-${index + 1}`,
+            triggeredAt: new Date(Date.UTC(2026, 3, 23, 0, 0, index)).toISOString(),
+          }),
+        );
+      }
+      await vi.advanceTimersByTimeAsync(120);
+    });
+    await flushAsyncWork();
+
+    expect(latestState?.alerts).toHaveLength(ALERT_RENDER_BUFFER_LIMIT);
+    expect(latestState?.alertsTotal).toBe(ALERT_RENDER_BUFFER_LIMIT + 5);
+    expect(latestState?.alertsHasMore).toBe(true);
+
+    const oldestRetainedAlert = latestState?.alerts.at(-1);
+    expect(oldestRetainedAlert).toBeTruthy();
+
+    await act(async () => {
+      await latestState?.loadMoreAlerts();
+      await Promise.resolve();
+    });
+    await flushAsyncWork();
+
+    const alertListCalls = invokeMock.mock.calls.filter(([channel]) => channel === 'alerts.list');
+    expect(alertListCalls).toHaveLength(2);
+    expect(alertListCalls[1]?.[1]).toEqual({
+      limit: 200,
+      cursor: {
+        triggeredAt: oldestRetainedAlert?.triggeredAt,
+        id: oldestRetainedAlert?.id,
+      },
+    });
+    expect(latestState?.alerts).toHaveLength(ALERT_RENDER_BUFFER_LIMIT);
+    expect(latestState?.alertsTotal).toBe(ALERT_RENDER_BUFFER_LIMIT + 6);
+    expect(latestState?.alerts.at(-1)?.id).toBe('alert-backfill');
   });
 
   it('creates a storage backup and refreshes the storage summary state', async () => {

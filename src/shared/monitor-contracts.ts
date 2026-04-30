@@ -8,6 +8,8 @@ import type {
 export type FeedMode = 'live' | 'mock' | 'degraded';
 export type Severity = 'info' | 'warning' | 'critical';
 export type OrderSide = 'YES' | 'NO' | 'BOTH';
+export type OrderbookLiquiditySide = 'buy' | 'sell' | 'both';
+export type LotteryConfirmationSource = 'trade_confirmed' | 'edge_volume' | 'book_depth';
 export type AppLanguage = 'zh-CN' | 'en-US';
 export type DashboardScope = 'risk' | 'watchlist' | 'alerts';
 export type HealthErrorSource =
@@ -59,6 +61,76 @@ export interface ServiceStatusSnapshot {
   lastErrorSource?: HealthErrorSource | null;
 }
 
+export interface RuntimeMemoryProcessInfo {
+  privateKb: number;
+  residentSetKb: number | null;
+  sharedKb: number;
+}
+
+export interface RuntimeMemoryWorkingSetInfo {
+  workingSetKb: number;
+  peakWorkingSetKb: number;
+  privateBytesKb: number | null;
+}
+
+export interface RuntimeBlinkMemoryInfo {
+  allocatedKb: number;
+  totalKb: number;
+}
+
+export interface RuntimeBrowserMemoryTelemetry {
+  sampledAt: string;
+  pid: number;
+  creationTime: number | null;
+  cpuPercent: number | null;
+  processMemory: RuntimeMemoryProcessInfo | null;
+  appMetrics: RuntimeMemoryWorkingSetInfo | null;
+}
+
+export interface RuntimeTabMemoryTelemetry {
+  sampledAt: string;
+  pid: number;
+  name: string | null;
+  serviceName: string | null;
+  creationTime: number;
+  cpuPercent: number;
+  sandboxed: boolean | null;
+  integrityLevel: string | null;
+  memory: RuntimeMemoryWorkingSetInfo;
+}
+
+export interface RuntimeRendererMemoryTelemetry {
+  sampledAt: string;
+  pid: number;
+  webContentsId: number | null;
+  browserWindowId: number | null;
+  url: string | null;
+  title: string | null;
+  hidden: boolean;
+  visibilityState: string;
+  processMemory: RuntimeMemoryProcessInfo | null;
+  blinkMemory: RuntimeBlinkMemoryInfo | null;
+  appMetrics: RuntimeMemoryWorkingSetInfo | null;
+  cpuPercent: number | null;
+  creationTime: number | null;
+}
+
+export interface RuntimeMemoryTelemetry {
+  sampledAt: string;
+  browser: RuntimeBrowserMemoryTelemetry | null;
+  tabs: RuntimeTabMemoryTelemetry[];
+  renderer: RuntimeRendererMemoryTelemetry | null;
+}
+
+export interface RuntimeRendererMemoryReport {
+  sampledAt: string;
+  pid: number;
+  hidden: boolean;
+  visibilityState: string;
+  processMemory: RuntimeMemoryProcessInfo | null;
+  blinkMemory: RuntimeBlinkMemoryInfo | null;
+}
+
 export interface AppHealth {
   connected: boolean;
   mode: FeedMode;
@@ -74,6 +146,7 @@ export interface AppHealth {
   diagnostic?: string | null;
   errorSource?: HealthErrorSource | null;
   serviceStatus?: ServiceStatusSnapshot;
+  memoryTelemetry?: RuntimeMemoryTelemetry;
 }
 
 export interface AppControlState {
@@ -120,6 +193,14 @@ export interface MarketRow {
   bubbleUpdatedAt: string;
   updatedAt: string;
   watchlisted: boolean;
+  lotteryCandidate?: boolean;
+  lotteryReferenceAsk?: number | null;
+  lotteryCurrentAsk?: number | null;
+  lotteryLift?: number | null;
+  lotteryConfirmationSource?: LotteryConfirmationSource | null;
+  lotteryEffectiveSize?: number | null;
+  lotteryEffectiveNotional?: number | null;
+  lotteryUpdatedAt?: string | null;
 }
 
 export interface CityBubbleMarketPreview {
@@ -228,6 +309,7 @@ export interface AlertRule {
     | 'change5m'
     | 'spread'
     | 'liquidity_kill'
+    | 'volume_pricing'
     | 'bidask_gap'
     | 'new_market'
     | 'resolved'
@@ -241,6 +323,7 @@ export interface AlertRule {
   severity: Severity;
   enabled: boolean;
   soundProfileId: string;
+  liquiditySide?: OrderbookLiquiditySide;
   scope: {
     cityKey?: string;
     seriesSlug?: string;
@@ -383,6 +466,7 @@ export interface RuntimeDiagnosticsPackage {
     nodeVersion: string;
     electronVersion: string | null;
   };
+  memoryTelemetry?: RuntimeMemoryTelemetry;
   logs: {
     directory: string;
     fileCount: number;
@@ -407,8 +491,9 @@ export interface MarketQuery {
   eventDate?: string;
   side?: OrderSide;
   watchlistedOnly?: boolean;
+  lotteryOnly?: boolean;
   limit?: number;
-  sortBy?: 'volume24h' | 'change5m' | 'spread' | 'updatedAt';
+  sortBy?: 'volume24h' | 'change5m' | 'spread' | 'updatedAt' | 'lotteryLift';
   sortDir?: 'asc' | 'desc';
 }
 
