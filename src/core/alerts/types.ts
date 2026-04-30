@@ -13,7 +13,8 @@ export type AlertMetric =
   | 'spread_threshold'
   | 'feed_stale'
   | 'liquidity_kill'
-  | 'volume_pricing';
+  | 'volume_pricing'
+  | 'abnormal_lottery';
 
 export type AlertOperator =
   | '>'

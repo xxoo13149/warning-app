@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import type { FeedSnapshot, MarketStateStore, MarketTickSnapshot } from '../state';
 import { matchesScope, isInQuietHours } from './scope';
+import {
+  resolveAbnormalLotterySignal,
+  type AbnormalLotterySignalSnapshot,
+} from './abnormal-lottery';
 import type {
   AlertOperator,
   AlertRule,
@@ -20,6 +24,7 @@ interface NumericEvaluation {
   effectiveSize?: number;
   effectiveNotional?: number;
   referencePrice?: number;
+  triggerThreshold?: number;
 }
 
 const EPSILON = 1e-9;
@@ -160,6 +165,8 @@ export class AlertEngine {
         return this.evaluateLiquidityKillV2(rule, current, nowMs);
       case 'volume_pricing':
         return this.evaluateVolumePricing(rule, current, nowMs);
+      case 'abnormal_lottery':
+        return this.evaluateAbnormalLottery(rule, current, nowMs);
       default:
         return { triggered: false };
     }
@@ -476,6 +483,27 @@ export class AlertEngine {
     };
   }
 
+  private evaluateAbnormalLottery(
+    rule: AlertRule,
+    current: MarketEvaluationInput,
+    nowMs: number,
+  ): NumericEvaluation {
+    const history = this.stateStore
+      .getHistory(current.tokenId, rule.windowSec * 1000, nowMs)
+      .filter((entry) => entry.timestamp < nowMs);
+    const signal = resolveAbnormalLotterySignal(current, history, {
+      asOfTimestamp: nowMs,
+      windowMs: rule.windowSec * 1000,
+      baseMinLift: rule.threshold,
+      requireSide: 'yes',
+    });
+    if (!signal) {
+      return { triggered: false };
+    }
+
+    return toAbnormalLotteryEvaluation(signal);
+  }
+
   private evaluateFeedRule(rule: AlertRule, feed: FeedSnapshot, nowMs: number): NumericEvaluation {
     const lagSec = (nowMs - feed.lastMessageAt) / 1000;
     return compareWithOperator(lagSec, rule.operator, rule.threshold);
@@ -566,6 +594,24 @@ export class AlertEngine {
             outcome: input.side ?? null,
             side: evaluation.side,
             threshold: rule.threshold,
+            actual: evaluation.actual,
+            previous: evaluation.previous,
+            source: evaluation.source,
+            reason: evaluation.reason,
+            effectiveSize: evaluation.effectiveSize,
+            effectiveNotional: evaluation.effectiveNotional,
+            referencePrice: evaluation.referencePrice,
+            windowSec: rule.windowSec,
+          },
+        };
+      }
+      case 'abnormal_lottery': {
+        return {
+          messageKey: 'abnormal_lottery',
+          messageParams: {
+            outcome: input.side ?? null,
+            side: evaluation.side,
+            threshold: evaluation.triggerThreshold ?? rule.threshold,
             actual: evaluation.actual,
             previous: evaluation.previous,
             source: evaluation.source,
@@ -782,6 +828,21 @@ function resolveVolumePricingConfirmation(
 
 function normalizeVolumePricingOperator(_operator: AlertOperator): AlertOperator {
   return '>=';
+}
+
+function toAbnormalLotteryEvaluation(signal: AbnormalLotterySignalSnapshot): NumericEvaluation {
+  return {
+    triggered: true,
+    actual: signal.currentAsk,
+    previous: signal.referenceAsk,
+    side: 'sell',
+    source: signal.confirmationSource,
+    reason: 'ultra_low_ask_lifted',
+    effectiveSize: signal.effectiveSize,
+    effectiveNotional: signal.effectiveNotional,
+    referencePrice: signal.referenceAsk,
+    triggerThreshold: signal.minimumLift,
+  };
 }
 
 function normalizeLiquidityKillOperator(_operator: AlertOperator): AlertOperator {

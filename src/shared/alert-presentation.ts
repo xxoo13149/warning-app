@@ -115,6 +115,8 @@ const RULE_LABELS: Record<string, string> = {
   'liquidity-kill': '盘口斩杀',
   volume_pricing: '带量定价',
   'volume-pricing': '带量定价',
+  abnormal_lottery: '异常彩票',
+  'abnormal-lottery': '异常彩票',
   system_error: '系统异常',
   'worker-error': '系统异常',
 };
@@ -226,6 +228,9 @@ const getAlertKey = (alert: AlertPresentationSource) => {
   }
   if (ruleKey.includes('volume_pricing') || ruleKey.includes('volumepricing')) {
     return 'volume_pricing';
+  }
+  if (ruleKey.includes('abnormal_lottery') || ruleKey.includes('abnormallottery')) {
+    return 'abnormal_lottery';
   }
   if (ruleKey.includes('spread')) {
     return 'spread_threshold';
@@ -496,11 +501,37 @@ const buildReasonText = (alert: AlertPresentationSource) => {
         return cause ? `${target}出现盘口斩杀（${cause}）` : `${target}出现盘口斩杀`;
       }
     case 'volume_pricing':
+    case 'abnormal_lottery':
       {
         const outcome = getLiquidityOutcome(alert);
         const prefix = outcome ? `${outcome} ` : '';
         const cause = getVolumePricingCauseText(alert);
         const volume = getEffectiveVolumeText(alert);
+        /*
+        if (key === 'abnormal_lottery') {
+          if (hasValue(previous) && hasValue(actual)) {
+            return volume
+              ? `${prefix}超低价卖一从 ${formatCents(previous)} 推高到 ${formatCents(actual)}，${cause} ${volume}`
+              : `${prefix}超低价卖一从 ${formatCents(previous)} 推高到 ${formatCents(actual)}，${cause}`;
+          }
+          return `${prefix}超低价卖一被快速推高，${cause}`;
+        }
+        const subject = key === 'abnormal_lottery' ? '瓒呬綆浠峰崠涓€' : '鍗栦竴';
+        if (hasValue(previous) && hasValue(actual)) {
+          return volume
+            ? `${prefix}卖一从 ${formatCents(previous)} 推高到 ${formatCents(actual)}，${cause} ${volume}`
+            : `${prefix}卖一从 ${formatCents(previous)} 推高到 ${formatCents(actual)}，${cause}`;
+        }
+        return `${prefix}卖一被带量推高，${cause}`;
+        */
+        if (key === 'abnormal_lottery') {
+          if (hasValue(previous) && hasValue(actual)) {
+            return volume
+              ? `${prefix}超低价卖一从 ${formatCents(previous)} 推高到 ${formatCents(actual)}，${cause} ${volume}`
+              : `${prefix}超低价卖一从 ${formatCents(previous)} 推高到 ${formatCents(actual)}，${cause}`;
+          }
+          return `${prefix}超低价卖一被快速推高，${cause}`;
+        }
         if (hasValue(previous) && hasValue(actual)) {
           return volume
             ? `${prefix}卖一从 ${formatCents(previous)} 推高到 ${formatCents(actual)}，${cause} ${volume}`
@@ -573,6 +604,12 @@ const buildFacts = (alert: AlertPresentationSource) => {
     pushFact(facts, '当前边缘价', formatCents(actual), 'strong');
     pushFact(facts, '被清空前', formatCents(previous));
     pushFact(facts, '事件归因', getLiquidityCauseText(alert));
+  } else if (key === 'abnormal_lottery') {
+    pushFact(facts, '监控合约', `${getLiquidityOutcome(alert) || 'YES/NO'} 超低价卖一`);
+    pushFact(facts, '异常价', formatCents(actual), 'strong');
+    pushFact(facts, '参考价', formatCents(previous));
+    pushFact(facts, '有效量', getEffectiveVolumeText(alert));
+    pushFact(facts, '确认方式', getVolumePricingCauseText(alert));
   } else if (key === 'volume_pricing') {
     pushFact(facts, '监控合约', `${getLiquidityOutcome(alert) || 'YES/NO'} 卖一`);
     pushFact(facts, '带量价', formatCents(actual), 'strong');
@@ -663,6 +700,22 @@ const buildNotificationValueParts = (alert: AlertPresentationSource) => {
           : [`${prefix} ${formatCents(actual)}`];
       }
       return cause ? [cause] : [];
+    }
+    case 'abnormal_lottery': {
+      const outcome = getLiquidityOutcome(alert);
+      const prefix = outcome ? `${outcome} 超低价卖一` : '超低价卖一';
+      const parts: string[] = [];
+      if (hasValue(previous) && hasValue(actual)) {
+        parts.push(`${prefix} ${formatCents(previous)} -> ${formatCents(actual)}`);
+      } else if (hasValue(actual)) {
+        parts.push(`${prefix} ${formatCents(actual)}`);
+      }
+      const volume = getEffectiveVolumeText(alert);
+      if (volume) {
+        parts.push(`有效量 ${volume}`);
+      }
+      parts.push(getVolumePricingCauseText(alert));
+      return parts;
     }
     case 'volume_pricing': {
       const outcome = getLiquidityOutcome(alert);

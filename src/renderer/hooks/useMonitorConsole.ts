@@ -447,7 +447,6 @@ const normalizeMarketQuery = (query: MarketQuery): MarketQuery => ({
   eventDate: query.eventDate,
   side: query.side,
   watchlistedOnly: query.watchlistedOnly,
-  lotteryOnly: query.lotteryOnly,
   limit: normalizeMarketLimit(query.limit),
   sortBy: query.sortBy ?? 'updatedAt',
   sortDir: query.sortDir ?? 'desc',
@@ -458,7 +457,6 @@ const isSameMarketQuery = (left: MarketQuery, right: MarketQuery): boolean =>
   left.eventDate === right.eventDate &&
   left.side === right.side &&
   left.watchlistedOnly === right.watchlistedOnly &&
-  left.lotteryOnly === right.lotteryOnly &&
   left.limit === right.limit &&
   left.sortBy === right.sortBy &&
   left.sortDir === right.sortDir;
@@ -1275,7 +1273,6 @@ export const useMonitorConsole = (): MonitorConsoleState => {
     marketQuery.cityKey,
     marketQuery.eventDate,
     marketQuery.limit,
-    marketQuery.lotteryOnly,
     marketQuery.side,
     marketQuery.sortBy,
     marketQuery.sortDir,

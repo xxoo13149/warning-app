@@ -5,7 +5,8 @@ export type BuiltinRuleKey =
   | 'spread_threshold'
   | 'feed_stale'
   | 'liquidity_kill'
-  | 'volume_pricing';
+  | 'volume_pricing'
+  | 'abnormal_lottery';
 
 export type AlertMessageKey =
   | 'price_threshold'
@@ -13,6 +14,7 @@ export type AlertMessageKey =
   | 'price_change_pct'
   | 'liquidity_kill'
   | 'volume_pricing'
+  | 'abnormal_lottery'
   | 'feed_stale'
   | 'system_error';
 
@@ -22,6 +24,7 @@ export type AlertMetricKey =
   | 'spread'
   | 'liquidity_kill'
   | 'volume_pricing'
+  | 'abnormal_lottery'
   | 'bidask_gap'
   | 'new_market'
   | 'resolved'
@@ -122,6 +125,15 @@ export const metricMeta: Record<AlertMetricKey, LocalizedMeta> = {
     descriptionZh: '当卖一价格在短时间内被明显推高，并且有成交或盘口量确认时触发。',
     descriptionEn: 'Triggers when the best ask is lifted quickly with trade or depth confirmation.',
   },
+  abnormal_lottery: {
+    zh: '寮傚父褰╃エ',
+    en: 'Abnormal Lottery',
+    zhAlias: 'abnormal_lottery',
+    enAlias: 'abnormal_lottery',
+    descriptionZh: '褰撹秴浣庝环 YES 鍗栦竴琚揩閫熸帹楂樹笖鏈夐噺纭鏃惰Е鍙戯紝浣庝环瓒婁綆瓒婃洿鏁忔劅銆?',
+    descriptionEn:
+      'Triggers when an ultra-low YES ask is rapidly lifted with confirmation, using lower-price-sensitive thresholds.',
+  },
   bidask_gap: {
     zh: '买卖盘缺口',
     en: 'Bid/Ask Gap',
@@ -205,6 +217,15 @@ export const builtinRuleMeta: Record<BuiltinRuleKey, LocalizedMeta> = {
     enAlias: 'volume_pricing',
     descriptionZh: '监控卖一被快速推高且有成交或盘口量支撑的重新定价。',
     descriptionEn: 'Monitors fast ask repricing backed by trade or order book size.',
+  },
+  abnormal_lottery: {
+    zh: '寮傚父褰╃エ',
+    en: 'Abnormal Lottery',
+    zhAlias: 'abnormal_lottery',
+    enAlias: 'abnormal_lottery',
+    descriptionZh: '鐩戞帶瓒呬綆浠?YES 鍗栦竴琚揩閫熸帹楂樼殑寮傚父浜嬩欢锛屽苟瀵逛綆浠锋洿鏁忔劅銆?',
+    descriptionEn:
+      'Monitors ultra-low YES asks that are rapidly repriced upward, with extra sensitivity at lower prices.',
   },
 };
 
@@ -452,6 +473,29 @@ const formatMessageBody = (
             params.previous,
             locale,
           )} to ${formatCents(params.actual, locale)} (${sourceText}, ${sizeText} / ${notionalText})`;
+    }
+    case 'abnormal_lottery': {
+      const sourceText = formatVolumePricingSource(params.source, locale);
+      const sizeText = formatSize(params.effectiveSize, locale);
+      const notionalText = formatUsd(params.effectiveNotional, locale);
+      return locale === 'zh-CN'
+        ? `${marketLabel}${formatOutcomeSide(params.outcome, locale)}寮傚父褰╃エ锛氳秴浣庝环鍗栦竴浠?${formatCents(
+            params.previous,
+            locale,
+          )} 鎺ㄩ珮鍒?${formatCents(params.actual, locale)}锛岃Е鍙戦槇鍊?${formatCents(
+            params.threshold,
+            locale,
+          )}锛?{sourceText}锛屾湁鏁堥噺 ${sizeText} / ${notionalText}`
+        : `${marketLabel} ${formatOutcomeSide(
+            params.outcome,
+            locale,
+          )}abnormal lottery repriced from ${formatCents(
+            params.previous,
+            locale,
+          )} to ${formatCents(params.actual, locale)} (trigger ${formatCents(
+            params.threshold,
+            locale,
+          )}, ${sourceText}, ${sizeText} / ${notionalText})`;
     }
     case 'feed_stale':
       return locale === 'zh-CN'

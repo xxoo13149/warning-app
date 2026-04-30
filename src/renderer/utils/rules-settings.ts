@@ -1,5 +1,12 @@
 import { formatBuiltinRuleName } from '../../shared/alert-display';
-import type { AlertRule, MarketRow, OrderSide } from '../types/contracts';
+import type { AlertRule as ContractAlertRule, MarketRow, OrderSide } from '../types/contracts';
+
+export type RuleMetric = ContractAlertRule['metric'] | 'abnormal_lottery';
+export type BuiltinRuleKey = NonNullable<ContractAlertRule['builtinKey']> | 'abnormal_lottery';
+export type AlertRule = Omit<ContractAlertRule, 'metric' | 'builtinKey'> & {
+  metric: RuleMetric;
+  builtinKey?: BuiltinRuleKey;
+};
 
 export interface RuleScopeFilters {
   cityKey: string;
@@ -170,6 +177,7 @@ const BUILTIN_RULE_NAME_FALLBACKS: Record<NonNullable<AlertRule['builtinKey']>, 
   feed_stale: '数据停更提醒',
   liquidity_kill: '盘口斩杀',
   volume_pricing: '带量定价',
+  abnormal_lottery: '异常彩票',
 };
 
 export const RULE_METRIC_LABELS: Record<AlertRule['metric'], string> = {
@@ -178,6 +186,7 @@ export const RULE_METRIC_LABELS: Record<AlertRule['metric'], string> = {
   spread: '买卖价差',
   liquidity_kill: '盘口斩杀',
   volume_pricing: '带量定价',
+  abnormal_lottery: '异常彩票',
   bidask_gap: '买卖盘缺口',
   new_market: '新市场上线',
   resolved: '市场已结算',
@@ -256,6 +265,21 @@ const RULE_TEMPLATE_DEFINITIONS = [
       cooldownSec: 180,
       dedupeWindowSec: 60,
       bubbleWeight: 80,
+      severity: 'warning',
+    },
+  },
+  {
+    key: 'abnormal-lottery',
+    label: '异常彩票',
+    description: '超低价卖一被异常推高，并出现成交、旧档被吃或盘口深度确认时提醒。',
+    overrides: {
+      metric: 'abnormal_lottery',
+      operator: '>=',
+      threshold: 0.03,
+      windowSec: 45,
+      cooldownSec: 180,
+      dedupeWindowSec: 90,
+      bubbleWeight: 85,
       severity: 'warning',
     },
   },
@@ -365,6 +389,22 @@ const BUILTIN_RULE_DEFAULTS: Omit<AlertRule, 'soundProfileId'>[] = [
     enabled: true,
     scope: {},
   },
+  {
+    id: 'abnormal-lottery',
+    name: formatBuiltinRuleNameZh('abnormal_lottery') ?? BUILTIN_RULE_NAME_FALLBACKS.abnormal_lottery,
+    isBuiltin: true,
+    builtinKey: 'abnormal_lottery',
+    metric: 'abnormal_lottery',
+    operator: '>=',
+    threshold: 0.03,
+    windowSec: 45,
+    cooldownSec: 180,
+    dedupeWindowSec: 90,
+    bubbleWeight: 85,
+    severity: 'warning',
+    enabled: true,
+    scope: {},
+  },
 ];
 
 const createRuleId = () =>
@@ -447,7 +487,12 @@ export const normalizeRuleDraft = (rule: AlertRule): AlertRule => {
   const nextRule: AlertRule = {
     ...rule,
     name: cleanText(rule.name),
-    operator: rule.metric === 'liquidity_kill' || rule.metric === 'volume_pricing' ? '>=' : rule.operator,
+    operator:
+      rule.metric === 'liquidity_kill' ||
+      rule.metric === 'volume_pricing' ||
+      rule.metric === 'abnormal_lottery'
+        ? '>='
+        : rule.operator,
     threshold: Number.isFinite(rule.threshold) ? rule.threshold : 0,
     windowSec: Number.isFinite(rule.windowSec) ? Math.max(1, Math.trunc(rule.windowSec)) : 60,
     cooldownSec: Number.isFinite(rule.cooldownSec) ? Math.max(0, Math.trunc(rule.cooldownSec)) : 60,
@@ -592,6 +637,7 @@ const formatRuleThresholdValue = (rule: AlertRule) => {
     case 'price':
     case 'liquidity_kill':
     case 'volume_pricing':
+    case 'abnormal_lottery':
       return `${Math.round(rule.threshold * 100)} 分`;
     case 'spread':
       return `${(rule.threshold * 100).toFixed(1).replace(/\.0$/, '')}%`;
@@ -619,6 +665,8 @@ export const buildRuleConditionSummary = (rule: AlertRule) => {
       return `${formatLiquiditySideLabel(rule.liquiditySide)}顶档被清空，且被清空价位${operatorLabel}${thresholdLabel}时提醒`;
     case 'volume_pricing':
       return `卖一在${formatRuleDuration(rule.windowSec)}内带量推高${operatorLabel}${thresholdLabel}时提醒`;
+    case 'abnormal_lottery':
+      return `超低价盘口异常彩票确认价位${operatorLabel}${thresholdLabel}时提醒`;
     case 'bidask_gap':
       return `买卖盘缺口${operatorLabel}${thresholdLabel}时提醒`;
     case 'new_market':
@@ -1116,6 +1164,7 @@ const RULE_GROUP_ORDER: Record<RuleDraftGroupKey, readonly string[]> = {
     'spread',
     'liquidity_kill',
     'volume_pricing',
+    'abnormal_lottery',
     'bidask_gap',
     'new_market',
     'resolved',

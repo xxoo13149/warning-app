@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import type { AlertRule } from '../../src/renderer/types/contracts';
 import {
+  type AlertRule,
   buildRuleConditionSummary,
   filterRuleDrafts,
   groupRuleDrafts,
@@ -90,5 +90,21 @@ describe('rules settings severity unification', () => {
     expect(normalized.liquiditySide).toBeUndefined();
     expect(buildRuleConditionSummary(normalized)).toContain('带量');
     expect(buildRuleConditionSummary(normalized)).toContain('10');
+  });
+
+  it('normalizes abnormal lottery as a builtin event rule', () => {
+    const normalized = normalizeRuleDraft(
+      createRule({
+        id: 'rule-abnormal-lottery',
+        builtinKey: 'abnormal_lottery',
+        metric: 'abnormal_lottery',
+        operator: '<',
+        threshold: 0.03,
+      }),
+    );
+
+    expect(normalized.operator).toBe('>=');
+    expect(buildRuleConditionSummary(normalized)).toContain('异常彩票');
+    expect(buildRuleConditionSummary(normalized)).toContain('3');
   });
 });

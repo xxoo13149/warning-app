@@ -310,6 +310,7 @@ export interface AlertRule {
     | 'spread'
     | 'liquidity_kill'
     | 'volume_pricing'
+    | 'abnormal_lottery'
     | 'bidask_gap'
     | 'new_market'
     | 'resolved'
@@ -491,9 +492,8 @@ export interface MarketQuery {
   eventDate?: string;
   side?: OrderSide;
   watchlistedOnly?: boolean;
-  lotteryOnly?: boolean;
   limit?: number;
-  sortBy?: 'volume24h' | 'change5m' | 'spread' | 'updatedAt' | 'lotteryLift';
+  sortBy?: 'volume24h' | 'change5m' | 'spread' | 'updatedAt';
   sortDir?: 'asc' | 'desc';
 }
 

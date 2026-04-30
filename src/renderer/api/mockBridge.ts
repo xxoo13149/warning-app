@@ -3,7 +3,6 @@ import type {
   AlertEvent,
   AlertListQuery,
   AlertListResult,
-  AlertRule,
   AppHealth,
   AppSettings,
   DashboardSnapshot,
@@ -33,6 +32,7 @@ import {
 } from '../../shared/constants';
 import { BUILTIN_DEFAULT_SOUND_ID, BUILTIN_SOUND_LIBRARY } from '../../shared/sound-library';
 import {
+  type AlertRule,
   createBuiltinRuleTemplateMap,
   createCustomRule,
   normalizeRuleDrafts,

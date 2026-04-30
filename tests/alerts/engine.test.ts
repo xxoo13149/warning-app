@@ -475,4 +475,88 @@ describe('alert engine for market ticks', () => {
 
     expect(result).toHaveLength(0);
   });
+
+  it('triggers abnormal lottery only for confirmed ultra-low YES ask repricing', () => {
+    const engine = new AlertEngine(new MarketStateStore());
+    const t0 = Date.UTC(2026, 0, 1, 0, 6, 0);
+    const rule: AlertRule = {
+      id: 'rule-abnormal-lottery',
+      name: 'Abnormal lottery',
+      enabled: true,
+      metric: 'abnormal_lottery',
+      operator: '>=',
+      threshold: 0.05,
+      windowSec: 60,
+      cooldownSec: 0,
+      dedupeWindowSec: 0,
+      severity: 'medium',
+    };
+
+    engine.evaluateMarketTick(
+      [rule],
+      {
+        tokenId: 'token-lottery',
+        marketId: 'market-lottery',
+        cityKey: 'nyc',
+        side: 'yes',
+        timestamp: t0,
+        bestAsk: 0.02,
+      },
+      t0,
+    );
+
+    const result = engine.evaluateMarketTick(
+      [rule],
+      {
+        tokenId: 'token-lottery',
+        marketId: 'market-lottery',
+        cityKey: 'nyc',
+        side: 'yes',
+        timestamp: t0 + 30_000,
+        bestAsk: 0.05,
+        askVisibleSize: 150,
+        spread: 0.01,
+        lastMessageAt: t0 + 30_000,
+      },
+      t0 + 30_000,
+    );
+
+    expect(result).toHaveLength(1);
+    expect(result[0].messageKey).toBe('abnormal_lottery');
+    expect(result[0].messageParams).toMatchObject({
+      outcome: 'yes',
+      previous: 0.02,
+      actual: 0.05,
+      threshold: 0.03,
+      source: 'book_depth',
+      effectiveSize: 150,
+    });
+
+    const noSideResult = engine.evaluateMarketTick(
+      [rule],
+      {
+        tokenId: 'token-lottery-no',
+        marketId: 'market-lottery',
+        cityKey: 'nyc',
+        side: 'no',
+        timestamp: t0 + 31_000,
+        bestAsk: 0.05,
+        askVisibleSize: 150,
+        spread: 0.01,
+        lastMessageAt: t0 + 31_000,
+        removedAskEdge: {
+          previousPrice: 0.02,
+          previousSize: 120,
+          currentPrice: 0.05,
+          currentSize: 50,
+          levelCountAfter: 1,
+          visibleSizeAfter: 170,
+          source: 'book',
+        },
+      },
+      t0 + 31_000,
+    );
+
+    expect(noSideResult).toHaveLength(0);
+  });
 });

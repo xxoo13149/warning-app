@@ -12,7 +12,7 @@ import {
   MIN_TICK_RETENTION_DAYS,
 } from '../../shared/constants';
 import type {
-  AlertRule,
+  AlertRule as ContractAlertRule,
   AppControlState,
   AppHealth,
   AppSettings,
@@ -31,6 +31,7 @@ import type {
   SoundProfile,
 } from '../types/contracts';
 import {
+  type AlertRule,
   buildRuleConditionSummary,
   buildRuleEditorScopeOptions,
   buildRuleScopeSummary,
@@ -102,7 +103,7 @@ interface RuleListSignal {
 }
 
 interface RulesSettingsViewProps {
-  rules: AlertRule[];
+  rules: ContractAlertRule[];
   marketRows: MarketRow[];
   latestAlertAtByRuleId: Record<string, string | undefined>;
   health: AppHealth;
@@ -113,8 +114,8 @@ interface RulesSettingsViewProps {
   runtimeAction: RuntimeActionFeedback;
   runtimeIssues?: MonitorRuntimeIssue[];
   soundProfiles: SoundProfile[];
-  onPreviewRule: (rule: AlertRule) => Promise<RulePreviewResult>;
-  onSaveRules: (nextRules: AlertRule[]) => void;
+  onPreviewRule: (rule: ContractAlertRule) => Promise<RulePreviewResult>;
+  onSaveRules: (nextRules: ContractAlertRule[]) => void;
   onUpdateSettings: (patch: Partial<AppSettings>) => Promise<void> | void;
   onPickSound: (id: string) => Promise<void> | void;
   onRegisterSound: (payload?: RegisterSoundPayload) => Promise<void> | void;
@@ -268,6 +269,7 @@ const METRIC_OPTIONS: AlertRule['metric'][] = [
   'spread',
   'liquidity_kill',
   'volume_pricing',
+  'abnormal_lottery',
   'bidask_gap',
   'new_market',
   'resolved',
@@ -362,11 +364,21 @@ const isCurrentTimeInQuietHours = (startText: string, endText: string): boolean 
 const hasNumber = (value: number | null | undefined): value is number =>
   typeof value === 'number' && Number.isFinite(value);
 
+const hasAbnormalLotterySignal = (row: MarketRow) =>
+  row.lotteryCandidate === true && (row.lotteryLift ?? 0) > 0;
+
 const formatCentsText = (value: number | null | undefined) => {
   if (!hasNumber(value)) {
     return '暂无';
   }
   return `${Math.round(value * 100)} 美分`;
+};
+
+const formatCompactCentsText = (value: number | null | undefined) => {
+  if (!hasNumber(value)) {
+    return '--';
+  }
+  return `${Math.round(value * 100)}c`;
 };
 
 const formatPercentText = (value: number | null | undefined) => {
@@ -510,6 +522,29 @@ const formatPreviewSampleQuote = (row: RulePreviewResult['sampleMarkets'][number
   return parts.join(' · ');
 };
 
+const ABNORMAL_LOTTERY_ROUTE_HINT = '1-2c -> 3c, 3-4c -> 4c';
+
+const formatAbnormalLotteryRouteText = (row: MarketRow) => {
+  if (!hasNumber(row.lotteryReferenceAsk) || !hasNumber(row.lotteryCurrentAsk)) {
+    return '暂无';
+  }
+
+  return `${formatCompactCentsText(row.lotteryReferenceAsk)} -> ${formatCompactCentsText(row.lotteryCurrentAsk)}`;
+};
+
+const formatAbnormalLotteryConfirmationText = (row: MarketRow) => {
+  switch (row.lotteryConfirmationSource) {
+    case 'edge_volume':
+      return '旧档被吃确认';
+    case 'trade_confirmed':
+      return '成交确认';
+    case 'book_depth':
+      return '盘口深度确认';
+    default:
+      return '等待确认';
+  }
+};
+
 const buildScopeMarketLabel = (row: MarketRow) =>
   [
     cleanText(row.cityName) || row.cityKey,
@@ -540,6 +575,8 @@ const getRuleCurrentValue = (rule: AlertRule, row: MarketRow) => {
     case 'spread':
     case 'bidask_gap':
       return row.spread;
+    case 'abnormal_lottery':
+      return row.lotteryCurrentAsk ?? row.bestAsk ?? null;
     case 'liquidity_kill':
     case 'volume_pricing':
       return null;
@@ -557,6 +594,8 @@ const formatRuleValue = (rule: AlertRule, value: number | null | undefined) => {
       return formatCentsText(value);
     case 'feed_stale':
       return hasNumber(value) ? `${Math.round(value)} 秒` : '暂无';
+    case 'abnormal_lottery':
+      return formatCentsText(value);
     case 'price':
     case 'liquidity_kill':
     case 'volume_pricing':
@@ -617,6 +656,80 @@ const buildRuleDiagnostic = ({
         : rule.metric === 'feed_stale' && !health.serviceStatus
           ? '当前还没有数据流状态，等监控连接稳定后再判断。'
           : null;
+
+  if (rule.metric === 'abnormal_lottery') {
+    const coverageText = `${scopedRows.length} 个盘口`;
+    const lotteryRows = scopedRows.filter((row) => hasAbnormalLotterySignal(row));
+    const confirmedRows = lotteryRows.filter((row) => Boolean(row.lotteryConfirmationSource));
+    const sampleRow = confirmedRows[0] ?? lotteryRows[0] ?? null;
+    const title = disabledReason
+      ? '暂时不会触发'
+      : latestAlertAt
+        ? '最近捕捉到过异常彩票确认'
+        : confirmedRows.length > 0
+          ? '当前范围已有异常彩票确认'
+          : lotteryRows.length > 0
+            ? '当前范围已有异常彩票候选'
+            : scopedRows.length > 0
+              ? '等待新的异常彩票候选'
+              : '当前范围没有覆盖盘口';
+    const summary =
+      disabledReason ??
+      (scopedRows.length === 0
+        ? '先把范围收敛到真正要看的城市、日期、温区或单个盘口，否则这条规则不会命中。'
+        : lotteryRows.length > 0
+          ? '这条系统规则看的不是模式切换，而是市场本身是否出现超低价卖一被快速推高并拿到确认路径。'
+          : '当前范围内还没有出现异常彩票候选；市场列表里的 badge、route 和 confirmation 会先提供上下文。');
+
+    return {
+      tone: disabledReason ? 'warning' : latestAlertAt || confirmedRows.length > 0 ? 'success' : scopedRows.length > 0 ? 'muted' : 'warning',
+      title,
+      summary,
+      items: [
+        {
+          label: '规则状态',
+          value: rule.enabled ? '已启用' : '已停用',
+          hint: rule.enabled ? '后台会持续监听新的异常彩票候选和确认。' : '开启后才会继续监听异常彩票事件。',
+          tone: rule.enabled ? 'success' : 'danger',
+        },
+        {
+          label: '覆盖盘口',
+          value: coverageText,
+          hint:
+            scopedRows.length > 0
+              ? buildRuleScopeSummary(rule, marketRows)
+              : '当前范围没有任何盘口样本，请先调整范围。',
+          tone: scopedRows.length > 0 ? 'success' : 'warning',
+        },
+        {
+          label: '候选 / 确认',
+          value: `${lotteryRows.length} / ${confirmedRows.length}`,
+          hint: '候选来自超低价盘口的快速推高；确认来源会显示成交、旧档被吃或盘口深度。',
+          tone: lotteryRows.length > 0 ? 'success' : 'muted',
+        },
+        {
+          label: '最低确认终点',
+          value: formatRuleValue(rule, rule.threshold),
+          hint: '前端表达按最低确认终点展示，同时沿用 1-2c -> 3c、3-4c -> 4c 的超低价 route。',
+          tone: 'muted',
+        },
+        {
+          label: '最新路线',
+          value: sampleRow ? formatAbnormalLotteryRouteText(sampleRow) : '暂无',
+          hint: sampleRow
+            ? `${cleanText(sampleRow.cityName) || sampleRow.cityKey} · ${formatAbnormalLotteryConfirmationText(sampleRow)}`
+            : '当前范围内还没有可展示的异常彩票 route。',
+          tone: sampleRow ? 'success' : 'muted',
+        },
+        {
+          label: '最近告警',
+          value: latestAlertAt ? formatDateTimeText(latestAlertAt) : '暂无',
+          hint: latestAlertAt ? '告警中心里可以查看这次异常彩票命中的完整记录。' : '当前已加载的告警里还没有这条规则的记录。',
+          tone: latestAlertAt ? 'success' : 'muted',
+        },
+      ],
+    };
+  }
 
   if (rule.metric === 'volume_pricing') {
     const coverageText = `${scopedRows.length} 个盘口`;
@@ -814,6 +927,8 @@ const getRuleMetricPlainText = (metric: AlertRule['metric']) => {
       return '监控短窗口内买一或卖一顶档是否被清空，这是一个事件型规则，不是静态价格阈值。';
     case 'volume_pricing':
       return '监控卖一是否在短窗口内被明显推高，并且有成交或盘口量确认。';
+    case 'abnormal_lottery':
+      return '监控超低价盘口是否出现异常彩票候选，并拿到成交、旧档被吃或盘口深度确认。';
     case 'bidask_gap':
       return '监控买卖盘之间是否出现明显缺口。';
     case 'new_market':
@@ -835,6 +950,8 @@ const getRuleThresholdHint = (metric: AlertRule['metric']) => {
       return '填写“被清空前的最低顶档价位”，例如 0.2 表示只有清空 20 美分及以上的顶档才提醒。';
     case 'volume_pricing':
       return '填写“卖一被推高的最小幅度”，例如 0.1 表示至少推高 10 美分才提醒。';
+    case 'abnormal_lottery':
+      return '填写“最低确认终点价位”，例如 0.03 表示至少看到卖一被推到 3c；若参考卖一本就在 3-4c，系统仍会看 4c 确认。';
     case 'spread':
     case 'bidask_gap':
       return '按盘口差值填写，例如 0.05 表示约 5 美分价差。';
@@ -879,6 +996,36 @@ const getRuleThresholdStep = (metric: AlertRule['metric']) => {
 };
 
 const buildRuleTriggerGuide = (rule: AlertRule): RuleTriggerGuide => {
+  if (rule.metric === 'abnormal_lottery') {
+    return {
+      title: buildRuleConditionSummary(rule),
+      summary: getRuleMetricPlainText(rule.metric),
+      thresholdHint: getRuleThresholdHint(rule.metric),
+      items: [
+        {
+          label: '监控指标',
+          value: formatRuleMetricLabel(rule.metric),
+          hint: '它看的不是单独的 Market Explorer 模式，而是市场本身是否打上异常彩票上下文。',
+        },
+        {
+          label: '触发路线',
+          value: ABNORMAL_LOTTERY_ROUTE_HINT,
+          hint: '先满足超低价 route，再结合成交、旧档被吃或盘口深度这类 confirmation source。',
+        },
+        {
+          label: '最低确认终点',
+          value: formatRuleValue(rule, rule.threshold),
+          hint: getRuleThresholdHint(rule.metric),
+        },
+        {
+          label: '观察窗口',
+          value: formatRuleDuration(rule.windowSec),
+          hint: `后台会在 ${formatRuleDuration(rule.windowSec)} 内把参考卖一、当前卖一和 confirmation source 串起来。`,
+        },
+      ],
+    };
+  }
+
   if (rule.metric === 'volume_pricing') {
     return {
       title: buildRuleConditionSummary(rule),
@@ -1075,6 +1222,39 @@ const buildRuleListSignal = (
   }
 
   const scopedRows = getRowsForRuleScope(rule, marketRows);
+
+  if (rule.metric === 'abnormal_lottery') {
+    if (scopedRows.length === 0) {
+      return {
+        tone: 'warning',
+        statusText: '已启用',
+        coverageText: '0 个盘口',
+        hitText: '等待候选',
+        hint: '当前范围没有覆盖盘口，系统就抓不到异常彩票候选。',
+      };
+    }
+
+    const lotteryRows = scopedRows.filter((row) => hasAbnormalLotterySignal(row));
+    const confirmedRows = lotteryRows.filter((row) => Boolean(row.lotteryConfirmationSource));
+
+    return {
+      tone: confirmedRows.length > 0 ? 'success' : lotteryRows.length > 0 ? 'muted' : 'muted',
+      statusText: '已启用',
+      coverageText: `${scopedRows.length} 个盘口`,
+      hitText:
+        confirmedRows.length > 0
+          ? `${confirmedRows.length} 个确认`
+          : lotteryRows.length > 0
+            ? `${lotteryRows.length} 个候选`
+            : '等待候选',
+      hint:
+        confirmedRows.length > 0
+          ? `已看到 ${confirmedRows.length} 个异常彩票确认；可回到 Market Explorer 查看 badge、route 和 confirmation 细节。`
+          : lotteryRows.length > 0
+            ? `当前范围已有 ${lotteryRows.length} 个超低价候选，系统会继续等 confirmation source。`
+            : `当前范围暂未出现异常彩票候选；重点关注超低价 route ${ABNORMAL_LOTTERY_ROUTE_HINT}。`,
+    };
+  }
 
   if (rule.metric === 'volume_pricing') {
     if (scopedRows.length === 0) {
@@ -2019,7 +2199,7 @@ export const RulesSettingsView = ({
 
     setPreviewBusy(true);
     try {
-      const result = await onPreviewRule(selectedRule);
+      const result = await onPreviewRule(selectedRule as ContractAlertRule);
       setPreviewText(RULE_PAGE_TEXT.previewResult(result.matchedCityCount, result.matchedMarketCount));
       setPreviewResult(result);
     } catch (error) {
@@ -2043,7 +2223,7 @@ export const RulesSettingsView = ({
     const nextRules = normalizeRuleDrafts(draftRules);
     setDraftRules(nextRules);
     setPersistedRulesKey(JSON.stringify(nextRules));
-    onSaveRules(nextRules);
+    onSaveRules(nextRules as ContractAlertRule[]);
     setSaveText(RULE_PAGE_TEXT.draftSaved);
   };
 
@@ -2430,12 +2610,17 @@ export const RulesSettingsView = ({
                           买盘指买一侧，卖盘指卖一侧；不是 YES/NO 方向。
                         </small>
                       </label>
-                    ) : selectedRule.metric === 'volume_pricing' ? (
+                    ) : selectedRule.metric === 'volume_pricing' || selectedRule.metric === 'abnormal_lottery' ? (
                       <label className="field">
                         <span>判断方式</span>
-                        <input value="卖一推高幅度" disabled />
+                        <input
+                          value={selectedRule.metric === 'abnormal_lottery' ? '超低价 route 确认' : '卖一推高幅度'}
+                          disabled
+                        />
                         <small className="rule-field-hint">
-                          后台固定按“卖一被推高至少多少美分，并且有量确认”判断，不需要再选大于/小于。
+                          {selectedRule.metric === 'abnormal_lottery'
+                            ? '前端固定按异常彩票 route 和 confirmation source 引导，不再单独选择大于/小于。'
+                            : '后台固定按“卖一被推高至少多少美分，并且有量确认”判断，不需要再选大于/小于。'}
                         </small>
                       </label>
                     ) : (

@@ -186,7 +186,7 @@ describe('WorkerRuntime market query', () => {
     expect(result.total).toBe(1);
   });
 
-  it('treats ultra-low asks as a lottery queue with lower-price-sensitive lift thresholds', () => {
+  it('keeps abnormal lottery context on market rows without exposing a dedicated queue filter', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-04-26T10:00:30.000Z'));
 
@@ -279,22 +279,25 @@ describe('WorkerRuntime market query', () => {
     });
 
     const result = runtime.queryMarkets({
-      lotteryOnly: true,
-      sortBy: 'lotteryLift',
+      sortBy: 'updatedAt',
       sortDir: 'desc',
     });
+    const rowById = new Map(result.rows.map((row: { marketId: string }) => [row.marketId, row]));
 
-    expect(result.rows.map((row: { marketId: string }) => row.marketId)).toEqual([
-      'market-sf',
-      'market-la',
-    ]);
-    expect(result.rows.map((row: { lotteryLift?: number | null }) => row.lotteryLift)).toEqual([
-      0.04,
-      0.03,
-    ]);
-    expect(result.rows.every((row: { lotteryCandidate?: boolean }) => row.lotteryCandidate === true)).toBe(true);
-    expect(result.total).toBe(2);
-    expect(runtime.queryMarkets({ cityKey: 'new-york', lotteryOnly: true }).rows).toHaveLength(0);
+    expect(result.total).toBe(3);
+    expect(rowById.get('market-la')).toMatchObject({
+      lotteryCandidate: true,
+      lotteryLift: 0.03,
+    });
+    expect(rowById.get('market-sf')).toMatchObject({
+      lotteryCandidate: true,
+      lotteryLift: 0.04,
+    });
+    expect(rowById.get('market-ny')).toMatchObject({
+      lotteryCandidate: false,
+      lotteryLift: null,
+    });
+    expect(runtime.queryMarkets({ cityKey: 'new-york' }).rows[0]?.marketId).toBe('market-ny');
   });
 
   it('reuses the in-memory unacked alert index for dashboard snapshots and acknowledgements', () => {

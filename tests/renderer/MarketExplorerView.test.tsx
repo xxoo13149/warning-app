@@ -97,7 +97,7 @@ describe('MarketExplorerView', () => {
     expect(view.querySelectorAll('.market-explorer-limit-hint').length).toBeGreaterThan(0);
   });
 
-  it('exposes a lottery preset and highlights ultra-low-price lift details', async () => {
+  it('keeps abnormal lottery as market context instead of exposing a preset mode', async () => {
     const onQueryChange = vi.fn();
     const rows = [
       buildMarket(0, {
@@ -117,19 +117,17 @@ describe('MarketExplorerView', () => {
 
     expect(view.querySelector('.market-band__badge--lottery')?.textContent).toContain('+');
     expect(view.querySelector('.market-inspector__lottery')).not.toBeNull();
+    expect(view.querySelectorAll('.market-explorer-preset')).toHaveLength(2);
 
-    const lotteryPreset = view.querySelectorAll('.market-explorer-preset')[1];
+    const watchlistPreset = view.querySelectorAll('.market-explorer-preset')[1];
     await act(async () => {
-      lotteryPreset?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      watchlistPreset?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
     expect(onQueryChange).toHaveBeenCalledWith(
       expect.objectContaining({
-        lotteryOnly: true,
-        watchlistedOnly: undefined,
+        watchlistedOnly: true,
         side: undefined,
-        sortBy: 'lotteryLift',
-        sortDir: 'desc',
       }),
     );
   });

@@ -23,21 +23,20 @@
   - `spread_threshold`
   - `price_change_5m`
 - Dashboard 风险总览
-- Market Explorer 市场总览、搜索、日期过滤、排序和运营视图
+- Market Explorer 市场总览、搜索、日期过滤、排序和市场上下文展示
 - Alert Center 告警中心、分页、历史查看和确认
-- Rules Settings 规则管理、内置规则和自定义规则编辑
+- Rules Settings 规则管理、系统规则和自定义规则编辑
 - SQLite 持久化、归档、维护和运行诊断
 - Windows 桌面打包、快捷方式更新和单机部署
 
 ## 最近更新
 
-这轮更新的重点是把“异常彩票”从泛化的带量定价中拆出来，做成独立监控和独立运营视图。
+这轮更新的重点是把“异常彩票”从 Market Explorer 顶层模式收回到 Rules Settings 中的系统规则，并在 Market Explorer 保留规则命中所需的市场上下文展示。
 
 ### 已实现
 
-- 新增“异常彩票”监控字段和查询契约
-- 新增 `lotteryOnly` 过滤与 `lotteryLift` 排序
-- 新增超低价异常定义
+- 补充“异常彩票”相关监控字段和查询契约，供系统规则与上下文展示共用
+- 细化“异常彩票”系统规则的超低价异常定义
   - 参考卖一价格不高于 `4c`
   - 观察窗口 `60s`
   - 当前卖一不高于 `18c`
@@ -48,11 +47,7 @@
     - `edge_volume`
     - `trade_confirmed`
     - `book_depth`
-- Market Explorer 新增三种预设模式
-  - `全部盘口`
-  - `异常彩票`
-  - `关注队列`
-- Market Explorer 新增异常徽标、价格路径、确认来源和检视面板
+- Market Explorer 保留异常徽标、价格路径、确认来源和检视面板，用于展示规则相关的市场上下文
 - 新增项目研究文档：
   - [docs/research/20260429154818159_abnormal-lottery-monitoring.md](docs/research/20260429154818159_abnormal-lottery-monitoring.md)
 
@@ -78,7 +73,7 @@
 
 - 搜索城市、机场、日期
 - 查看市场排序和分组
-- 进入异常彩票模式做超低价异动筛查
+- 查看规则相关的市场上下文
 - 查看单个盘口的价格、确认路径、有效数量和更新时间
 
 ### 3. Alert Center
@@ -93,7 +88,8 @@
 
 用于：
 
-- 管理内置和自定义规则
+- 管理系统规则和自定义规则
+- 配置“异常彩票”等系统规则的阈值、窗口和确认条件
 - 调整阈值、窗口、冷却时间和权重
 - 查看运行诊断和配置
 
@@ -169,7 +165,7 @@ npm run make
 
 ## 当前已验证内容
 
-最近一轮与“异常彩票”相关的关键验证已经通过：
+最近一轮围绕“异常彩票”相关改动，已执行以下验证命令：
 
 - `npm run typecheck`
 - `npm test -- tests/core/worker-runtime.market-query.test.ts tests/renderer/MarketExplorerView.test.tsx`
@@ -177,7 +173,7 @@ npm run make
 
 ## 下一步重点
 
-- 继续用真实运行数据校准“异常彩票”阈值，降低误报和漏报
+- 继续用真实运行数据校准“异常彩票”系统规则阈值，减少误报和漏报
 - 完成内存遥测与更长时间运行稳定性观察
 - 继续统一规则配置、运行诊断和历史回放能力
 - 逐步补足产品化文档和发布流程

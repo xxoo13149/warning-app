@@ -128,6 +128,33 @@ describe('alert notification content', () => {
     expect(notification.body).toContain('有效量 50 张 / $20.00');
   });
 
+  it('labels abnormal lottery alerts as a dedicated system rule', () => {
+    const abnormalAlert: Partial<AlertPresentationSource> = {
+      ruleId: 'abnormal-lottery',
+      builtinKey: 'abnormal_lottery',
+      messageKey: 'abnormal_lottery',
+      messageParams: {
+        outcome: 'yes',
+        side: 'sell',
+        previous: 0.02,
+        actual: 0.05,
+        threshold: 0.03,
+        source: 'book_depth',
+        reason: 'ultra_low_ask_lifted',
+        effectiveSize: 150,
+        effectiveNotional: 7.5,
+      },
+    };
+    const presentation = buildAlertPresentation(buildAlert(abnormalAlert));
+    const notification = buildAlertNotificationContent(buildAlert(abnormalAlert));
+
+    expect(presentation.ruleLabel).toBe('异常彩票');
+    expect(presentation.summary).toContain('2 美分');
+    expect(presentation.summary).toContain('5 美分');
+    expect(notification.body).toContain('异常彩票');
+    expect(notification.body).toContain('YES');
+  });
+
   it('falls back to a short system notification title', () => {
     const notification = buildAlertNotificationContent(
       buildAlert({

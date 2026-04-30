@@ -4,6 +4,11 @@ import { randomUUID } from 'node:crypto';
 import type { MessagePort } from 'node:worker_threads';
 
 import { AlertEngine } from './alerts/engine';
+import {
+  ABNORMAL_LOTTERY_DEFAULT_MIN_LIFT,
+  ABNORMAL_LOTTERY_DEFAULT_WINDOW_MS,
+  resolveAbnormalLotterySignal,
+} from './alerts/abnormal-lottery';
 import type { AlertRule as EngineAlertRule, AlertSeverity, AlertTrigger } from './alerts/types';
 import {
   ALERT_EVENT_PAGE_LIMIT_DEFAULT,
@@ -25,7 +30,7 @@ import type {
   TokenRuntimeState,
 } from './polymarket/types';
 import { PolymarketDataService } from './services/polymarket-data-service';
-import { FeedStateStore, MarketStateStore, type MarketTickSnapshot } from './state/market-state';
+import { FeedStateStore, MarketStateStore } from './state/market-state';
 import {
   formatAlertMessage,
   formatBuiltinRuleName,
@@ -98,6 +103,7 @@ const BUILTIN_RULE_DISPLAY_NAMES_ZH: Record<BuiltinRuleKey, string> = {
   feed_stale: '数据流停滞',
   liquidity_kill: '盘口斩杀',
   volume_pricing: '带量定价',
+  abnormal_lottery: '异常彩票',
   spread_threshold: '价差过宽',
   price_change_5m: '5分钟异动',
 };
@@ -226,6 +232,23 @@ const UI_RULES_SEED: AlertRule[] = [
     cooldownSec: 180,
     dedupeWindowSec: 60,
     bubbleWeight: 80,
+    severity: 'warning',
+    enabled: true,
+    soundProfileId: '',
+    scope: {},
+  },
+  {
+    id: 'abnormal-lottery',
+    name: formatBuiltinRuleName('abnormal_lottery', 'zh-CN') ?? '异常彩票',
+    isBuiltin: true,
+    builtinKey: 'abnormal_lottery',
+    metric: 'abnormal_lottery',
+    operator: '>=',
+    threshold: ABNORMAL_LOTTERY_DEFAULT_MIN_LIFT,
+    windowSec: ABNORMAL_LOTTERY_DEFAULT_WINDOW_MS / 1000,
+    cooldownSec: 180,
+    dedupeWindowSec: 60,
+    bubbleWeight: 85,
     severity: 'warning',
     enabled: true,
     soundProfileId: '',
@@ -535,15 +558,6 @@ const PRICE_TICK_BATCH_INTERVAL_MS = 500;
 const PRICE_TICK_BATCH_LIMIT = 64;
 const PRICE_CHANGE_WINDOW_MS = 5 * 60 * 1000;
 const PRICE_CHANGE_WINDOW_MAX_ENTRIES = 240;
-const LOTTERY_SIGNAL_WINDOW_MS = 60 * 1000;
-const LOTTERY_SIGNAL_DEFAULT_MIN_LIFT = 0.05;
-const LOTTERY_SIGNAL_REFERENCE_ASK_MAX = 0.04;
-const LOTTERY_SIGNAL_CURRENT_ASK_MAX = 0.18;
-const LOTTERY_SIGNAL_MAX_SPREAD = 0.1;
-const LOTTERY_SIGNAL_FRESH_MS = 30_000;
-const LOTTERY_SIGNAL_MIN_NOTIONAL = 5;
-const LOTTERY_SIGNAL_MIN_SIZE = 100;
-const LOTTERY_SIGNAL_TRADE_TOLERANCE = 0.02;
 const MAINTENANCE_INTERVAL_MS = 30 * 60 * 1000;
 const STARTUP_MAINTENANCE_DELAY_MS = 15_000;
 const TICK_ARCHIVE_BATCH_SIZE = 50_000;
@@ -562,10 +576,12 @@ const MARKET_HISTORY_REQUIRED_METRICS = new Set<EngineAlertRule['metric']>([
   'price_change_pct',
   'liquidity_kill',
   'volume_pricing',
+  'abnormal_lottery',
 ]);
 const BUBBLE_WEIGHT_DEFAULTS: Record<BuiltinRuleKey, number> = {
   feed_stale: 95,
   liquidity_kill: 90,
+  abnormal_lottery: 85,
   volume_pricing: 80,
   spread_threshold: 70,
   price_change_5m: 55,
@@ -975,7 +991,10 @@ export class WorkerRuntime {
     this.uiRules = nextUiRules;
     this.engineRules = nextUiRules.map((rule) => mapUiRuleToEngine(rule));
     this.marketState.setHistoryWindow(
-      Math.max(LOTTERY_SIGNAL_WINDOW_MS, resolveRequiredMarketHistoryWindowMs(this.engineRules)),
+      Math.max(
+        ABNORMAL_LOTTERY_DEFAULT_WINDOW_MS,
+        resolveRequiredMarketHistoryWindowMs(this.engineRules),
+      ),
     );
   }
 
@@ -1747,9 +1766,6 @@ export class WorkerRuntime {
     if (query?.watchlistedOnly) {
       filtered = filtered.filter((row) => row.watchlisted);
     }
-    if (query?.lotteryOnly) {
-      filtered = filtered.filter((row) => row.lotteryCandidate === true);
-    }
     if (query?.side && query.side !== 'BOTH') {
       filtered = filtered.filter(
         (row) => row.side === query.side || row.side === 'BOTH',
@@ -1773,9 +1789,7 @@ export class WorkerRuntime {
       }
       const direction = sortDir === 'asc' ? 1 : -1;
       const toComparable = (row: MarketRow): number =>
-        sortBy === 'lotteryLift'
-          ? row.lotteryLift ?? -1
-          : sortBy === 'volume24h'
+        sortBy === 'volume24h'
           ? row.volume24h
           : sortBy === 'change5m'
             ? row.change5m
@@ -2069,7 +2083,12 @@ export class WorkerRuntime {
   private saveRules(payload: RuleSavePayload): { rows: AlertRule[] } {
     const nextRules = normalizeRuleSavePayload(payload).map((rule) => ({
       ...rule,
-      operator: rule.metric === 'liquidity_kill' || rule.metric === 'volume_pricing' ? '>=' : rule.operator,
+      operator:
+        rule.metric === 'liquidity_kill' ||
+        rule.metric === 'volume_pricing' ||
+        rule.metric === 'abnormal_lottery'
+          ? '>='
+          : rule.operator,
       dedupeWindowSec:
         typeof rule.dedupeWindowSec === 'number' && Number.isFinite(rule.dedupeWindowSec)
           ? Math.max(0, Math.trunc(rule.dedupeWindowSec))
@@ -2395,84 +2414,30 @@ export class WorkerRuntime {
       return null;
     }
 
-    const currentAsk = normalizeOptionalNumber(latest.bestAsk);
-    if (
-      currentAsk === undefined ||
-      currentAsk <= 0 ||
-      currentAsk > LOTTERY_SIGNAL_CURRENT_ASK_MAX
-    ) {
-      return null;
-    }
-
-    if (
-      latest.lastMessageAt !== undefined &&
-      asOfTimestamp - latest.lastMessageAt > LOTTERY_SIGNAL_FRESH_MS
-    ) {
-      return null;
-    }
-
-    const spread = normalizeOptionalNumber(latest.spread);
-    if (spread !== undefined && spread > LOTTERY_SIGNAL_MAX_SPREAD) {
-      return null;
-    }
-
-    const referenceAsk = this.resolveLotteryReferenceAsk(tokenId, latest, currentAsk, asOfTimestamp);
-    if (referenceAsk === undefined) {
-      return null;
-    }
-
-    const lift = Number((currentAsk - referenceAsk).toFixed(6));
-    if (lift < resolveLotteryMinLift(referenceAsk)) {
-      return null;
-    }
-
-    const confirmation = resolveLotteryConfirmation(latest, referenceAsk, currentAsk, asOfTimestamp);
-    if (!confirmation) {
+    const signal = resolveAbnormalLotterySignal(
+      latest,
+      this.marketState
+        .getHistory(tokenId, ABNORMAL_LOTTERY_DEFAULT_WINDOW_MS, asOfTimestamp)
+        .filter((entry) => entry.timestamp < asOfTimestamp),
+      {
+        asOfTimestamp,
+        windowMs: ABNORMAL_LOTTERY_DEFAULT_WINDOW_MS,
+        baseMinLift: ABNORMAL_LOTTERY_DEFAULT_MIN_LIFT,
+      },
+    );
+    if (!signal) {
       return null;
     }
 
     return {
-      referenceAsk,
-      currentAsk,
-      lift,
-      confirmationSource: confirmation.source,
-      effectiveSize: confirmation.effectiveSize,
-      effectiveNotional: confirmation.effectiveNotional,
-      updatedAt: new Date(latest.timestamp).toISOString(),
+      referenceAsk: signal.referenceAsk,
+      currentAsk: signal.currentAsk,
+      lift: signal.lift,
+      confirmationSource: signal.confirmationSource,
+      effectiveSize: signal.effectiveSize,
+      effectiveNotional: signal.effectiveNotional,
+      updatedAt: signal.updatedAt,
     };
-  }
-
-  private resolveLotteryReferenceAsk(
-    tokenId: string,
-    latest: MarketTickSnapshot,
-    currentAsk: number,
-    asOfTimestamp: number,
-  ): number | undefined {
-    const edgeReference = normalizeOptionalNumber(latest.removedAskEdge?.previousPrice);
-    if (
-      edgeReference !== undefined &&
-      edgeReference <= LOTTERY_SIGNAL_REFERENCE_ASK_MAX &&
-      currentAsk - edgeReference >= resolveLotteryMinLift(edgeReference)
-    ) {
-      return edgeReference;
-    }
-
-    const history = this.marketState
-      .getHistory(tokenId, LOTTERY_SIGNAL_WINDOW_MS, asOfTimestamp)
-      .filter((entry) => entry.timestamp < asOfTimestamp);
-
-    for (let index = history.length - 1; index >= 0; index -= 1) {
-      const candidateAsk = normalizeOptionalNumber(history[index]?.bestAsk);
-      if (
-        candidateAsk !== undefined &&
-        candidateAsk <= LOTTERY_SIGNAL_REFERENCE_ASK_MAX &&
-        currentAsk - candidateAsk >= resolveLotteryMinLift(candidateAsk)
-      ) {
-        return candidateAsk;
-      }
-    }
-
-    return undefined;
   }
 
   private buildMarketRow(
@@ -3071,97 +3036,6 @@ function normalizeWorkerDiagnostic(value: string | null | undefined): string | n
   return value;
 }
 
-function resolveLotteryConfirmation(
-  current: MarketTickSnapshot,
-  referenceAsk: number,
-  currentAsk: number,
-  nowMs: number,
-): {
-  source: LotteryConfirmationSource;
-  effectiveSize: number;
-  effectiveNotional: number;
-} | null {
-  const edgeSize = normalizeOptionalNumber(current.removedAskEdge?.previousSize ?? undefined);
-  const edgePrice = normalizeOptionalNumber(current.removedAskEdge?.previousPrice);
-  if (
-    edgeSize !== undefined &&
-    edgePrice !== undefined &&
-    Math.abs(edgePrice - referenceAsk) <= LOTTERY_SIGNAL_TRADE_TOLERANCE
-  ) {
-    const edgeNotional = edgeSize * edgePrice;
-    if (edgeSize >= LOTTERY_SIGNAL_MIN_SIZE || edgeNotional >= LOTTERY_SIGNAL_MIN_NOTIONAL) {
-      return {
-        source: 'edge_volume',
-        effectiveSize: edgeSize,
-        effectiveNotional: edgeNotional,
-      };
-    }
-  }
-
-  const lastTradeSize = normalizeOptionalNumber(current.lastTradeSize);
-  const lastTradePrice = normalizeOptionalNumber(current.lastTradePrice);
-  const lastTradeAt = current.lastTradeAt;
-  if (
-    lastTradeSize !== undefined &&
-    lastTradePrice !== undefined &&
-    lastTradeAt !== undefined &&
-    nowMs - lastTradeAt >= 0 &&
-    nowMs - lastTradeAt <= LOTTERY_SIGNAL_WINDOW_MS &&
-    lastTradePrice >= referenceAsk - LOTTERY_SIGNAL_TRADE_TOLERANCE &&
-    lastTradePrice <= currentAsk + LOTTERY_SIGNAL_TRADE_TOLERANCE
-  ) {
-    const tradeNotional = lastTradeSize * lastTradePrice;
-    if (lastTradeSize >= LOTTERY_SIGNAL_MIN_SIZE || tradeNotional >= LOTTERY_SIGNAL_MIN_NOTIONAL) {
-      return {
-        source: 'trade_confirmed',
-        effectiveSize: lastTradeSize,
-        effectiveNotional: tradeNotional,
-      };
-    }
-  }
-
-  const askSize = normalizeOptionalNumber(current.bestAskSize);
-  if (askSize !== undefined) {
-    const askNotional = askSize * currentAsk;
-    if (askSize >= LOTTERY_SIGNAL_MIN_SIZE || askNotional >= LOTTERY_SIGNAL_MIN_NOTIONAL) {
-      return {
-        source: 'book_depth',
-        effectiveSize: askSize,
-        effectiveNotional: askNotional,
-      };
-    }
-  }
-
-  const visibleAskSize = normalizeOptionalNumber(current.askVisibleSize);
-  if (visibleAskSize !== undefined) {
-    const visibleNotional = visibleAskSize * currentAsk;
-    if (
-      visibleAskSize >= LOTTERY_SIGNAL_MIN_SIZE ||
-      visibleNotional >= LOTTERY_SIGNAL_MIN_NOTIONAL
-    ) {
-      return {
-        source: 'book_depth',
-        effectiveSize: visibleAskSize,
-        effectiveNotional: visibleNotional,
-      };
-    }
-  }
-
-  return null;
-}
-
-function resolveLotteryMinLift(referenceAsk: number): number {
-  if (referenceAsk <= 0.02) {
-    return 0.03;
-  }
-
-  if (referenceAsk <= LOTTERY_SIGNAL_REFERENCE_ASK_MAX) {
-    return 0.04;
-  }
-
-  return LOTTERY_SIGNAL_DEFAULT_MIN_LIFT;
-}
-
 function parseIsoTime(value: string | null | undefined): number {
   if (!value) {
     return 0;
@@ -3353,7 +3227,9 @@ function resolveBubbleSeverityFromAlertAge(
 function mapUiRuleToEngine(rule: AlertRule): EngineAlertRule {
   const metric = mapUiMetricToEngine(rule.metric);
   const operator =
-    metric === 'liquidity_kill' || metric === 'volume_pricing'
+    metric === 'liquidity_kill' ||
+    metric === 'volume_pricing' ||
+    metric === 'abnormal_lottery'
       ? '>='
       : rule.operator === 'crosses'
         ? 'crosses_above'
@@ -3410,7 +3286,9 @@ function mapEngineRuleToUi(
     builtinKey,
     metric: mapEngineMetricToUi(metric),
     operator:
-      metric === 'liquidity_kill' || metric === 'volume_pricing'
+      metric === 'liquidity_kill' ||
+      metric === 'volume_pricing' ||
+      metric === 'abnormal_lottery'
         ? '>='
         : rule.operator === 'crosses_above' || rule.operator === 'crosses_below'
           ? 'crosses'
@@ -3444,7 +3322,12 @@ function normalizeLegacyEngineRule(rule: EngineAlertRule): EngineAlertRule {
   const normalizedRule: EngineAlertRule = {
     ...rule,
     metric,
-    operator: metric === 'liquidity_kill' || metric === 'volume_pricing' ? '>=' : rule.operator,
+    operator:
+      metric === 'liquidity_kill' ||
+      metric === 'volume_pricing' ||
+      metric === 'abnormal_lottery'
+        ? '>='
+        : rule.operator,
     isBuiltin: rule.isBuiltin ?? Boolean(builtinKey),
     builtinKey,
     bubbleWeight,
@@ -3519,6 +3402,8 @@ function inferBuiltinRuleKey(ruleId: string): BuiltinRuleKey | undefined {
       return 'liquidity_kill';
     case 'volume-pricing':
       return 'volume_pricing';
+    case 'abnormal-lottery':
+      return 'abnormal_lottery';
     default:
       return undefined;
   }
@@ -3541,6 +3426,10 @@ function mapUiMetricToEngine(metric: AlertRule['metric']): EngineAlertRule['metr
     case 'volume-pricing':
     case 'volumepricing':
       return 'volume_pricing';
+    case 'abnormal_lottery':
+    case 'abnormal-lottery':
+    case 'abnormallottery':
+      return 'abnormal_lottery';
     case 'feed_stale':
     case 'feed-stale':
       return 'feed_stale';
@@ -3572,6 +3461,10 @@ function normalizeLegacyEngineMetric(metric: string): EngineAlertRule['metric'] 
     case 'volume-pricing':
     case 'volumepricing':
       return 'volume_pricing';
+    case 'abnormal_lottery':
+    case 'abnormal-lottery':
+    case 'abnormallottery':
+      return 'abnormal_lottery';
     case 'spread_threshold':
     case 'spread':
     case 'bidask_gap':
@@ -3592,6 +3485,8 @@ function mapEngineMetricToUi(metric: EngineAlertRule['metric']): AlertRule['metr
       return 'liquidity_kill';
     case 'volume_pricing':
       return 'volume_pricing';
+    case 'abnormal_lottery':
+      return 'abnormal_lottery';
     case 'spread_threshold':
     default:
       return 'spread';

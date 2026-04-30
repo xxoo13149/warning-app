@@ -5,9 +5,9 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { LocaleProvider } from '../../src/renderer/i18n';
+import type { AlertRule } from '../../src/renderer/utils/rules-settings';
 import { RulesSettingsView } from '../../src/renderer/views/RulesSettingsView';
 import type {
-  AlertRule,
   AppHealth,
   AppSettings,
   MarketRow,
@@ -339,5 +339,40 @@ describe('RulesSettingsView behavior', () => {
     expect(onPreviewRule).toHaveBeenCalledTimes(1);
     expect(container?.textContent).toContain('Beijing');
     expect(container?.textContent).toContain('买一 41 美分');
+  });
+
+  it('renders abnormal lottery guidance as a system rule instead of a mode toggle', async () => {
+    await renderView({
+      rules: [
+        buildRule({
+          id: 'rule-abnormal-lottery',
+          name: '异常彩票',
+          builtinKey: 'abnormal_lottery',
+          metric: 'abnormal_lottery',
+          operator: '>=',
+          threshold: 0.03,
+          windowSec: 45,
+          cooldownSec: 180,
+          dedupeWindowSec: 90,
+          liquiditySide: undefined,
+        }),
+      ],
+      marketRows: [
+        buildMarketRow({
+          lotteryCandidate: true,
+          lotteryReferenceAsk: 0.02,
+          lotteryCurrentAsk: 0.05,
+          lotteryLift: 0.03,
+          lotteryConfirmationSource: 'trade_confirmed',
+          lotteryEffectiveSize: 120,
+          lotteryEffectiveNotional: 6,
+          lotteryUpdatedAt: '2026-04-29T01:02:00.000Z',
+        }),
+      ],
+    });
+
+    expect(container?.textContent).toContain('异常彩票');
+    expect(container?.textContent).toContain('1-2c -> 3c, 3-4c -> 4c');
+    expect(container?.textContent).toContain('confirmation source');
   });
 });
