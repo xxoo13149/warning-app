@@ -180,8 +180,6 @@ const groupMarketsByCity = (rows: MarketRow[]) => {
       rows: MarketRow[];
       riskCount: number;
       watchlistedCount: number;
-      lotteryCount: number;
-      maxLotteryLift: number;
       maxSeverityWeight: number;
       latestUpdatedAt: string;
     }
@@ -193,8 +191,6 @@ const groupMarketsByCity = (rows: MarketRow[]) => {
     if (current) {
       current.rows.push(row);
       current.watchlistedCount += row.watchlisted ? 1 : 0;
-      current.lotteryCount += marketHasLotterySignal(row) ? 1 : 0;
-      current.maxLotteryLift = Math.max(current.maxLotteryLift, row.lotteryLift ?? 0);
       current.riskCount +=
         row.bubbleSeverity === 'critical' || row.bubbleSeverity === 'warning' ? 1 : 0;
       current.maxSeverityWeight = Math.max(
@@ -213,22 +209,12 @@ const groupMarketsByCity = (rows: MarketRow[]) => {
       rows: [row],
       riskCount: row.bubbleSeverity === 'critical' || row.bubbleSeverity === 'warning' ? 1 : 0,
       watchlistedCount: row.watchlisted ? 1 : 0,
-      lotteryCount: marketHasLotterySignal(row) ? 1 : 0,
-      maxLotteryLift: row.lotteryLift ?? 0,
       maxSeverityWeight: SEVERITY_WEIGHT[row.bubbleSeverity],
       latestUpdatedAt: row.updatedAt,
     });
   });
 
   return [...groups.values()].sort((left, right) => {
-    if (left.lotteryCount !== right.lotteryCount) {
-      return right.lotteryCount - left.lotteryCount;
-    }
-
-    if (left.maxLotteryLift !== right.maxLotteryLift) {
-      return right.maxLotteryLift - left.maxLotteryLift;
-    }
-
     if (left.maxSeverityWeight !== right.maxSeverityWeight) {
       return right.maxSeverityWeight - left.maxSeverityWeight;
     }
@@ -380,16 +366,10 @@ export const MarketExplorerView = ({
   const selectedLotterySource = selectedMarket
     ? formatLotterySourceLabel(selectedMarket.lotteryConfirmationSource, language)
     : null;
-  const lotteryRows = useMemo(
-    () => rows.filter((row) => marketHasLotterySignal(row)),
-    [rows],
-  );
   const visibleCityCount = cityGroups.length;
   const riskCount = rows.filter(
     (row) => row.bubbleSeverity === 'critical' || row.bubbleSeverity === 'warning',
   ).length;
-  const confirmedLotteryCount = lotteryRows.filter((row) => Boolean(row.lotteryConfirmationSource)).length;
-  const bestLotteryLift = lotteryRows.reduce((best, row) => Math.max(best, row.lotteryLift ?? 0), 0);
   const visibleOverviewMarketCount = visibleCityGroups.reduce(
     (sum, group) => sum + Math.min(group.rows.length, OVERVIEW_MARKETS_PER_CITY_LIMIT),
     0,
@@ -651,13 +631,6 @@ export const MarketExplorerView = ({
                 <strong>{riskCount}</strong>
                 <em>预警或高风险盘口</em>
               </div>
-              <div>
-                <span>异常彩票</span>
-                <strong>{lotteryRows.length}</strong>
-                <em>
-                  {confirmedLotteryCount} 条确认路径 · 最大推高 {formatLotteryLiftLabel(bestLotteryLift || null, language)}
-                </em>
-              </div>
             </div>
 
             {viewMode === 'overview' ? (
@@ -677,12 +650,6 @@ export const MarketExplorerView = ({
                               </span>
                             </div>
                             <div className="market-city-group__stats">
-                              {group.lotteryCount > 0 ? (
-                                <span>异常彩票 {group.lotteryCount}</span>
-                              ) : null}
-                              {group.maxLotteryLift > 0 ? (
-                                <span>最大推高 {formatLotteryLiftLabel(group.maxLotteryLift, language)}</span>
-                              ) : null}
                               <span>{group.riskCount} 个重点风险</span>
                               <span>{group.watchlistedCount} 个关注</span>
                             </div>

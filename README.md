@@ -20,6 +20,7 @@
   - `feed_stale`
   - `liquidity_kill`
   - `volume_pricing`
+  - `abnormal_lottery`
   - `spread_threshold`
   - `price_change_5m`
 - Dashboard 风险总览
