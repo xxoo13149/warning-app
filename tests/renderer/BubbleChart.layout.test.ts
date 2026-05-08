@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildBubbleLayout } from '../../src/renderer/components/zip/BubbleChart';
-import type { PhysicsBubbleCityData } from '../../src/renderer/utils/dashboard-bubble-adapter';
+import { buildBubbleLayout, shouldShowBubbleCity } from '../../src/renderer/components/zip/BubbleChart';
+import type {
+  DashboardBubbleCityData,
+  PhysicsBubbleCityData,
+} from '../../src/renderer/utils/dashboard-bubble-adapter';
 
 const buildPhysicsRow = (
   id: string,
@@ -16,6 +19,31 @@ const buildPhysicsRow = (
   riskLevel: 80,
   visualRadius,
 });
+
+const buildVisualRow = (
+  overrides: Partial<DashboardBubbleCityData> & Pick<DashboardBubbleCityData, 'id' | 'region'>,
+): DashboardBubbleCityData => {
+  const { id, region, ...rest } = overrides;
+
+  return {
+    cityKey: id.split('::')[1] ?? id,
+    eventDate: id.split('::')[0] ?? '2026-04-15',
+    name: 'Test City',
+    code: 'TEST',
+    riskLevel: 80,
+    status_level: 'WARNING',
+    is_new_alert: false,
+    alertCount: 1,
+    temperature: 20,
+    trend: 'stable',
+    lastUpdated: '2026-04-15T00:00:00.000Z',
+    dominantTemperatureBand: '20-25',
+    dominantYesPrice: null,
+    ...rest,
+    id,
+    region,
+  };
+};
 
 const snapshotLayout = (layout: Map<string, { x: number; y: number }>) =>
   [...layout.entries()]
@@ -75,12 +103,15 @@ describe('BubbleChart layout', () => {
     for (const row of rows) {
       const placement = layout.get(row.id);
       expect(placement).toBeDefined();
+      if (!placement) {
+        throw new Error(`Missing placement for ${row.id}`);
+      }
       const inset = row.visualRadius + collisionPadding + 16;
 
-      expect(placement!.anchorX - placement!.driftRangeX).toBeGreaterThanOrEqual(inset);
-      expect(placement!.anchorX + placement!.driftRangeX).toBeLessThanOrEqual(width - inset);
-      expect(placement!.anchorY - placement!.driftRangeY).toBeGreaterThanOrEqual(inset);
-      expect(placement!.anchorY + placement!.driftRangeY).toBeLessThanOrEqual(height - inset);
+      expect(placement.anchorX - placement.driftRangeX).toBeGreaterThanOrEqual(inset);
+      expect(placement.anchorX + placement.driftRangeX).toBeLessThanOrEqual(width - inset);
+      expect(placement.anchorY - placement.driftRangeY).toBeGreaterThanOrEqual(inset);
+      expect(placement.anchorY + placement.driftRangeY).toBeLessThanOrEqual(height - inset);
     }
 
     for (let leftIndex = 0; leftIndex < rows.length; leftIndex += 1) {
@@ -92,9 +123,12 @@ describe('BubbleChart layout', () => {
 
         expect(leftPlacement).toBeDefined();
         expect(rightPlacement).toBeDefined();
+        if (!leftPlacement || !rightPlacement) {
+          throw new Error(`Missing pair placement for ${left.id} / ${right.id}`);
+        }
         const distance = Math.hypot(
-          leftPlacement!.x - rightPlacement!.x,
-          leftPlacement!.y - rightPlacement!.y,
+          leftPlacement.x - rightPlacement.x,
+          leftPlacement.y - rightPlacement.y,
         );
         expect(distance).toBeGreaterThanOrEqual(
           left.visualRadius + right.visualRadius + collisionPadding * 2,
@@ -120,5 +154,38 @@ describe('BubbleChart layout', () => {
     const placement = layout.get('2026-04-15::valid');
     expect(Number.isFinite(placement?.x)).toBe(true);
     expect(Number.isFinite(placement?.y)).toBe(true);
+  });
+
+  it('shows cities with unacked alerts in ALERTS mode even when the bubble is warning-level', () => {
+    const city = buildVisualRow({
+      id: '2026-04-15::nyc',
+      region: 'NA',
+      alertCount: 1,
+      status_level: 'WARNING',
+    });
+
+    expect(shouldShowBubbleCity(city, 'ALERTS', 'ALL')).toBe(true);
+  });
+
+  it('hides cities with no alert count in ALERTS mode', () => {
+    const city = buildVisualRow({
+      id: '2026-04-15::nyc',
+      region: 'NA',
+      alertCount: 0,
+      status_level: 'CRITICAL',
+    });
+
+    expect(shouldShowBubbleCity(city, 'ALERTS', 'ALL')).toBe(false);
+  });
+
+  it('still applies region filtering in ALERTS mode', () => {
+    const city = buildVisualRow({
+      id: '2026-04-15::tokyo',
+      region: 'ASIA',
+      alertCount: 2,
+    });
+
+    expect(shouldShowBubbleCity(city, 'ALERTS', 'EU')).toBe(false);
+    expect(shouldShowBubbleCity(city, 'ALERTS', 'ASIA')).toBe(true);
   });
 });

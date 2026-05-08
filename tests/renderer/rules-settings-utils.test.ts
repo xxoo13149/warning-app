@@ -72,6 +72,7 @@ describe('rules settings severity unification', () => {
 
     expect(normalized.operator).toBe('>=');
     expect(normalized.liquiditySide).toBe('both');
+    expect(buildRuleConditionSummary(normalized)).toContain('现价盘口');
   });
 
   it('normalizes volume pricing as a simple event rule', () => {

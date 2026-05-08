@@ -82,7 +82,30 @@ vi.mock('../../src/core/services/polymarket-data-service', () => {
 
 import { WorkerRuntime } from '../../src/core/worker-runtime';
 
-const createdRuntimes: any[] = [];
+type MockRepository = {
+  archivePriceTicks: ReturnType<typeof vi.fn>;
+  insertPriceTicks: ReturnType<typeof vi.fn>;
+  prunePriceTicks: ReturnType<typeof vi.fn>;
+  pruneAlertEvents: ReturnType<typeof vi.fn>;
+  checkpointWal: ReturnType<typeof vi.fn>;
+  compactDatabase: ReturnType<typeof vi.fn>;
+  upsertAppSetting: (item: { key: string; value: string; updatedAt?: number }) => void;
+  queryAppSetting: (key: string) => { value: string } | undefined;
+};
+
+type RuntimeUnderTest = {
+  port?: { close?: () => void };
+  maintenanceTimer?: ReturnType<typeof setInterval>;
+  maintenanceInFlight?: Promise<void>;
+  pendingPriceTicks: Array<Record<string, unknown>>;
+  repository: MockRepository;
+  refreshRulesSync: () => void;
+  getSettingsPayload: () => unknown;
+  startMaintenanceLoop: () => void;
+  updateSettings: (settings: Record<string, unknown>) => void;
+};
+
+const createdRuntimes: RuntimeUnderTest[] = [];
 const FIXED_NOW = new Date('2026-04-24T00:00:00.000Z');
 const DAY_MS = 24 * 60 * 60 * 1000;
 const ARCHIVE_BATCH_SIZE = 50_000;
@@ -91,10 +114,10 @@ const createRuntime = () => {
   const { port1, port2 } = new MessageChannel();
   const runtime = new WorkerRuntime(port1, {
     dbPath: path.join(tmpdir(), `weather-monitor-${randomUUID()}.sqlite`),
-  });
+  }) as unknown as RuntimeUnderTest;
   port2.close();
   createdRuntimes.push(runtime);
-  return runtime as any;
+  return runtime;
 };
 
 beforeEach(() => {
@@ -113,7 +136,7 @@ afterEach(() => {
 });
 
 const expectArchiveQuery = (
-  runtime: any,
+  runtime: RuntimeUnderTest,
   callIndex: number,
   retentionDays: number,
   nowMs = Date.now(),

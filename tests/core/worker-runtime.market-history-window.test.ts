@@ -35,16 +35,37 @@ vi.mock('../../src/core/services/polymarket-data-service', () => {
 import type { AlertRule } from '../../src/shared/monitor-contracts';
 import { WorkerRuntime } from '../../src/core/worker-runtime';
 
-const createdRuntimes: any[] = [];
+type RuntimeUnderTest = {
+  port?: { close?: () => void };
+  pendingMarketTickTimer?: ReturnType<typeof setTimeout>;
+  pendingDashboardTickTimer?: ReturnType<typeof setTimeout>;
+  priceTickFlushTimer?: ReturnType<typeof setTimeout>;
+  serviceRetryTimer?: ReturnType<typeof setTimeout>;
+  startupMaintenanceTimer?: ReturnType<typeof setTimeout>;
+  bubbleScoreTimer?: ReturnType<typeof setInterval>;
+  maintenanceTimer?: ReturnType<typeof setInterval>;
+  runCurrentRuleCheck: () => void;
+  saveRules: (rules: AlertRule[]) => unknown;
+  marketState: {
+    recordTick: (tick: Record<string, unknown>) => void;
+    getHistory: (
+      tokenId: string,
+      windowMs: number,
+      nowMs: number,
+    ) => Array<{ timestamp: number }>;
+  };
+};
+
+const createdRuntimes: RuntimeUnderTest[] = [];
 
 const createRuntime = () => {
   const { port1, port2 } = new MessageChannel();
   const runtime = new WorkerRuntime(port1, {
     dbPath: path.join(tmpdir(), `weather-monitor-${randomUUID()}.sqlite`),
-  });
+  }) as unknown as RuntimeUnderTest;
   port2.close();
   createdRuntimes.push(runtime);
-  return runtime as any;
+  return runtime;
 };
 
 const createUiRule = (

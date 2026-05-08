@@ -798,9 +798,12 @@ export const bootstrapAppShell = async (runtimePaths: RuntimePaths): Promise<voi
         onClick: ({ alert: clickedAlert, alertId }) => {
           const targetAlert = clickedAlert ?? alert;
           showMainWindowAndNavigate({
-            target: 'alerts',
+            target: 'explorer',
             source: 'notification-click',
             alertId: alertId ?? targetAlert.id,
+            marketId: targetAlert.marketId,
+            cityKey: targetAlert.cityKey,
+            eventDate: targetAlert.marketSnapshot?.eventDate ?? undefined,
             ruleId: targetAlert.ruleId,
             severity: targetAlert.severity,
             triggeredAt: targetAlert.triggeredAt,

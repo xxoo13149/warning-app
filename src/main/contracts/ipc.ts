@@ -72,6 +72,9 @@ export type AppNavigationTarget = 'dashboard' | 'alerts' | 'explorer' | 'rules';
 export interface AppNavigateEvent {
   target: AppNavigationTarget;
   alertId?: string;
+  marketId?: string;
+  cityKey?: string;
+  eventDate?: string;
   source?: 'notification-click' | 'tray' | 'app' | string;
 }
 

@@ -378,13 +378,20 @@ export class AlertEngine {
       return null;
     }
 
+    // Only trigger liquidity kill when the entire side is emptied out.
+    // If there are still levels after the top price is removed, that is
+    // just a top-of-book shift and should not alert.
+    if (edge.levelCountAfter > 0) {
+      return null;
+    }
+
     return {
       triggered: true,
-      actual: currentPrice ?? edge.currentPrice ?? 0,
+      actual: 0,
       previous: edge.previousPrice,
       side,
       source: classifyLiquiditySource(edge.source, lastTradeAt, nowMs),
-      reason: edge.levelCountAfter <= 0 ? 'full_empty' : 'top_level',
+      reason: 'full_empty',
     };
   }
 
@@ -827,6 +834,7 @@ function resolveVolumePricingConfirmation(
 }
 
 function normalizeVolumePricingOperator(_operator: AlertOperator): AlertOperator {
+  void _operator;
   return '>=';
 }
 
@@ -846,6 +854,7 @@ function toAbnormalLotteryEvaluation(signal: AbnormalLotterySignalSnapshot): Num
 }
 
 function normalizeLiquidityKillOperator(_operator: AlertOperator): AlertOperator {
+  void _operator;
   return '>=';
 }
 

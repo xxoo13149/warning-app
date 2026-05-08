@@ -161,6 +161,7 @@ const migrationV3 = (db: Database.Database): void => {
 };
 
 const migrationV4 = (_db: Database.Database): void => {
+  void _db;
   // Version 4 is intentionally reserved so newer builds keep user_version stable
   // without creating the unused experimental price_bars table in fresh databases.
 };

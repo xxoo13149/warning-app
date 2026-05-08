@@ -5,8 +5,6 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { LocaleProvider } from '../../src/renderer/i18n';
-import type { AlertRule } from '../../src/renderer/utils/rules-settings';
-import { RulesSettingsView } from '../../src/renderer/views/RulesSettingsView';
 import type {
   AppHealth,
   AppSettings,
@@ -16,6 +14,8 @@ import type {
   RuntimeActionFeedback,
   SoundProfile,
 } from '../../src/renderer/types/contracts';
+import type { AlertRule } from '../../src/renderer/utils/rules-settings';
+import { RulesSettingsView } from '../../src/renderer/views/RulesSettingsView';
 import type { AppControlState, StartupStatus } from '../../src/shared/contracts';
 
 let root: Root | null = null;
@@ -100,7 +100,7 @@ const buildSoundProfiles = (): SoundProfile[] => [
 
 const buildRule = (overrides: Partial<AlertRule> = {}): AlertRule => ({
   id: overrides.id ?? 'rule-1',
-  name: overrides.name ?? '盘口斩杀',
+  name: overrides.name ?? 'Price shock',
   isBuiltin: overrides.isBuiltin ?? true,
   builtinKey: overrides.builtinKey ?? 'liquidity_kill',
   metric: overrides.metric ?? 'liquidity_kill',
@@ -166,106 +166,139 @@ const previewSoundResult: PreviewSoundResult = {
   played: true,
 };
 
-const clickButton = async (text: string) => {
-  const button = Array.from(container?.querySelectorAll('button') ?? []).find((item) =>
-    item.textContent?.includes(text),
-  ) as HTMLButtonElement | undefined;
-  expect(button).toBeDefined();
+const clickElement = async (element: Element | null | undefined) => {
+  expect(element).not.toBeNull();
   await act(async () => {
-    button?.click();
+    element?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     await Promise.resolve();
   });
-  return button;
 };
+
+const getRuleCard = (name: string) =>
+  Array.from(container?.querySelectorAll('.rule-card') ?? []).find((item) =>
+    item.textContent?.includes(name),
+  ) ?? null;
+
+const getRuleDialog = () => container?.querySelector('[role="dialog"]') ?? null;
+
+type RenderViewOptions = {
+  rules?: AlertRule[];
+  marketRows?: MarketRow[];
+  onSaveRules?: ReturnType<typeof vi.fn>;
+  onPreviewRule?: ReturnType<typeof vi.fn>;
+};
+
+const buildView = ({
+  rules,
+  marketRows,
+  onSaveRules,
+  onPreviewRule,
+}: Required<RenderViewOptions>) => (
+  <LocaleProvider>
+    <RulesSettingsView
+      rules={rules}
+      marketRows={marketRows}
+      latestAlertAtByRuleId={{}}
+      health={buildHealth()}
+      settings={buildSettings()}
+      storageSummary={null}
+      storageMaintenance={null}
+      controlState={buildControlState()}
+      runtimeAction={buildRuntimeAction()}
+      soundProfiles={buildSoundProfiles()}
+      onPreviewRule={onPreviewRule}
+      onSaveRules={onSaveRules}
+      onUpdateSettings={async () => undefined}
+      onPickSound={async () => undefined}
+      onRegisterSound={async () => undefined}
+      onClearStorageCache={async () => ({
+        reclaimedBytes: 0,
+        deletedEntries: [],
+        storageSummary: {
+          dataRootDir: '',
+          mainDbPath: '',
+          archiveDir: '',
+          backupDir: '',
+          sessionDataDir: '',
+          logsDir: '',
+          mainDbExists: true,
+          mainDbSizeBytes: 0,
+          totalSizeBytes: 0,
+          databaseSizeBytes: 0,
+          archiveSizeBytes: 0,
+          backupSizeBytes: 0,
+          sessionDataSizeBytes: 0,
+          logsSizeBytes: 0,
+          cleanableSizeBytes: 0,
+          canClearCache: false,
+          lastCleanupAt: null,
+          priceTickCount: 0,
+          alertEventCount: 0,
+          latestPriceTickAt: null,
+          latestAlertAt: null,
+          lastActivityAt: null,
+          latestMainBackupPath: null,
+          latestMainBackupAt: null,
+          latestBackupPath: null,
+          latestBackupAt: null,
+        },
+      })}
+      onCreateStorageBackup={async () => {
+        throw new Error('unused');
+      }}
+      onCreateDiagnosticsPackage={async () => {
+        throw new Error('unused');
+      }}
+      onRunStorageMaintenance={async () => {
+        throw new Error('unused');
+      }}
+      onPreviewSound={async () => previewSoundResult}
+      onImportCityMap={async () => 0}
+      onSetNotificationsEnabled={() => undefined}
+      onStopMonitor={() => undefined}
+      onStartMonitor={() => undefined}
+      onQuitApp={() => undefined}
+    />
+  </LocaleProvider>
+);
 
 const renderView = async ({
   rules = [buildRule()],
   marketRows = [buildMarketRow()],
   onSaveRules = vi.fn(),
   onPreviewRule = vi.fn(async () => buildPreviewResult()),
-}: {
-  rules?: AlertRule[];
-  marketRows?: MarketRow[];
-  onSaveRules?: ReturnType<typeof vi.fn>;
-  onPreviewRule?: ReturnType<typeof vi.fn>;
-} = {}) => {
+}: RenderViewOptions = {}) => {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
 
-  await act(async () => {
-    root?.render(
-      <LocaleProvider>
-        <RulesSettingsView
-          rules={rules}
-          marketRows={marketRows}
-          latestAlertAtByRuleId={{}}
-          health={buildHealth()}
-          settings={buildSettings()}
-          storageSummary={null}
-          storageMaintenance={null}
-          controlState={buildControlState()}
-          runtimeAction={buildRuntimeAction()}
-          soundProfiles={buildSoundProfiles()}
-          onPreviewRule={onPreviewRule}
-          onSaveRules={onSaveRules}
-          onUpdateSettings={async () => undefined}
-          onPickSound={async () => undefined}
-          onRegisterSound={async () => undefined}
-          onClearStorageCache={async () => ({
-            reclaimedBytes: 0,
-            deletedEntries: [],
-            storageSummary: {
-              dataRootDir: '',
-              mainDbPath: '',
-              archiveDir: '',
-              backupDir: '',
-              sessionDataDir: '',
-              logsDir: '',
-              mainDbExists: true,
-              mainDbSizeBytes: 0,
-              totalSizeBytes: 0,
-              databaseSizeBytes: 0,
-              archiveSizeBytes: 0,
-              backupSizeBytes: 0,
-              sessionDataSizeBytes: 0,
-              logsSizeBytes: 0,
-              cleanableSizeBytes: 0,
-              canClearCache: false,
-              lastCleanupAt: null,
-              priceTickCount: 0,
-              alertEventCount: 0,
-              latestPriceTickAt: null,
-              latestAlertAt: null,
-              lastActivityAt: null,
-              latestMainBackupPath: null,
-              latestMainBackupAt: null,
-              latestBackupPath: null,
-              latestBackupAt: null,
-            },
-          })}
-          onCreateStorageBackup={async () => {
-            throw new Error('unused');
-          }}
-          onCreateDiagnosticsPackage={async () => {
-            throw new Error('unused');
-          }}
-          onRunStorageMaintenance={async () => {
-            throw new Error('unused');
-          }}
-          onPreviewSound={async () => previewSoundResult}
-          onImportCityMap={async () => 0}
-          onSetNotificationsEnabled={() => undefined}
-          onStopMonitor={() => undefined}
-          onStartMonitor={() => undefined}
-          onQuitApp={() => undefined}
-        />
-      </LocaleProvider>,
-    );
-    await Promise.resolve();
-  });
+  let currentOptions: Required<RenderViewOptions> = {
+    rules,
+    marketRows,
+    onSaveRules,
+    onPreviewRule,
+  };
 
-  return { onSaveRules, onPreviewRule };
+  const renderCurrent = async () => {
+    await act(async () => {
+      root?.render(buildView(currentOptions));
+      await Promise.resolve();
+    });
+  };
+
+  await renderCurrent();
+
+  return {
+    onSaveRules,
+    onPreviewRule,
+    rerender: async (nextOptions: RenderViewOptions = {}) => {
+      currentOptions = {
+        ...currentOptions,
+        ...nextOptions,
+      };
+      await renderCurrent();
+    },
+  };
 };
 
 beforeEach(() => {
@@ -286,7 +319,118 @@ afterEach(async () => {
 });
 
 describe('RulesSettingsView behavior', () => {
-  it('keeps enable toggles in draft state until the user saves', async () => {
+  it('opens the rule editor dialog when clicking a rule card', async () => {
+    await renderView({
+      rules: [
+        buildRule({ id: 'rule-1', name: 'Price shock A' }),
+        buildRule({ id: 'rule-2', name: 'Price shock B' }),
+      ],
+    });
+
+    expect(getRuleDialog()).toBeNull();
+
+    await clickElement(getRuleCard('Price shock B'));
+
+    const dialog = getRuleDialog();
+    expect(dialog).not.toBeNull();
+    expect(dialog?.textContent).toContain('Price shock B');
+  });
+
+  it('closes the rule editor dialog from the backdrop and close button', async () => {
+    await renderView();
+
+    await clickElement(getRuleCard('Price shock'));
+    expect(getRuleDialog()).not.toBeNull();
+
+    const backdrop = container?.querySelector('[data-testid="rule-editor-backdrop"]');
+    expect(backdrop).not.toBeNull();
+    await clickElement(backdrop);
+    expect(getRuleDialog()).toBeNull();
+
+    await clickElement(getRuleCard('Price shock'));
+    const closeButton = container?.querySelector(
+      'button[aria-label="close-rule-editor"]',
+    ) as HTMLButtonElement | null;
+    expect(closeButton).not.toBeNull();
+    await clickElement(closeButton);
+    expect(getRuleDialog()).toBeNull();
+  });
+
+  it('keeps the open rule draft stable when props refresh mid-review', async () => {
+    const { onSaveRules, rerender } = await renderView();
+
+    await clickElement(getRuleCard('Price shock'));
+
+    const dialog = getRuleDialog();
+    expect(dialog).not.toBeNull();
+
+    const enabledToggle = dialog?.querySelector(
+      '.rule-editor-section:first-of-type .rule-editor-section__grid input[type="checkbox"]',
+    ) as HTMLInputElement | null;
+    expect(enabledToggle).not.toBeNull();
+    expect(enabledToggle?.checked).toBe(true);
+
+    const advancedSection = dialog?.querySelector(
+      '.rule-editor-advanced',
+    ) as HTMLDetailsElement | null;
+    expect(advancedSection).not.toBeNull();
+
+    await act(async () => {
+      if (advancedSection) {
+        advancedSection.open = true;
+      }
+      await Promise.resolve();
+    });
+
+    await clickElement(enabledToggle);
+
+    expect(onSaveRules).toHaveBeenCalled();
+    expect(
+      (getRuleDialog()?.querySelector(
+        '.rule-editor-section:first-of-type .rule-editor-section__grid input[type="checkbox"]',
+      ) as HTMLInputElement | null)?.checked,
+    ).toBe(false);
+
+    await rerender({
+      rules: [buildRule({ id: 'rule-1', enabled: true, name: 'Price shock from refresh' })],
+    });
+
+    const refreshedDialog = getRuleDialog();
+    expect(refreshedDialog).not.toBeNull();
+    expect(refreshedDialog?.textContent).not.toContain('Price shock from refresh');
+
+    const refreshedToggle = refreshedDialog?.querySelector(
+      '.rule-editor-section:first-of-type .rule-editor-section__grid input[type="checkbox"]',
+    ) as HTMLInputElement | null;
+    expect(refreshedToggle?.checked).toBe(false);
+
+    const refreshedAdvancedSection = refreshedDialog?.querySelector(
+      '.rule-editor-advanced',
+    ) as HTMLDetailsElement | null;
+    expect(refreshedAdvancedSection?.open).toBe(true);
+  });
+
+  it('keeps scope controls out of the modal editor', async () => {
+    await renderView({
+      rules: [
+        buildRule({
+          id: 'rule-quiet-hours',
+          name: 'Quiet hours guard',
+          metric: 'change5m',
+        }),
+      ],
+    });
+
+    await clickElement(getRuleCard('Quiet hours guard'));
+
+    const dialog = getRuleDialog();
+    expect(dialog).not.toBeNull();
+    expect(dialog?.textContent).not.toContain('监控范围');
+    expect(dialog?.textContent).not.toContain('指定盘口');
+    expect(dialog?.querySelector('.rule-scope-guide')).toBeNull();
+  });
+
+  it('applies the quick toggle without opening the rule editor dialog', async () => {
     const onSaveRules = vi.fn();
     await renderView({ onSaveRules });
 
@@ -294,85 +438,33 @@ describe('RulesSettingsView behavior', () => {
       '.rule-card__toggle-field input[type="checkbox"]',
     ) as HTMLInputElement | null;
     expect(toggle).not.toBeNull();
+    expect(getRuleDialog()).toBeNull();
 
-    await act(async () => {
-      toggle?.click();
-      await Promise.resolve();
-    });
+    await clickElement(toggle);
 
-    expect(onSaveRules).not.toHaveBeenCalled();
-
-    await clickButton('保存草稿');
     expect(onSaveRules).toHaveBeenCalledTimes(1);
     expect(onSaveRules.mock.calls[0]?.[0]?.[0]?.enabled).toBe(false);
+    expect(getRuleDialog()).toBeNull();
   });
 
-  it('keeps editing the selected rule when filters hide it from the list', async () => {
-    await renderView({
-      rules: [
-        buildRule({ id: 'rule-visible', name: '盘口斩杀 A', enabled: true }),
-        buildRule({ id: 'rule-hidden', name: '盘口斩杀 B', enabled: false }),
-      ],
-    });
-
-    const secondRule = Array.from(container?.querySelectorAll('.rule-card strong') ?? []).find((item) =>
-      item.textContent?.includes('盘口斩杀 B'),
-    ) as HTMLElement | undefined;
-    expect(secondRule).toBeDefined();
-
-    await act(async () => {
-      secondRule?.closest('.rule-card')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      await Promise.resolve();
-    });
-
-    await clickButton('只看已启用');
-    expect(container?.textContent).toContain('当前选中的规则被筛选器隐藏了');
-    expect(container?.textContent).toContain('盘口斩杀 B');
-  });
-
-  it('shows preview sample markets for the currently selected rule', async () => {
-    const onPreviewRule = vi.fn(async () => buildPreviewResult());
-    await renderView({ onPreviewRule });
-
-    await clickButton('预览影响');
-
-    expect(onPreviewRule).toHaveBeenCalledTimes(1);
-    expect(container?.textContent).toContain('Beijing');
-    expect(container?.textContent).toContain('买一 41 美分');
-  });
-
-  it('renders abnormal lottery guidance as a system rule instead of a mode toggle', async () => {
+  it('does not rely on the retired inline rule editor', async () => {
     await renderView({
       rules: [
         buildRule({
           id: 'rule-abnormal-lottery',
-          name: '异常彩票',
+          name: 'Abnormal lottery',
           builtinKey: 'abnormal_lottery',
           metric: 'abnormal_lottery',
-          operator: '>=',
-          threshold: 0.03,
-          windowSec: 45,
-          cooldownSec: 180,
-          dedupeWindowSec: 90,
-          liquiditySide: undefined,
-        }),
-      ],
-      marketRows: [
-        buildMarketRow({
-          lotteryCandidate: true,
-          lotteryReferenceAsk: 0.02,
-          lotteryCurrentAsk: 0.05,
-          lotteryLift: 0.03,
-          lotteryConfirmationSource: 'trade_confirmed',
-          lotteryEffectiveSize: 120,
-          lotteryEffectiveNotional: 6,
-          lotteryUpdatedAt: '2026-04-29T01:02:00.000Z',
         }),
       ],
     });
 
-    expect(container?.textContent).toContain('异常彩票');
-    expect(container?.textContent).toContain('1-2c -> 3c, 3-4c -> 4c');
-    expect(container?.textContent).toContain('confirmation source');
+    expect(container?.querySelector('.rule-editor-layout__form')).toBeNull();
+    expect(container?.querySelector('.rule-editor-layout__summary')).toBeNull();
+    expect(container?.textContent).not.toContain('Save draft');
+    expect(container?.textContent).not.toContain('Preview impact');
+
+    await clickElement(getRuleCard('Abnormal lottery'));
+    expect(getRuleDialog()).not.toBeNull();
   });
 });

@@ -121,16 +121,6 @@ const RULE_LABELS: Record<string, string> = {
   'worker-error': '系统异常',
 };
 
-const OPERATOR_LABELS: Record<string, string> = {
-  '>': '高于',
-  '>=': '不低于',
-  '<': '低于',
-  '<=': '不高于',
-  crosses: '穿越',
-  crosses_above: '上穿',
-  crosses_below: '下穿',
-};
-
 const cleanText = (value?: string | null) => value?.replace(/\s+/g, ' ').trim() ?? '';
 const joinText = (...parts: Array<string | null | undefined>) =>
   parts
@@ -247,6 +237,20 @@ const getAlertKey = (alert: AlertPresentationSource) => {
   return ruleKey;
 };
 
+const getRuleIdentityKey = (alert: AlertPresentationSource) => {
+  const builtinKey = normalizeKey(alert.builtinKey);
+  if (builtinKey) {
+    return builtinKey;
+  }
+
+  const ruleKey = normalizeKey(alert.ruleId);
+  if (ruleKey) {
+    return ruleKey;
+  }
+
+  return getAlertKey(alert);
+};
+
 const parseLegacyMessage = (message?: string | null) => {
   const text = cleanText(message);
   const spreadMatch = text.match(/spread alert .*?:\s*([0-9.]+)\s*([<>]=?)\s*([0-9.]+)/i);
@@ -287,8 +291,14 @@ const parseLegacyMessage = (message?: string | null) => {
 };
 
 const getRuleLabel = (alert: AlertPresentationSource) => {
-  const key = getAlertKey(alert);
-  return RULE_LABELS[key] ?? RULE_LABELS[alert.ruleId] ?? '自定义规则';
+  const identityKey = getRuleIdentityKey(alert);
+  const alertKey = getAlertKey(alert);
+  return (
+    RULE_LABELS[identityKey] ??
+    RULE_LABELS[alertKey] ??
+    RULE_LABELS[alert.ruleId] ??
+    '自定义规则'
+  );
 };
 
 export const getAlertRuleLabel = getRuleLabel;
@@ -354,14 +364,6 @@ const getAlertCityDescriptor = (alert: AlertPresentationSource) => {
 
 export const getAlertCityLabel = (alert: AlertPresentationSource) => getAlertCityDescriptor(alert).label;
 
-const withAlertCityPrefix = (alert: AlertPresentationSource, text: string) => {
-  const descriptor = getAlertCityDescriptor(alert);
-  if (descriptor.isSystem) {
-    return text;
-  }
-  return `${descriptor.label}：${text}`;
-};
-
 const getPrimaryActual = (alert: AlertPresentationSource) => {
   const legacy = parseLegacyMessage(alert.message);
   return hasValue(alert.messageParams?.actual) ? alert.messageParams.actual : legacy?.actual;
@@ -375,11 +377,6 @@ const getPrevious = (alert: AlertPresentationSource) => {
 const getThreshold = (alert: AlertPresentationSource) => {
   const legacy = parseLegacyMessage(alert.message);
   return hasValue(alert.messageParams?.threshold) ? alert.messageParams.threshold : legacy?.threshold;
-};
-
-const getOperator = (alert: AlertPresentationSource) => {
-  const legacy = parseLegacyMessage(alert.message);
-  return cleanText(alert.messageParams?.operator) || legacy?.operator || '';
 };
 
 const getLiquiditySide = (alert: AlertPresentationSource) => {
@@ -423,10 +420,10 @@ const getLiquidityCauseText = (alert: AlertPresentationSource) => {
 
   switch (alert.messageParams?.reason) {
     case 'full_empty':
-      notes.push('该侧盘口已空');
+      notes.push('该侧现价盘口已整边清空');
       break;
     case 'top_level':
-      notes.push('顶档已被清空');
+      notes.push('仅顶档被清空，未整边清空');
       break;
     default:
       break;
@@ -493,10 +490,14 @@ const buildReasonText = (alert: AlertPresentationSource) => {
         const sideLabel = getLiquiditySide(alert);
         const target = outcome ? `${outcome} ${sideLabel}` : sideLabel;
         const cause = getLiquidityCauseText(alert);
+        const isTopLevelOnly = alert.messageParams?.reason === 'top_level';
         if (hasValue(previous) && hasValue(actual)) {
           return cause
             ? `${target}从 ${formatCents(previous)}降到 ${formatCents(actual)}（${cause}）`
             : `${target}从 ${formatCents(previous)}降到 ${formatCents(actual)}`;
+        }
+        if (isTopLevelOnly) {
+          return cause ? `${target}仅顶档被清空（${cause}）` : `${target}仅顶档被清空`;
         }
         return cause ? `${target}出现盘口斩杀（${cause}）` : `${target}出现盘口斩杀`;
       }
@@ -559,32 +560,6 @@ const buildReasonText = (alert: AlertPresentationSource) => {
     default:
       return '触发了监控规则';
   }
-};
-
-const buildLegacySummary = (alert: AlertPresentationSource) =>
-  withAlertCityPrefix(alert, buildReasonText(alert));
-
-const buildSummary = (alert: AlertPresentationSource) =>
-  withAlertCityPrefix(alert, buildReasonText(alert));
-
-const buildDetail = (alert: AlertPresentationSource) => {
-  const parts: string[] = [];
-  const band = formatTemperatureBand(alert.marketSnapshot?.temperatureBand);
-  const operatorLabel = OPERATOR_LABELS[getOperator(alert)] ?? null;
-  const threshold = getThreshold(alert);
-  const marketId = cleanText(alert.marketId);
-
-  if (band) {
-    parts.push(`温度区间：${band}`);
-  }
-  if (operatorLabel && hasValue(threshold)) {
-    parts.push(`触发条件：${operatorLabel} ${formatCents(threshold)}`);
-  }
-  if (marketId) {
-    parts.push(`盘口编号：${marketId}`);
-  }
-
-  return parts.length > 0 ? parts.join(' · ') : null;
 };
 
 const buildFacts = (alert: AlertPresentationSource) => {

@@ -276,7 +276,9 @@ const renderView = async ({
           onSaveRules={() => undefined}
           onUpdateSettings={async () => undefined}
           onPickSound={async () => undefined}
-          onRegisterSound={async (_payload?: RegisterSoundPayload) => undefined}
+          onRegisterSound={async (payload?: RegisterSoundPayload) => {
+            void payload;
+          }}
           onClearStorageCache={onClearStorageCache}
           onCreateStorageBackup={onCreateStorageBackup}
           onCreateDiagnosticsPackage={onCreateDiagnosticsPackage}

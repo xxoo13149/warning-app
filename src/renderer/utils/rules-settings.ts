@@ -662,7 +662,7 @@ export const buildRuleConditionSummary = (rule: AlertRule) => {
     case 'spread':
       return `买卖价差${operatorLabel}${thresholdLabel}时提醒`;
     case 'liquidity_kill':
-      return `${formatLiquiditySideLabel(rule.liquiditySide)}顶档被清空，且被清空价位${operatorLabel}${thresholdLabel}时提醒`;
+      return `${formatLiquiditySideLabel(rule.liquiditySide)}现价盘口整边被清空，且清空前价位${operatorLabel}${thresholdLabel}时提醒`;
     case 'volume_pricing':
       return `卖一在${formatRuleDuration(rule.windowSec)}内带量推高${operatorLabel}${thresholdLabel}时提醒`;
     case 'abnormal_lottery':

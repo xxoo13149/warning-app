@@ -4,7 +4,7 @@ import { NavRail } from './components/NavRail';
 import { TopStatusBar } from './components/TopStatusBar';
 import { useMonitorConsole } from './hooks/useMonitorConsole';
 import { useI18n } from './i18n';
-import type { WorkspaceId } from './types/contracts';
+import type { AlertEvent, WorkspaceId } from './types/contracts';
 import { AlertCenterView } from './views/AlertCenterView';
 import { DashboardView } from './views/DashboardView';
 import { MarketExplorerView } from './views/MarketExplorerView';
@@ -19,6 +19,9 @@ type AppNavigatePayload =
       route?: WorkspaceId;
       alertId?: string;
       id?: string;
+      marketId?: string;
+      cityKey?: string;
+      eventDate?: string;
     };
 
 const WORKSPACES = new Set<WorkspaceId>(['dashboard', 'alerts', 'explorer', 'rules']);
@@ -30,9 +33,21 @@ const isWorkspaceId = (value: unknown): value is WorkspaceId =>
 
 const normalizeNavigationPayload = (
   payload: AppNavigatePayload,
-): { workspace: WorkspaceId; alertId: string | null } | null => {
+): {
+  workspace: WorkspaceId;
+  alertId: string | null;
+  marketId: string | null;
+  cityKey: string | null;
+  eventDate: string | null;
+} | null => {
   if (isWorkspaceId(payload)) {
-    return { workspace: payload, alertId: null };
+    return {
+      workspace: payload,
+      alertId: null,
+      marketId: null,
+      cityKey: null,
+      eventDate: null,
+    };
   }
 
   if (!payload || typeof payload !== 'object') {
@@ -45,15 +60,24 @@ const normalizeNavigationPayload = (
   }
 
   const alertId = payload.alertId ?? payload.id ?? null;
+  const marketId = payload.marketId ?? null;
+  const cityKey = payload.cityKey ?? null;
+  const eventDate = payload.eventDate ?? null;
   return {
     workspace,
     alertId: typeof alertId === 'string' && alertId.trim() ? alertId : null,
+    marketId: typeof marketId === 'string' && marketId.trim() ? marketId : null,
+    cityKey: typeof cityKey === 'string' && cityKey.trim() ? cityKey : null,
+    eventDate: typeof eventDate === 'string' && eventDate.trim() ? eventDate : null,
   };
 };
 
 export const App = () => {
   const [workspace, setWorkspace] = useState<WorkspaceId>('dashboard');
   const [focusedAlertId, setFocusedAlertId] = useState<string | null>(null);
+  const [focusedMarketId, setFocusedMarketId] = useState<string | null>(null);
+  const [focusedExplorerAlertId, setFocusedExplorerAlertId] = useState<string | null>(null);
+  const [focusedExplorerAlertSeed, setFocusedExplorerAlertSeed] = useState<AlertEvent | null>(null);
   const monitor = useMonitorConsole();
   const { copy } = useI18n();
   const deferredMarkets = useDeferredValue(monitor.markets);
@@ -73,23 +97,49 @@ export const App = () => {
     }
     return next;
   }, [rulesAlerts]);
+  const focusedExplorerAlert = useMemo(() => {
+    if (focusedExplorerAlertId) {
+      return (
+        deferredAlerts.find((alert) => alert.id === focusedExplorerAlertId) ??
+        focusedExplorerAlertSeed
+      );
+    }
+
+    return focusedExplorerAlertSeed;
+  }, [deferredAlerts, focusedExplorerAlertId, focusedExplorerAlertSeed]);
   const isDashboard = workspace === 'dashboard';
   const alertCount = monitor.alertsTotal;
   const primaryRuntimeIssue = monitor.runtimeIssues[0] ?? null;
-  const openMarketInExplorer = useCallback((eventDate?: string, cityKey?: string) => {
-    setFocusedAlertId(null);
-    setWorkspace('explorer');
-    monitor.setMarketQuery({
-      eventDate: eventDate || undefined,
-      cityKey: cityKey || undefined,
-      limit: 2000,
-      sortBy: 'updatedAt',
-      sortDir: 'desc',
-    });
-  }, [monitor.setMarketQuery]);
+  const openMarketInExplorer = useCallback(
+    (
+      eventDate?: string,
+      cityKey?: string,
+      marketId?: string,
+      alert?: AlertEvent | null,
+    ) => {
+      setFocusedAlertId(null);
+      setFocusedMarketId(marketId || alert?.marketId || null);
+      setFocusedExplorerAlertId(alert?.id || null);
+      setFocusedExplorerAlertSeed(alert ?? null);
+      setWorkspace('explorer');
+      monitor.setMarketQuery({
+        eventDate: eventDate || undefined,
+        cityKey: cityKey || undefined,
+        limit: 2000,
+        sortBy: 'updatedAt',
+        sortDir: 'desc',
+      });
+    },
+    [monitor.setMarketQuery],
+  );
   const changeWorkspace = useCallback((next: WorkspaceId) => {
     if (next !== 'alerts') {
       setFocusedAlertId(null);
+    }
+    if (next !== 'explorer') {
+      setFocusedMarketId(null);
+      setFocusedExplorerAlertId(null);
+      setFocusedExplorerAlertSeed(null);
     }
     setWorkspace(next);
   }, []);
@@ -101,6 +151,25 @@ export const App = () => {
         return;
       }
 
+      if (navigation.workspace === 'explorer') {
+        setFocusedAlertId(null);
+        setFocusedMarketId(navigation.marketId);
+        setFocusedExplorerAlertId(navigation.alertId);
+        setFocusedExplorerAlertSeed(null);
+        setWorkspace('explorer');
+        if (navigation.marketId || navigation.cityKey || navigation.eventDate) {
+          monitor.setMarketQuery({
+            cityKey: navigation.cityKey || undefined,
+            eventDate: navigation.eventDate || undefined,
+            limit: 2000,
+            sortBy: 'updatedAt',
+            sortDir: 'desc',
+          });
+        }
+        return;
+      }
+
+      setFocusedMarketId(null);
       setWorkspace(navigation.workspace);
       setFocusedAlertId(navigation.workspace === 'alerts' ? navigation.alertId : null);
     });
@@ -110,14 +179,16 @@ export const App = () => {
         dispose();
       }
     };
-  }, []);
+  }, [monitor.setMarketQuery]);
 
   const dashboardContent = useMemo(
     () => (
       <DashboardView
         health={monitor.health}
         alerts={dashboardAlerts}
-        onOpenExplorer={(cityKey, eventDate) => openMarketInExplorer(eventDate, cityKey)}
+        onOpenExplorer={(cityKey, eventDate) =>
+          openMarketInExplorer(eventDate, cityKey)
+        }
       />
     ),
     [dashboardAlerts, monitor.health, openMarketInExplorer],
@@ -133,6 +204,14 @@ export const App = () => {
         loadingMore={monitor.alertsLoadingMore}
         loadMoreError={monitor.alertsLoadMoreError}
         onLoadMore={() => monitor.loadMoreAlerts()}
+        onOpenMarket={(alert) =>
+          openMarketInExplorer(
+            alert.marketSnapshot?.eventDate ?? undefined,
+            alert.cityKey || undefined,
+            alert.marketId || undefined,
+            alert,
+          )
+        }
       />
     ),
     [
@@ -143,6 +222,7 @@ export const App = () => {
       monitor.alertsLoadingMore,
       monitor.alertsTotal,
       monitor.loadMoreAlerts,
+      openMarketInExplorer,
     ],
   );
 
@@ -152,12 +232,16 @@ export const App = () => {
         rows={deferredMarkets}
         total={monitor.marketTotal}
         query={monitor.marketQuery}
+        focusMarketId={focusedMarketId}
+        focusAlert={focusedExplorerAlert}
         onQueryChange={monitor.setMarketQuery}
         onRefresh={monitor.refreshMarkets}
       />
     ),
     [
       deferredMarkets,
+      focusedMarketId,
+      focusedExplorerAlert,
       monitor.marketQuery,
       monitor.marketTotal,
       monitor.refreshMarkets,

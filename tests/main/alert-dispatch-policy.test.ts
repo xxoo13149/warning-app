@@ -102,7 +102,7 @@ describe('AlertDispatchPolicy', () => {
     expect(plan.toastDecision).toEqual({ allowed: false, reason: 'foreground-window' });
   });
 
-  it('blocks dispatch during quiet hours, including windows that cross midnight', () => {
+  it('keeps dispatch available even if quiet-hours settings still exist in runtime payloads', () => {
     expect(
       isQuietHoursActive(
         {
@@ -111,7 +111,7 @@ describe('AlertDispatchPolicy', () => {
         },
         new Date(2026, 3, 25, 0, 30),
       ),
-    ).toBe(true);
+    ).toBe(false);
     expect(
       isQuietHoursActive(
         {

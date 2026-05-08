@@ -265,7 +265,7 @@ export class PolymarketDataService extends EventEmitter {
     } else if (eventType === 'last_trade_price') {
       this.applyTradeEvent(existing, event, now);
     } else if (eventType === 'price_change') {
-      this.applyPriceChangeEvent(tokenId, existing, event, now);
+      this.applyPriceChangeEvent(tokenId, existing, event);
     } else if (eventType === 'book') {
       const applied = this.applyBookEvent(tokenId, existing, event);
       if (!applied) {
@@ -304,7 +304,6 @@ export class PolymarketDataService extends EventEmitter {
     tokenId: string,
     existing: TokenRuntimeState,
     event: MarketWsMessage,
-    now: number,
   ): void {
     const orderBook = this.getOrCreateOrderBook(tokenId);
     const before = this.summarizeOrderBook(orderBook);

@@ -183,7 +183,10 @@ const messages = {
       storageMissing: '未创建',
       storageCreateBackup: '保存数据副本',
       storageCreateBackupBusy: '正在保存数据副本...',
-      storageCreateBackupDone: (_filePath: string) => '已创建新的数据备份。',
+      storageCreateBackupDone: (filePath: string) => {
+        void filePath;
+        return '已创建新的数据备份。';
+      },
       storageCreateBackupFailed: '数据备份失败，请稍后重试。',
       storageCreateBackupMissingMainDb: (filePath: string) =>
         `数据文件还不存在，暂时无法备份：${filePath}。请先启动一次应用并等待数据生成。`,
@@ -447,7 +450,10 @@ const messages = {
       storageMissing: 'Not created',
       storageCreateBackup: 'Save Data Copy',
       storageCreateBackupBusy: 'Saving data copy...',
-      storageCreateBackupDone: (_filePath: string) => 'A new data backup has been created.',
+      storageCreateBackupDone: (filePath: string) => {
+        void filePath;
+        return 'A new data backup has been created.';
+      },
       storageCreateBackupFailed: 'Data backup failed. Please retry.',
       storageCreateBackupMissingMainDb: (filePath: string) =>
         `The data file is missing, so backup is unavailable: ${filePath}. Start the app once and wait for data to be created.`,

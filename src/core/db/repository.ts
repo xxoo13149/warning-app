@@ -439,15 +439,16 @@ export class WeatherMonitorRepository {
 
     const rowFilters = [...baseFilters];
     if (query.cursor) {
-      rowFilters.push(
-        or(
-          lt(alertEvents.triggeredAt, query.cursor.triggeredAt),
-          and(
-            eq(alertEvents.triggeredAt, query.cursor.triggeredAt),
-            lt(alertEvents.id, query.cursor.id),
-          ),
-        )!,
+      const cursorFilter = or(
+        lt(alertEvents.triggeredAt, query.cursor.triggeredAt),
+        and(
+          eq(alertEvents.triggeredAt, query.cursor.triggeredAt),
+          lt(alertEvents.id, query.cursor.id),
+        ),
       );
+      if (cursorFilter) {
+        rowFilters.push(cursorFilter);
+      }
     }
 
     const rowFilter = rowFilters.length > 0 ? and(...rowFilters) : undefined;
@@ -710,6 +711,10 @@ function normalizeAlertMetric(metric: string): AlertRule['metric'] {
     case 'volume-pricing':
     case 'volumepricing':
       return 'volume_pricing';
+    case 'abnormal_lottery':
+    case 'abnormal-lottery':
+    case 'abnormallottery':
+      return 'abnormal_lottery';
     case 'spread_threshold':
     case 'spread':
     case 'bidask_gap':

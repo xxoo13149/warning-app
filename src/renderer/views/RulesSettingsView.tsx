@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { QuickControlPanel } from '../components/QuickControlPanel';
 import type { MonitorRuntimeIssue } from '../hooks/useMonitorConsole';
@@ -33,9 +33,6 @@ import type {
 import {
   type AlertRule,
   buildRuleConditionSummary,
-  buildRuleEditorScopeOptions,
-  buildRuleScopeSummary,
-  filtersFromRule,
   formatLiquiditySideLabel,
   formatRuleDuration,
   formatRuleMetricLabel,
@@ -44,29 +41,12 @@ import {
   normalizeRuleDrafts,
   quietHoursDraftToValue,
   quietHoursToDraft,
-  replaceRuleScopeFilters,
   type RuleQuietHoursDraft,
-  type RuleScopeFilters,
 } from '../utils/rules-settings';
 
 const SAMPLE_CITY_MAP_LINES = ['tokyo,RJTT,Asia/Tokyo', 'nyc,KNYC,America/New_York'];
 
 type SettingsFeedbackTone = 'muted' | 'success' | 'warning' | 'danger';
-type RuleDiagnosticTone = SettingsFeedbackTone;
-
-interface RuleDiagnosticItem {
-  label: string;
-  value: string;
-  hint: string;
-  tone: RuleDiagnosticTone;
-}
-
-interface RuleDiagnostic {
-  tone: RuleDiagnosticTone;
-  title: string;
-  summary: string;
-  items: RuleDiagnosticItem[];
-}
 
 interface RuleTriggerGuideItem {
   label: string;
@@ -79,19 +59,6 @@ interface RuleTriggerGuide {
   summary: string;
   thresholdHint: string;
   items: RuleTriggerGuideItem[];
-}
-
-interface RuleScopeGuideItem {
-  label: string;
-  value: string;
-  hint: string;
-}
-
-interface RuleScopeGuide {
-  tone: 'muted' | 'success' | 'warning';
-  title: string;
-  summary: string;
-  items: RuleScopeGuideItem[];
 }
 
 interface RuleListSignal {
@@ -143,16 +110,9 @@ const ENABLED_FILTERS = [
   { value: 'disabled', label: '只看已停用' },
 ] as const;
 
-const SCOPE_FILTERS = [
-  { value: 'all', label: '全部范围' },
-  { value: 'global', label: '全局规则' },
-  { value: 'scoped', label: '指定范围' },
-  { value: 'market', label: '指定市场' },
-] as const;
-
 const RULE_PAGE_TEXT = {
   search: '搜索规则',
-  searchPlaceholder: '输入规则名、指标、城市或温度区间',
+  searchPlaceholder: '输入规则名、指标或触发条件',
   source: '规则来源',
   enabledFilter: '启用状态',
   metricFilter: '监控指标',
@@ -193,17 +153,14 @@ const RULE_PAGE_TEXT = {
   previewSound: '试听提示音',
   importCityMap: '导入示例城市映射',
 };
-
-const RULE_DRAFT_DIRTY_TEXT = '草稿有未保存修改。';
-const RULE_DRAFT_SYNCED_TEXT = '草稿与后台一致。';
 const RULE_FILTER_PANEL_TEXT = {
   step: '第一步',
   title: '先筛选规则',
-  hint: '按来源、状态、关键词、指标和范围缩小范围，再选择要调整的规则。',
+  hint: '按来源、状态、关键词和指标缩小范围，再选择要调整的规则。',
   commonTitle: '基础筛选',
   commonHint: '先用常用条件快速定位。',
   advancedTitle: '精确筛选',
-  advancedHint: '需要更准时，再限定指标和范围。',
+  advancedHint: '需要更准时，再限定来源和指标。',
   matchedLabel: '当前匹配',
   activeLabel: '当前筛选',
   activeEmpty: '未启用筛选，显示全部规则。',
@@ -237,28 +194,21 @@ const RULE_EDITOR_SECTION_TEXT = {
     hint: '只在需要单独静音时打开，再设置开始和结束时间。',
   },
 };
-const RULE_ACTION_PANEL_TEXT = {
-  step: '第四步',
-  title: '确认影响后再执行操作',
-  hint: '看清当前规则、预览结果和草稿状态，再预览、保存或恢复。',
-  selectedTitle: '当前规则',
+const RULE_EDITOR_DIALOG_TEXT = {
+  eyebrow: '修改规则',
+  liveHint: '修改会立即生效，点空白处也可以关闭。',
   previewTitle: '预览结果',
   previewIdle: '暂无预览结果',
   previewBusy: '正在预览',
   previewDone: '最近预览',
   previewStale: '预览需更新',
   previewStaleHint: '设置已修改，请重新预览。',
-  draftTitle: '草稿状态',
-  draftDirty: '草稿未保存',
-  draftSynced: '草稿已同步',
-  restoreDraft: '恢复后台值',
 };
 
 const STORAGE_CLEAR_RECOMMENDATION_HIGH_BYTES = 512 * 1024 * 1024;
 
 type SourceFilter = (typeof SOURCE_FILTERS)[number]['value'];
 type EnabledFilter = (typeof ENABLED_FILTERS)[number]['value'];
-type ScopeFilter = (typeof SCOPE_FILTERS)[number]['value'];
 type MetricFilter = 'all' | AlertRule['metric'];
 
 const cleanText = (value?: string | null) => value?.trim() ?? '';
@@ -287,32 +237,17 @@ const LIQUIDITY_SIDE_OPTIONS: Array<{
   { value: 'sell', label: '只看卖盘' },
 ];
 
-const getRuleScopeFilter = (rule: AlertRule): Exclude<ScopeFilter, 'all'> => {
-  if (cleanText(rule.scope?.marketId) || cleanText(rule.scope?.tokenId)) {
-    return 'market';
-  }
-  if (
-    cleanText(rule.scope?.cityKey) ||
-    cleanText(rule.scope?.eventDate) ||
-    cleanText(rule.scope?.temperatureBand) ||
-    cleanText(rule.scope?.seriesSlug) ||
-    (rule.scope?.side && rule.scope.side !== 'BOTH')
-  ) {
-    return 'scoped';
-  }
-  return 'global';
-};
-
 const countRules = (rules: AlertRule[], predicate: (rule: AlertRule) => boolean) =>
   rules.reduce((total, rule) => (predicate(rule) ? total + 1 : total), 0);
 
-const buildRuleSearchText = (rule: AlertRule, marketRows: MarketRow[]) =>
+const buildRulesSyncToken = (rules: AlertRule[]) => JSON.stringify(rules);
+
+const buildRuleSearchText = (rule: AlertRule) =>
   [
     rule.name,
     formatRuleSourceLabel(rule),
     formatRuleMetricLabel(rule.metric),
     buildRuleConditionSummary(rule),
-    buildRuleScopeSummary(rule, marketRows),
   ]
     .filter(Boolean)
     .join(' ')
@@ -372,13 +307,6 @@ const formatCentsText = (value: number | null | undefined) => {
     return '暂无';
   }
   return `${Math.round(value * 100)} 美分`;
-};
-
-const formatCompactCentsText = (value: number | null | undefined) => {
-  if (!hasNumber(value)) {
-    return '--';
-  }
-  return `${Math.round(value * 100)}c`;
 };
 
 const formatPercentText = (value: number | null | undefined) => {
@@ -477,7 +405,7 @@ const rowMatchesRuleScope = (rule: AlertRule, row: MarketRow) => {
 const getRowsForRuleScope = (rule: AlertRule, marketRows: MarketRow[]) =>
   rule.metric === 'feed_stale' ? [] : marketRows.filter((row) => rowMatchesRuleScope(rule, row));
 
-const formatScopeSideText = (side?: RuleScopeFilters['side'] | AlertRule['scope']['side']) => {
+const formatScopeSideText = (side?: AlertRule['scope']['side']) => {
   switch (side) {
     case 'YES':
       return '是';
@@ -524,48 +452,6 @@ const formatPreviewSampleQuote = (row: RulePreviewResult['sampleMarkets'][number
 
 const ABNORMAL_LOTTERY_ROUTE_HINT = '1-2c -> 3c, 3-4c -> 4c';
 
-const formatAbnormalLotteryRouteText = (row: MarketRow) => {
-  if (!hasNumber(row.lotteryReferenceAsk) || !hasNumber(row.lotteryCurrentAsk)) {
-    return '暂无';
-  }
-
-  return `${formatCompactCentsText(row.lotteryReferenceAsk)} -> ${formatCompactCentsText(row.lotteryCurrentAsk)}`;
-};
-
-const formatAbnormalLotteryConfirmationText = (row: MarketRow) => {
-  switch (row.lotteryConfirmationSource) {
-    case 'edge_volume':
-      return '旧档被吃确认';
-    case 'trade_confirmed':
-      return '成交确认';
-    case 'book_depth':
-      return '盘口深度确认';
-    default:
-      return '等待确认';
-  }
-};
-
-const buildScopeMarketLabel = (row: MarketRow) =>
-  [
-    cleanText(row.cityName) || row.cityKey,
-    row.eventDate,
-    formatScopeBandText(row.temperatureBand),
-    formatScopeSideText(row.side),
-  ]
-    .filter(Boolean)
-    .join('，');
-
-const getScopeCityLabel = (cityKey: string | undefined, marketRows: MarketRow[]) => {
-  const normalizedCityKey = cleanText(cityKey);
-  if (!normalizedCityKey) {
-    return '全部城市';
-  }
-  return (
-    marketRows.find((row) => row.cityKey === normalizedCityKey)?.cityName ||
-    normalizedCityKey
-  );
-};
-
 const getRuleCurrentValue = (rule: AlertRule, row: MarketRow) => {
   switch (rule.metric) {
     case 'price':
@@ -604,317 +490,6 @@ const formatRuleValue = (rule: AlertRule, value: number | null | undefined) => {
   }
 };
 
-const buildRuleDiagnostic = ({
-  rule,
-  marketRows,
-  latestAlertAtByRuleId,
-  health,
-  hasUnsavedChanges,
-  isQuietHoursActive,
-  notificationsEnabled,
-}: {
-  rule: AlertRule | null;
-  marketRows: MarketRow[];
-  latestAlertAtByRuleId: Record<string, string | undefined>;
-  health: AppHealth;
-  hasUnsavedChanges: boolean;
-  isQuietHoursActive: boolean;
-  notificationsEnabled: boolean;
-}): RuleDiagnostic => {
-  if (!rule) {
-    return {
-      tone: 'muted',
-      title: '先选择一条规则',
-      summary: '选择规则后，这里会显示它为什么会触发、为什么暂时没有触发。',
-      items: [
-        { label: '规则状态', value: '未选择', hint: '先从规则列表里点一条规则。', tone: 'muted' },
-      ],
-    };
-  }
-
-  const latestAlertAt = latestAlertAtByRuleId[rule.id] ?? null;
-  const scopedRows = getRowsForRuleScope(rule, marketRows);
-  const triggeredRows = scopedRows.filter((row) =>
-    compareRuleValue(getRuleCurrentValue(rule, row), rule.operator, rule.threshold),
-  );
-  const feedLagSec = Math.max(0, Math.round((health.serviceStatus?.lagMs ?? 0) / 1000));
-  const feedTriggered =
-    rule.metric === 'feed_stale' && compareRuleValue(feedLagSec, rule.operator, rule.threshold);
-  const currentValue =
-    triggeredRows[0]
-      ? getRuleCurrentValue(rule, triggeredRows[0])
-      : scopedRows[0]
-        ? getRuleCurrentValue(rule, scopedRows[0])
-        : null;
-
-  const disabledReason = !rule.enabled
-    ? '这条规则已停用，后台不会按它生成告警。'
-    : hasUnsavedChanges
-      ? '草稿还没保存，后台仍按保存前的规则运行。'
-      : rule.metric !== 'feed_stale' && scopedRows.length === 0
-        ? '当前范围没有覆盖到任何盘口，请调整城市、日期、温区或盘口。'
-        : rule.metric === 'feed_stale' && !health.serviceStatus
-          ? '当前还没有数据流状态，等监控连接稳定后再判断。'
-          : null;
-
-  if (rule.metric === 'abnormal_lottery') {
-    const coverageText = `${scopedRows.length} 个盘口`;
-    const lotteryRows = scopedRows.filter((row) => hasAbnormalLotterySignal(row));
-    const confirmedRows = lotteryRows.filter((row) => Boolean(row.lotteryConfirmationSource));
-    const sampleRow = confirmedRows[0] ?? lotteryRows[0] ?? null;
-    const title = disabledReason
-      ? '暂时不会触发'
-      : latestAlertAt
-        ? '最近捕捉到过异常彩票确认'
-        : confirmedRows.length > 0
-          ? '当前范围已有异常彩票确认'
-          : lotteryRows.length > 0
-            ? '当前范围已有异常彩票候选'
-            : scopedRows.length > 0
-              ? '等待新的异常彩票候选'
-              : '当前范围没有覆盖盘口';
-    const summary =
-      disabledReason ??
-      (scopedRows.length === 0
-        ? '先把范围收敛到真正要看的城市、日期、温区或单个盘口，否则这条规则不会命中。'
-        : lotteryRows.length > 0
-          ? '这条系统规则看的不是模式切换，而是市场本身是否出现超低价卖一被快速推高并拿到确认路径。'
-          : '当前范围内还没有出现异常彩票候选；市场列表里的 badge、route 和 confirmation 会先提供上下文。');
-
-    return {
-      tone: disabledReason ? 'warning' : latestAlertAt || confirmedRows.length > 0 ? 'success' : scopedRows.length > 0 ? 'muted' : 'warning',
-      title,
-      summary,
-      items: [
-        {
-          label: '规则状态',
-          value: rule.enabled ? '已启用' : '已停用',
-          hint: rule.enabled ? '后台会持续监听新的异常彩票候选和确认。' : '开启后才会继续监听异常彩票事件。',
-          tone: rule.enabled ? 'success' : 'danger',
-        },
-        {
-          label: '覆盖盘口',
-          value: coverageText,
-          hint:
-            scopedRows.length > 0
-              ? buildRuleScopeSummary(rule, marketRows)
-              : '当前范围没有任何盘口样本，请先调整范围。',
-          tone: scopedRows.length > 0 ? 'success' : 'warning',
-        },
-        {
-          label: '候选 / 确认',
-          value: `${lotteryRows.length} / ${confirmedRows.length}`,
-          hint: '候选来自超低价盘口的快速推高；确认来源会显示成交、旧档被吃或盘口深度。',
-          tone: lotteryRows.length > 0 ? 'success' : 'muted',
-        },
-        {
-          label: '最低确认终点',
-          value: formatRuleValue(rule, rule.threshold),
-          hint: '前端表达按最低确认终点展示，同时沿用 1-2c -> 3c、3-4c -> 4c 的超低价 route。',
-          tone: 'muted',
-        },
-        {
-          label: '最新路线',
-          value: sampleRow ? formatAbnormalLotteryRouteText(sampleRow) : '暂无',
-          hint: sampleRow
-            ? `${cleanText(sampleRow.cityName) || sampleRow.cityKey} · ${formatAbnormalLotteryConfirmationText(sampleRow)}`
-            : '当前范围内还没有可展示的异常彩票 route。',
-          tone: sampleRow ? 'success' : 'muted',
-        },
-        {
-          label: '最近告警',
-          value: latestAlertAt ? formatDateTimeText(latestAlertAt) : '暂无',
-          hint: latestAlertAt ? '告警中心里可以查看这次异常彩票命中的完整记录。' : '当前已加载的告警里还没有这条规则的记录。',
-          tone: latestAlertAt ? 'success' : 'muted',
-        },
-      ],
-    };
-  }
-
-  if (rule.metric === 'volume_pricing') {
-    const coverageText = `${scopedRows.length} 个盘口`;
-    const windowText = formatRuleDuration(rule.windowSec);
-    const title = disabledReason
-      ? '暂时不会触发'
-      : latestAlertAt
-        ? '最近捕捉到过带量定价'
-        : scopedRows.length > 0
-          ? '等待新的带量定价事件'
-          : '当前范围没有覆盖盘口';
-    const summary =
-      disabledReason ??
-      (scopedRows.length === 0
-        ? '先把范围收窄到真正要盯的城市、日期、温区或单个盘口，否则这条规则不会命中。'
-        : '这条规则看的是卖一在短窗口内被明显推高，并且要有成交量或盘口量确认；不是单纯看当前价格高低。');
-
-    return {
-      tone: disabledReason ? 'warning' : latestAlertAt ? 'success' : scopedRows.length > 0 ? 'muted' : 'warning',
-      title,
-      summary,
-      items: [
-        {
-          label: '规则状态',
-          value: rule.enabled ? '已启用' : '已停用',
-          hint: rule.enabled ? '后台会持续监听新的带量定价事件。' : '开启后才会继续监听带量定价。',
-          tone: rule.enabled ? 'success' : 'danger',
-        },
-        {
-          label: '覆盖盘口',
-          value: coverageText,
-          hint:
-            scopedRows.length > 0
-              ? buildRuleScopeSummary(rule, marketRows)
-              : '当前范围没有任何盘口样本，请先调整范围。',
-          tone: scopedRows.length > 0 ? 'success' : 'warning',
-        },
-        {
-          label: '触发逻辑',
-          value: `卖一推高 ${formatRuleValue(rule, rule.threshold)}+`,
-          hint: '例如卖一从 20 美分被推高到 40 美分，并且有成交或挂单量确认，才算带量定价。',
-          tone: 'muted',
-        },
-        {
-          label: '观察窗口',
-          value: windowText,
-          hint: `后台会在 ${windowText} 内比较卖一是否被推高，并自动做冷却和去重。`,
-          tone: 'muted',
-        },
-        {
-          label: '最近命中',
-          value: latestAlertAt ? formatDateTimeText(latestAlertAt) : '暂无',
-          hint: latestAlertAt ? '告警中心里可以查看这次带量定价的完整记录。' : '没有命中不代表异常，只代表还没出现有效量价事件。',
-          tone: latestAlertAt ? 'success' : 'muted',
-        },
-      ],
-    };
-  }
-
-  if (rule.metric === 'liquidity_kill') {
-    const coverageText = `${scopedRows.length} 个盘口`;
-    const windowText = formatRuleDuration(rule.windowSec);
-    const title = disabledReason
-      ? '暂时不会触发'
-      : latestAlertAt
-        ? '最近捕捉到过盘口斩杀'
-        : scopedRows.length > 0
-          ? '等待新的盘口斩杀事件'
-          : '当前范围没有覆盖盘口';
-    const summary =
-      disabledReason ??
-      (scopedRows.length === 0
-        ? '先把范围收窄到真正要盯的城市、日期、温区或单个盘口，否则这条规则不会命中。'
-        : '这条规则看的是短窗口内“顶档被清空”的事件，不适合用当前买一卖一直接判断会不会触发。');
-
-    return {
-      tone: disabledReason ? 'warning' : latestAlertAt ? 'success' : scopedRows.length > 0 ? 'muted' : 'warning',
-      title,
-      summary,
-      items: [
-        {
-          label: '规则状态',
-          value: rule.enabled ? '已启用' : '已停用',
-          hint: rule.enabled ? '后台会持续监听新的盘口清空事件。' : '开启后才会继续监听盘口斩杀。 ',
-          tone: rule.enabled ? 'success' : 'danger',
-        },
-        {
-          label: '覆盖盘口',
-          value: coverageText,
-          hint:
-            scopedRows.length > 0
-              ? buildRuleScopeSummary(rule, marketRows)
-              : '当前范围没有任何盘口样本，请先调整范围。',
-          tone: scopedRows.length > 0 ? 'success' : 'warning',
-        },
-        {
-          label: '监控盘口',
-          value: formatLiquiditySideLabel(rule.liquiditySide),
-          hint: '买盘指买一侧，卖盘指卖一侧；这不是 YES/NO 方向。',
-          tone: 'muted',
-        },
-        {
-          label: '触发门槛',
-          value: `${formatRuleValue(rule, rule.threshold)} / ${windowText}`,
-          hint: '只要被清空前的顶档价位不低于这个门槛，并且事件发生在观察窗口内，就会进入告警判断。',
-          tone: 'muted',
-        },
-        {
-          label: '最近告警',
-          value: latestAlertAt ? formatDateTimeText(latestAlertAt) : '暂无',
-          hint: latestAlertAt ? '这是最近一次写入告警中心的盘口斩杀记录。' : '当前已加载的告警里还没有这条规则的记录。',
-          tone: latestAlertAt ? 'success' : 'muted',
-        },
-      ],
-    };
-  }
-
-  const hasCurrentHit = rule.metric === 'feed_stale' ? feedTriggered : triggeredRows.length > 0;
-  const tone = disabledReason
-    ? 'warning'
-    : hasCurrentHit
-      ? 'success'
-      : 'muted';
-  const title = disabledReason
-    ? '暂时不会触发'
-    : hasCurrentHit
-      ? '当前已达到触发条件'
-      : '当前未达到触发条件';
-  const summary = disabledReason ??
-    (hasCurrentHit
-      ? '后台会按冷却和去重规则写入告警；如果刚触发过，可能会等待窗口结束。'
-      : '规则已经启用并覆盖盘口，但当前盘口数值还没碰到阈值。');
-
-  const triggerHint =
-    rule.metric === 'feed_stale'
-      ? `当前数据延迟约 ${feedLagSec} 秒，阈值是 ${formatRuleValue(rule, rule.threshold)}。`
-      : scopedRows.length > 0
-        ? `样本当前值 ${formatRuleValue(rule, currentValue)}，阈值 ${formatRuleValue(rule, rule.threshold)}。`
-        : '没有可用于判断的盘口样本。';
-
-  return {
-    tone,
-    title,
-    summary,
-    items: [
-      {
-        label: '规则状态',
-        value: rule.enabled ? '已启用' : '已停用',
-        hint: rule.enabled ? '后台会评估这条规则。' : '打开启用开关后才会进入后台评估。',
-        tone: rule.enabled ? 'success' : 'danger',
-      },
-      {
-        label: '覆盖盘口',
-        value: rule.metric === 'feed_stale' ? '数据流' : `${scopedRows.length} 个`,
-        hint: rule.metric === 'feed_stale' ? '这类规则看实时数据流，不按单个盘口判断。' : buildRuleScopeSummary(rule, marketRows),
-        tone: scopedRows.length > 0 || rule.metric === 'feed_stale' ? 'success' : 'warning',
-      },
-      {
-        label: '当前命中',
-        value: rule.metric === 'feed_stale'
-          ? feedTriggered ? '已超过阈值' : '未超过阈值'
-          : `${triggeredRows.length} 个`,
-        hint: triggerHint,
-        tone: hasCurrentHit ? 'success' : 'muted',
-      },
-      {
-        label: '最近告警',
-        value: latestAlertAt ? formatDateTimeText(latestAlertAt) : '暂无',
-        hint: latestAlertAt ? '这是当前列表里这条规则最近一次写入时间。' : '当前已加载的告警里还没有这条规则的记录。',
-        tone: latestAlertAt ? 'success' : 'muted',
-      },
-      {
-        label: '提醒方式',
-        value: !notificationsEnabled ? '通知关闭' : isQuietHoursActive ? '静音中' : '可提醒',
-        hint: !notificationsEnabled
-          ? '通知关闭不会影响告警中心记录，只是不弹系统通知。'
-          : isQuietHoursActive
-            ? '安静时段只静音弹窗和声音，告警仍会记录。'
-            : '命中后会写入告警中心，并按设置弹通知和播放声音。',
-        tone: !notificationsEnabled || isQuietHoursActive ? 'warning' : 'success',
-      },
-    ],
-  };
-};
-
 const getRuleMetricPlainText = (metric: AlertRule['metric']) => {
   switch (metric) {
     case 'price':
@@ -924,7 +499,7 @@ const getRuleMetricPlainText = (metric: AlertRule['metric']) => {
     case 'spread':
       return '监控买一和卖一之间的价差是否过宽。';
     case 'liquidity_kill':
-      return '监控短窗口内买一或卖一顶档是否被清空，这是一个事件型规则，不是静态价格阈值。';
+      return '监控短窗口内买盘或卖盘该侧现价盘口是否被清空，这是一个事件型规则，不是静态价格阈值。';
     case 'volume_pricing':
       return '监控卖一是否在短窗口内被明显推高，并且有成交或盘口量确认。';
     case 'abnormal_lottery':
@@ -947,7 +522,7 @@ const getRuleThresholdHint = (metric: AlertRule['metric']) => {
     case 'price':
       return '按 0 到 1 的价格填写，例如 0.5 表示 50 美分。';
     case 'liquidity_kill':
-      return '填写“被清空前的最低顶档价位”，例如 0.2 表示只有清空 20 美分及以上的顶档才提醒。';
+      return '填写“该侧现价盘口被清空前的最低价位”，例如 0.2 表示只有清空 20 美分及以上的现价盘口才提醒。';
     case 'volume_pricing':
       return '填写“卖一被推高的最小幅度”，例如 0.1 表示至少推高 10 美分才提醒。';
     case 'abnormal_lottery':
@@ -1065,22 +640,22 @@ const buildRuleTriggerGuide = (rule: AlertRule): RuleTriggerGuide => {
         {
           label: '监控指标',
           value: formatRuleMetricLabel(rule.metric),
-          hint: '新版盘口斩杀看的是“顶档被清空”这个事件，不是当前价格还剩多少。',
+          hint: '新版盘口斩杀看的是“买盘/卖盘该侧现价盘口被清空”这个事件，不是当前价格还剩多少。',
         },
         {
           label: '监控盘口',
           value: formatLiquiditySideLabel(rule.liquiditySide),
-          hint: '买盘=买一侧，卖盘=卖一侧；如果选买卖两边，只要任意一边被清空就会判断。',
+          hint: '买盘=买一侧现价盘口，卖盘=卖一侧现价盘口；如果选买卖两边，只要任意一侧现价盘口被清空就会判断。',
         },
         {
-          label: '最低被清空价位',
+          label: '最低清空前价位',
           value: formatRuleValue(rule, rule.threshold),
           hint: getRuleThresholdHint(rule.metric),
         },
         {
           label: '观察窗口',
           value: formatRuleDuration(rule.windowSec),
-          hint: `后台会在 ${formatRuleDuration(rule.windowSec)} 的窗口里看是否发生顶档清空，再叠加冷却和去重控制重复提醒。`,
+          hint: `后台会在 ${formatRuleDuration(rule.windowSec)} 的窗口里看是否发生该侧现价盘口被清空，再叠加冷却和去重控制重复提醒。`,
         },
       ],
     };
@@ -1110,85 +685,6 @@ const buildRuleTriggerGuide = (rule: AlertRule): RuleTriggerGuide => {
         label: '时间控制',
         value: `${formatRuleDuration(rule.windowSec)} / ${formatRuleDuration(rule.cooldownSec)}`,
         hint: `观察 ${formatRuleDuration(rule.windowSec)}；触发后冷却 ${formatRuleDuration(rule.cooldownSec)}。`,
-      },
-    ],
-  };
-};
-
-const buildRuleScopeGuide = (rule: AlertRule, marketRows: MarketRow[]): RuleScopeGuide => {
-  if (rule.metric === 'feed_stale') {
-    return {
-      tone: 'muted',
-      title: '数据流规则不按盘口范围筛选',
-      summary: '这条规则监控整体行情数据是否停更，不需要选择城市、日期或温区。',
-      items: [
-        {
-          label: '监控对象',
-          value: '实时数据流',
-          hint: '它看数据更新状态，不看单个盘口价格。',
-        },
-        {
-          label: '范围设置',
-          value: '无需调整',
-          hint: '城市、日期、温区不会改变这类规则的判断方式。',
-        },
-      ],
-    };
-  }
-
-  const scopedRows = getRowsForRuleScope(rule, marketRows);
-  const marketRow = rule.scope?.marketId
-    ? marketRows.find((row) => row.marketId === rule.scope.marketId)
-    : null;
-  const hasPrimaryScope =
-    cleanText(rule.scope?.cityKey) ||
-    cleanText(rule.scope?.eventDate) ||
-    cleanText(rule.scope?.temperatureBand) ||
-    (rule.scope?.side && rule.scope.side !== 'BOTH');
-  const modeText = rule.scope?.marketId
-    ? '单一盘口'
-    : hasPrimaryScope
-      ? '条件筛选'
-      : '全局监控';
-  const cityText = getScopeCityLabel(rule.scope?.cityKey, marketRows);
-  const dateText = cleanText(rule.scope?.eventDate) || '全部日期';
-  const bandText = formatScopeBandText(rule.scope?.temperatureBand);
-  const sideText = formatScopeSideText(rule.scope?.side);
-  const marketText = marketRow
-    ? buildScopeMarketLabel(marketRow)
-    : rule.scope?.marketId
-      ? `指定盘口 ${rule.scope.marketId}`
-      : '不锁定单一盘口';
-
-  return {
-    tone: scopedRows.length > 0 ? 'success' : 'warning',
-    title: scopedRows.length > 0 ? `当前覆盖 ${scopedRows.length} 个盘口` : '当前没有覆盖盘口',
-    summary:
-      scopedRows.length > 0
-        ? buildRuleScopeSummary(rule, marketRows)
-        : '当前范围没有匹配到盘口，保存后这条规则不会命中任何城市。',
-    items: [
-      {
-        label: '范围模式',
-        value: modeText,
-        hint: rule.scope?.marketId
-          ? '只盯一个具体盘口，适合非常精准的监控。'
-          : '可以用城市、日期、温区和方向逐步缩小范围。',
-      },
-      {
-        label: '城市和日期',
-        value: `${cityText} / ${dateText}`,
-        hint: '先定城市和日期，通常就能快速缩小大部分范围。',
-      },
-      {
-        label: '温区和方向',
-        value: `${bandText} / ${sideText}`,
-        hint: '温区控制天气档位，方向控制是或否盘口。',
-      },
-      {
-        label: '盘口选择',
-        value: marketText,
-        hint: `当前市场池共有 ${marketRows.length} 个盘口可用于匹配。`,
       },
     ],
   };
@@ -1230,7 +726,7 @@ const buildRuleListSignal = (
         statusText: '已启用',
         coverageText: '0 个盘口',
         hitText: '等待候选',
-        hint: '当前范围没有覆盖盘口，系统就抓不到异常彩票候选。',
+        hint: '当前还没有可评估的盘口数据，系统暂时抓不到异常彩票候选。',
       };
     }
 
@@ -1251,8 +747,8 @@ const buildRuleListSignal = (
         confirmedRows.length > 0
           ? `已看到 ${confirmedRows.length} 个异常彩票确认；可回到 Market Explorer 查看 badge、route 和 confirmation 细节。`
           : lotteryRows.length > 0
-            ? `当前范围已有 ${lotteryRows.length} 个超低价候选，系统会继续等 confirmation source。`
-            : `当前范围暂未出现异常彩票候选；重点关注超低价 route ${ABNORMAL_LOTTERY_ROUTE_HINT}。`,
+            ? `当前已有 ${lotteryRows.length} 个超低价候选，系统会继续等 confirmation source。`
+            : `当前暂未出现异常彩票候选；重点关注超低价 route ${ABNORMAL_LOTTERY_ROUTE_HINT}。`,
     };
   }
 
@@ -1263,7 +759,7 @@ const buildRuleListSignal = (
         statusText: '已启用',
         coverageText: '0 个盘口',
         hitText: '按事件判断',
-        hint: '当前范围没有覆盖盘口，后台就抓不到带量定价事件。',
+        hint: '当前还没有可评估的盘口数据，后台暂时抓不到带量定价事件。',
       };
     }
 
@@ -1283,7 +779,7 @@ const buildRuleListSignal = (
         statusText: '已启用',
         coverageText: '0 个盘口',
         hitText: '按事件判断',
-        hint: '当前范围没有覆盖盘口，后台就抓不到盘口斩杀事件。',
+        hint: '当前还没有可评估的盘口数据，后台暂时抓不到该侧现价盘口被清空的事件。',
       };
     }
 
@@ -1292,7 +788,7 @@ const buildRuleListSignal = (
       statusText: '已启用',
       coverageText: `${scopedRows.length} 个盘口`,
       hitText: '事件型规则',
-      hint: `监控 ${formatLiquiditySideLabel(rule.liquiditySide)} 顶档是否会在 ${formatRuleDuration(rule.windowSec)} 内被清空；当前买一卖一只用于预览覆盖范围。`,
+      hint: `监控 ${formatLiquiditySideLabel(rule.liquiditySide)} 的现价盘口是否会在 ${formatRuleDuration(rule.windowSec)} 内被清空；当前买一卖一只用来辅助预览。`,
     };
   }
 
@@ -1306,7 +802,7 @@ const buildRuleListSignal = (
       statusText: '已启用',
       coverageText: '0 个盘口',
       hitText: '无命中',
-      hint: '当前范围没有覆盖盘口，请先调整监控范围。',
+      hint: '当前还没有可评估的盘口数据，等市场数据加载后再看。',
     };
   }
 
@@ -1318,17 +814,9 @@ const buildRuleListSignal = (
     hint:
       hitRows.length > 0
         ? '当前已有盘口达到触发条件，真实告警仍受冷却和去重影响。'
-        : '当前覆盖范围有盘口，但还没有达到触发条件。',
+        : '当前已有盘口参与评估，但还没有达到触发条件。',
   };
 };
-
-const createEmptyScopeFilters = (): RuleScopeFilters => ({
-  cityKey: '',
-  eventDate: '',
-  temperatureBand: '',
-  side: '',
-  marketId: '',
-});
 
 export const RulesSettingsView = ({
   rules,
@@ -1363,17 +851,20 @@ export const RulesSettingsView = ({
     language === 'en-US'
       ? 'Use Free Space for temporary content, save data copies before big changes, and let automatic space saving handle older records.'
       : '用“释放空间”处理临时内容，大调整前保存数据副本，较早记录会自动节省空间。';
-  const initialRules = normalizeRuleDrafts(rules);
+  const stripRuleScope = (rule: AlertRule): AlertRule => ({
+    ...rule,
+    scope: {},
+  });
+  const initialRules = normalizeRuleDrafts(rules).map(stripRuleScope);
   const [draftRules, setDraftRules] = useState<AlertRule[]>(() => initialRules);
   const [query, setQuery] = useState('');
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all');
   const [enabledFilter, setEnabledFilter] = useState<EnabledFilter>('all');
   const [metricFilter, setMetricFilter] = useState<MetricFilter>('all');
-  const [scopeFilter, setScopeFilter] = useState<ScopeFilter>('all');
   const [selectedRuleId, setSelectedRuleId] = useState<string>('');
+  const [isRuleEditorOpen, setIsRuleEditorOpen] = useState(false);
   const [previewText, setPreviewText] = useState(RULE_PAGE_TEXT.previewEmpty);
   const [previewResult, setPreviewResult] = useState<RulePreviewResult | null>(null);
-  const [saveText, setSaveText] = useState('');
   const [previewBusy, setPreviewBusy] = useState(false);
   const [soundFeedbackText, setSoundFeedbackText] = useState('提示音待试听。');
   const [soundFeedbackTone, setSoundFeedbackTone] = useState<SettingsFeedbackTone>('muted');
@@ -1387,25 +878,32 @@ export const RulesSettingsView = ({
     useState<SettingsFeedbackTone>('muted');
   const [storageBusyAction, setStorageBusyAction] =
     useState<'backup' | 'clear-cache' | 'diagnostics' | 'maintenance' | null>(null);
-  const [persistedRulesKey, setPersistedRulesKey] = useState(() => JSON.stringify(initialRules));
+  const hasLocalRuleDraftChangesRef = useRef(false);
   const isQuietHoursActive = isCurrentTimeInQuietHours(
     settings.quietHoursStart,
     settings.quietHoursEnd,
   );
+  const draftRulesSyncToken = useMemo(() => buildRulesSyncToken(draftRules), [draftRules]);
 
   useEffect(() => {
-    const nextRules = normalizeRuleDrafts(rules);
+    const nextRules = normalizeRuleDrafts(rules).map(stripRuleScope);
+    const nextRulesSyncToken = buildRulesSyncToken(nextRules);
+
+    if (nextRulesSyncToken === draftRulesSyncToken) {
+      hasLocalRuleDraftChangesRef.current = false;
+      return;
+    }
+
+    if (isRuleEditorOpen || hasLocalRuleDraftChangesRef.current) {
+      return;
+    }
+
     setDraftRules(nextRules);
-    setPersistedRulesKey(JSON.stringify(nextRules));
-  }, [rules]);
+  }, [draftRulesSyncToken, isRuleEditorOpen, rules]);
 
-  const normalizedRules = useMemo(() => normalizeRuleDrafts(draftRules), [draftRules]);
-  const draftRulesKey = useMemo(() => JSON.stringify(normalizedRules), [normalizedRules]);
-  const hasUnsavedChanges = draftRulesKey !== persistedRulesKey;
-
-  const scopeOptions = useMemo(
-    () => buildRuleEditorScopeOptions(marketRows, normalizedRules),
-    [marketRows, normalizedRules],
+  const normalizedRules = useMemo(
+    () => normalizeRuleDrafts(draftRules).map(stripRuleScope),
+    [draftRules],
   );
 
   const metricOptions = useMemo(() => {
@@ -1435,23 +933,12 @@ export const RulesSettingsView = ({
       if (metricFilter !== 'all' && rule.metric !== metricFilter) {
         return false;
       }
-      if (scopeFilter !== 'all' && getRuleScopeFilter(rule) !== scopeFilter) {
-        return false;
-      }
-      if (keyword && !buildRuleSearchText(rule, marketRows).includes(keyword)) {
+      if (keyword && !buildRuleSearchText(rule).includes(keyword)) {
         return false;
       }
       return true;
     });
-  }, [
-    enabledFilter,
-    marketRows,
-    metricFilter,
-    normalizedRules,
-    query,
-    scopeFilter,
-    sourceFilter,
-  ]);
+  }, [enabledFilter, marketRows, metricFilter, normalizedRules, query, sourceFilter]);
 
   useEffect(() => {
     if (!selectedRuleId) {
@@ -1473,57 +960,63 @@ export const RulesSettingsView = ({
     }
   }, [normalizedRules, selectedRuleId, visibleRules]);
 
+  const selectedRule = normalizedRules.find((rule) => rule.id === selectedRuleId) ?? null;
+  const selectedQuietDraft = selectedRule ? quietHoursToDraft(selectedRule.quietHours) : null;
+
   useEffect(() => {
     setPreviewText(RULE_PAGE_TEXT.previewEmpty);
     setPreviewResult(null);
   }, [selectedRuleId]);
 
-  const selectedRule = normalizedRules.find((rule) => rule.id === selectedRuleId) ?? null;
+  useEffect(() => {
+    if (!isRuleEditorOpen || selectedRule) {
+      return;
+    }
+    setIsRuleEditorOpen(false);
+  }, [isRuleEditorOpen, selectedRule]);
+
+  useEffect(() => {
+    if (!isRuleEditorOpen) {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') {
+        return;
+      }
+      event.preventDefault();
+      setIsRuleEditorOpen(false);
+    };
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    window.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isRuleEditorOpen]);
   const selectedRuleHiddenByFilters =
     Boolean(selectedRule) && !visibleRules.some((rule) => rule.id === selectedRuleId);
-
-  const selectedScopeFilters = selectedRule ? filtersFromRule(selectedRule) : createEmptyScopeFilters();
-  const selectedQuietDraft = selectedRule ? quietHoursToDraft(selectedRule.quietHours) : null;
-  const saveStatusText = hasUnsavedChanges ? RULE_DRAFT_DIRTY_TEXT : saveText || RULE_DRAFT_SYNCED_TEXT;
-  const selectedRuleSummary = selectedRule
-    ? `${buildRuleConditionSummary(selectedRule)}；${buildRuleScopeSummary(selectedRule, marketRows)}`
-    : RULE_PAGE_TEXT.selectedRuleHint;
-  const previewFeedbackText = previewBusy
-    ? RULE_ACTION_PANEL_TEXT.previewBusy
-    : previewText === RULE_PAGE_TEXT.previewEmpty
-      ? RULE_ACTION_PANEL_TEXT.previewIdle
-      : previewText;
+  const selectedTriggerGuide = selectedRule ? buildRuleTriggerGuide(selectedRule) : null;
   const previewFeedbackTitle = previewBusy
-    ? RULE_ACTION_PANEL_TEXT.previewBusy
+    ? RULE_EDITOR_DIALOG_TEXT.previewBusy
     : previewText === RULE_PAGE_TEXT.previewEmpty
-      ? RULE_ACTION_PANEL_TEXT.previewIdle
-      : previewText === RULE_ACTION_PANEL_TEXT.previewStaleHint
-        ? RULE_ACTION_PANEL_TEXT.previewStale
-      : RULE_ACTION_PANEL_TEXT.previewDone;
+      ? RULE_EDITOR_DIALOG_TEXT.previewIdle
+      : previewText === RULE_EDITOR_DIALOG_TEXT.previewStaleHint
+        ? RULE_EDITOR_DIALOG_TEXT.previewStale
+        : RULE_EDITOR_DIALOG_TEXT.previewDone;
   const previewFeedbackTone =
     previewBusy
       ? 'is-active'
       : previewText === RULE_PAGE_TEXT.previewEmpty
         ? 'is-muted'
-        : previewText === RULE_ACTION_PANEL_TEXT.previewStaleHint
+        : previewText === RULE_EDITOR_DIALOG_TEXT.previewStaleHint
           ? 'is-warning'
-        : previewText.includes('失败')
-          ? 'is-danger'
-          : 'is-info';
-  const draftFeedbackTitle = hasUnsavedChanges
-    ? RULE_ACTION_PANEL_TEXT.draftDirty
-    : RULE_ACTION_PANEL_TEXT.draftSynced;
-  const selectedTriggerGuide = selectedRule ? buildRuleTriggerGuide(selectedRule) : null;
-  const selectedScopeGuide = selectedRule ? buildRuleScopeGuide(selectedRule, marketRows) : null;
-  const ruleDiagnostic = buildRuleDiagnostic({
-    rule: selectedRule,
-    marketRows,
-    latestAlertAtByRuleId,
-    health,
-    hasUnsavedChanges,
-    isQuietHoursActive,
-    notificationsEnabled: controlState.notificationsEnabled,
-  });
+          : previewText.includes('失败')
+            ? 'is-danger'
+            : 'is-info';
 
   const ruleStats = useMemo(
     () => [
@@ -1547,8 +1040,7 @@ export const RulesSettingsView = ({
     cleanText(query) ||
     sourceFilter !== 'all' ||
     enabledFilter !== 'all' ||
-    metricFilter !== 'all' ||
-    scopeFilter !== 'all';
+    metricFilter !== 'all';
 
   const selectedSoundProfile =
     soundProfiles.find((profile) => profile.id === settings.selectedSoundProfileId) ??
@@ -1868,16 +1360,56 @@ export const RulesSettingsView = ({
       ? `状态：${ENABLED_FILTERS.find((option) => option.value === enabledFilter)?.label ?? ''}`
       : '',
     metricFilter !== 'all' ? `指标：${formatRuleMetricLabel(metricFilter)}` : '',
-    scopeFilter !== 'all'
-      ? `范围：${SCOPE_FILTERS.find((option) => option.value === scopeFilter)?.label ?? ''}`
-      : '',
   ].filter((value): value is string => Boolean(value));
 
   const markPreviewStale = () => {
     if (previewText !== RULE_PAGE_TEXT.previewEmpty) {
-      setPreviewText(RULE_ACTION_PANEL_TEXT.previewStaleHint);
+      setPreviewText(RULE_EDITOR_DIALOG_TEXT.previewStaleHint);
     }
     setPreviewResult(null);
+  };
+
+  const commitRules = (nextRules: AlertRule[]) => {
+    const normalizedNextRules = normalizeRuleDrafts(nextRules).map(stripRuleScope);
+    hasLocalRuleDraftChangesRef.current = true;
+    setDraftRules(normalizedNextRules);
+    onSaveRules(normalizedNextRules as ContractAlertRule[]);
+  };
+
+  const openRuleEditor = (ruleId: string) => {
+    setSelectedRuleId(ruleId);
+    setIsRuleEditorOpen(true);
+  };
+
+  const closeRuleEditor = () => {
+    setIsRuleEditorOpen(false);
+  };
+
+  const updateRuleQuietHours = (ruleId: string, quietHours: AlertRule['quietHours']) => {
+    markPreviewStale();
+    const nextRules = normalizeRuleDrafts(
+      normalizedRules.map((rule) =>
+        rule.id === ruleId
+          ? {
+              ...rule,
+              quietHours,
+            }
+          : rule,
+      ),
+    );
+    commitRules(nextRules);
+  };
+
+  const updateQuietDraft = (
+    ruleId: string,
+    currentDraft: RuleQuietHoursDraft,
+    patch: Partial<RuleQuietHoursDraft>,
+  ) => {
+    const nextDraft = {
+      ...currentDraft,
+      ...patch,
+    };
+    updateRuleQuietHours(ruleId, quietHoursDraftToValue(nextDraft));
   };
 
   const handlePreviewSound = async () => {
@@ -2131,63 +1663,7 @@ export const RulesSettingsView = ({
     const nextRules = normalizeRuleDrafts(
       normalizedRules.map((rule) => (rule.id === ruleId ? { ...rule, ...patch } : rule)),
     );
-    setDraftRules(nextRules);
-  };
-
-  const updateRuleScope = (ruleId: string, nextFilters: RuleScopeFilters) => {
-    markPreviewStale();
-    setDraftRules((currentRules) =>
-      currentRules.map((rule) =>
-        rule.id === ruleId ? replaceRuleScopeFilters(rule, nextFilters) : rule,
-      ),
-    );
-  };
-
-  const updateRuleQuietHours = (ruleId: string, quietHours: AlertRule['quietHours']) => {
-    markPreviewStale();
-    setDraftRules((currentRules) =>
-      normalizeRuleDrafts(
-        currentRules.map((rule) =>
-          rule.id === ruleId
-            ? {
-                ...rule,
-                quietHours,
-              }
-            : rule,
-        ),
-      ),
-    );
-  };
-
-  const updateQuietDraft = (
-    ruleId: string,
-    currentDraft: RuleQuietHoursDraft,
-    patch: Partial<RuleQuietHoursDraft>,
-  ) => {
-    const nextDraft = {
-      ...currentDraft,
-      ...patch,
-    };
-    updateRuleQuietHours(ruleId, quietHoursDraftToValue(nextDraft));
-  };
-
-  const handleMarketScopeChange = (rule: AlertRule, marketId: string) => {
-    if (!marketId) {
-      updateRuleScope(rule.id, {
-        ...selectedScopeFilters,
-        marketId: '',
-      });
-      return;
-    }
-
-    const option = scopeOptions.markets.find((item) => item.marketId === marketId);
-    updateRuleScope(rule.id, {
-      cityKey: option?.cityKey ?? '',
-      eventDate: option?.eventDate ?? '',
-      temperatureBand: option?.temperatureBand ?? '',
-      side: option?.side === 'YES' || option?.side === 'NO' ? option.side : '',
-      marketId,
-    });
+    commitRules(nextRules);
   };
 
   const handlePreviewFirstRule = async () => {
@@ -2216,22 +1692,6 @@ export const RulesSettingsView = ({
     setSourceFilter('all');
     setEnabledFilter('all');
     setMetricFilter('all');
-    setScopeFilter('all');
-  };
-
-  const handleSaveRules = () => {
-    const nextRules = normalizeRuleDrafts(draftRules);
-    setDraftRules(nextRules);
-    setPersistedRulesKey(JSON.stringify(nextRules));
-    onSaveRules(nextRules as ContractAlertRule[]);
-    setSaveText(RULE_PAGE_TEXT.draftSaved);
-  };
-
-  const handleResetDraft = () => {
-    setDraftRules(normalizeRuleDrafts(rules));
-    setSaveText(RULE_PAGE_TEXT.draftReset);
-    setPreviewText(RULE_PAGE_TEXT.previewEmpty);
-    setPreviewResult(null);
   };
 
   return (
@@ -2243,16 +1703,6 @@ export const RulesSettingsView = ({
             <span>{RULE_PAGE_TEXT.matchSummary(visibleRules.length, normalizedRules.length)}</span>
           </div>
         </header>
-
-        {isQuietHoursActive ? (
-          <section className="rule-quiet-warning">
-            <strong>当前处于安静时段，只会静音通知和声音</strong>
-            <span>
-              当前安静时段为 {settings.quietHoursStart} - {settings.quietHoursEnd}
-              。规则命中仍会记录到告警中心，系统弹窗和提示音会暂时停用。
-            </span>
-          </section>
-        ) : null}
 
         {runtimeIssues.length > 0 ? (
           <section className="rule-runtime-warning" role="alert" aria-label="runtime-diagnostics">
@@ -2277,9 +1727,8 @@ export const RulesSettingsView = ({
         <section className="rules-filter-panel">
           <div className="rules-filter-panel__intro">
             <div>
-              <p className="rules-filter-panel__eyebrow">{RULE_FILTER_PANEL_TEXT.step}</p>
-              <h3>{RULE_FILTER_PANEL_TEXT.title}</h3>
-              <p>{RULE_FILTER_PANEL_TEXT.hint}</p>
+              <h3>筛选规则</h3>
+              <p>按关键词、来源、状态和范围快速定位目标规则。</p>
             </div>
             <div className="rules-filter-panel__summary">
               <strong>{visibleRules.length}</strong>
@@ -2372,19 +1821,6 @@ export const RulesSettingsView = ({
                   </select>
                 </label>
 
-                <label className="field">
-                  <span>{RULE_PAGE_TEXT.scopeFilter}</span>
-                  <select
-                    value={scopeFilter}
-                    onChange={(event) => setScopeFilter(event.target.value as ScopeFilter)}
-                  >
-                    {SCOPE_FILTERS.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
               </div>
             </details>
           </div>
@@ -2419,536 +1855,11 @@ export const RulesSettingsView = ({
             ))}
           </div>
 
-          <div className="control-progress rule-editor-layout__summary">
-            <div className="rule-action-panel__head">
-              <div className="rule-action-panel__intro">
-                <p className="rule-action-panel__eyebrow">{RULE_ACTION_PANEL_TEXT.step}</p>
-                <h3>{RULE_ACTION_PANEL_TEXT.title}</h3>
-                <p>{RULE_ACTION_PANEL_TEXT.hint}</p>
-              </div>
-              <div className="rule-action-panel__buttons">
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={handlePreviewFirstRule}
-                  disabled={previewBusy || !selectedRule}
-                >
-                  {previewBusy ? RULE_ACTION_PANEL_TEXT.previewBusy : RULE_PAGE_TEXT.previewSelected}
-                </button>
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={handleSaveRules}
-                  disabled={!hasUnsavedChanges}
-                >
-                  {RULE_PAGE_TEXT.saveCurrent}
-                </button>
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={handleResetDraft}
-                  disabled={!hasUnsavedChanges}
-                >
-                  {RULE_ACTION_PANEL_TEXT.restoreDraft}
-                </button>
-              </div>
-            </div>
-            <div className="rule-action-panel__grid">
-              <article className="rule-action-card">
-                <span className="rule-action-card__label">{RULE_ACTION_PANEL_TEXT.selectedTitle}</span>
-                <strong>{selectedRule ? selectedRule.name : RULE_PAGE_TEXT.noSelectedRule}</strong>
-                <p>{selectedRuleSummary}</p>
-              </article>
-              <article className={`rule-action-card ${previewFeedbackTone}`}>
-                <span className="rule-action-card__label">{RULE_ACTION_PANEL_TEXT.previewTitle}</span>
-                <strong>{previewFeedbackTitle}</strong>
-                <p>{previewFeedbackText}</p>
-                {previewResult?.sampleMarkets?.length ? (
-                  <ul className="rule-preview-samples">
-                    {previewResult.sampleMarkets.map((row) => (
-                      <li key={`${row.marketId}-${row.side}`}>
-                        <strong>{formatPreviewSampleLabel(row)}</strong>
-                        <span>{formatPreviewSampleQuote(row)}</span>
-                      </li>
-                    ))}
-                  </ul>
-                ) : null}
-              </article>
-              <article
-                className={`rule-action-card ${hasUnsavedChanges ? 'is-warning' : 'is-success'}`}
-              >
-                <span className="rule-action-card__label">{RULE_ACTION_PANEL_TEXT.draftTitle}</span>
-                <strong>{draftFeedbackTitle}</strong>
-                <p>{saveStatusText}</p>
-              </article>
-            </div>
-            <section className={`rule-diagnostic-panel is-${ruleDiagnostic.tone}`}>
-              <div className="rule-diagnostic-panel__head">
-                <span>触发诊断</span>
-                <strong>{ruleDiagnostic.title}</strong>
-                <p>{ruleDiagnostic.summary}</p>
-              </div>
-              <div className="rule-diagnostic-panel__steps">
-                {ruleDiagnostic.items.map((item) => (
-                  <div key={item.label} className={`rule-diagnostic-step is-${item.tone}`}>
-                    <span>{item.label}</span>
-                    <strong>{item.value}</strong>
-                    <p>{item.hint}</p>
-                  </div>
-                ))}
-              </div>
-            </section>
-          </div>
-
-          {selectedRule ? (
-            <section className="rule-editor-layout__form">
-              <div className="rule-editor-layout__section-head">
-                <strong>第三步：调整选中规则</strong>
-                <span>{formatRuleSourceLabel(selectedRule)}</span>
-              </div>
-              <p className="control-progress__text">{RULE_PAGE_TEXT.editorHint}</p>
-
-              <div className="rule-editor-layout__sections">
-                <section className="rule-editor-section">
-                  <div className="rule-editor-section__head">
-                    <strong>{RULE_EDITOR_SECTION_TEXT.basic.title}</strong>
-                    <span>{RULE_EDITOR_SECTION_TEXT.basic.hint}</span>
-                  </div>
-
-                  <div className="rule-editor-section__grid">
-                    <label className="field field--checkbox">
-                      <input
-                        type="checkbox"
-                        checked={selectedRule.enabled}
-                        onChange={(event) =>
-                          updateRule(selectedRule.id, {
-                            enabled: event.target.checked,
-                          })
-                        }
-                      />
-                      <span>{RULE_PAGE_TEXT.ruleEnabled}</span>
-                    </label>
-
-                    <label className="field">
-                      <span>{copy.settings.name}</span>
-                      <input
-                        value={selectedRule.name}
-                        onChange={(event) =>
-                          updateRule(selectedRule.id, {
-                            name: event.target.value,
-                          })
-                        }
-                      />
-                    </label>
-
-                  </div>
-                </section>
-
-                <section className="rule-editor-section">
-                  <div className="rule-editor-section__head">
-                    <strong>{RULE_EDITOR_SECTION_TEXT.trigger.title}</strong>
-                    <span>{RULE_EDITOR_SECTION_TEXT.trigger.hint}</span>
-                  </div>
-
-                  {selectedTriggerGuide ? (
-                    <div className="rule-trigger-guide">
-                      <div className="rule-trigger-guide__summary">
-                        <span>当前触发逻辑</span>
-                        <strong>{selectedTriggerGuide.title}</strong>
-                        <p>{selectedTriggerGuide.summary}</p>
-                      </div>
-                      <div className="rule-trigger-guide__items">
-                        {selectedTriggerGuide.items.map((item) => (
-                          <div key={item.label}>
-                            <span>{item.label}</span>
-                            <strong>{item.value}</strong>
-                            <p>{item.hint}</p>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
-
-                  <div className="rule-editor-section__grid">
-                    <label className="field">
-                      <span>{copy.settings.metric}</span>
-                      <select
-                        value={selectedRule.metric}
-                        onChange={(event) =>
-                          updateRule(selectedRule.id, {
-                            metric: event.target.value as AlertRule['metric'],
-                          })
-                        }
-                      >
-                        {METRIC_OPTIONS.map((metric) => (
-                          <option key={metric} value={metric}>
-                            {formatRuleMetricLabel(metric)}
-                          </option>
-                        ))}
-                      </select>
-                      <small className="rule-field-hint">选择这条规则要盯住的盘口变化。</small>
-                    </label>
-
-                    {selectedRule.metric === 'liquidity_kill' ? (
-                      <label className="field">
-                        <span>监控盘口</span>
-                        <select
-                          value={selectedRule.liquiditySide ?? 'both'}
-                          onChange={(event) =>
-                            updateRule(selectedRule.id, {
-                              liquiditySide: event.target.value as NonNullable<AlertRule['liquiditySide']>,
-                            })
-                          }
-                        >
-                          {LIQUIDITY_SIDE_OPTIONS.map((option) => (
-                            <option key={option.value} value={option.value}>
-                              {option.label}
-                            </option>
-                          ))}
-                        </select>
-                        <small className="rule-field-hint">
-                          买盘指买一侧，卖盘指卖一侧；不是 YES/NO 方向。
-                        </small>
-                      </label>
-                    ) : selectedRule.metric === 'volume_pricing' || selectedRule.metric === 'abnormal_lottery' ? (
-                      <label className="field">
-                        <span>判断方式</span>
-                        <input
-                          value={selectedRule.metric === 'abnormal_lottery' ? '超低价 route 确认' : '卖一推高幅度'}
-                          disabled
-                        />
-                        <small className="rule-field-hint">
-                          {selectedRule.metric === 'abnormal_lottery'
-                            ? '前端固定按异常彩票 route 和 confirmation source 引导，不再单独选择大于/小于。'
-                            : '后台固定按“卖一被推高至少多少美分，并且有量确认”判断，不需要再选大于/小于。'}
-                        </small>
-                      </label>
-                    ) : (
-                      <label className="field">
-                        <span>判断方式</span>
-                        <select
-                          value={selectedRule.operator}
-                          onChange={(event) =>
-                            updateRule(selectedRule.id, {
-                              operator: event.target.value as AlertRule['operator'],
-                            })
-                          }
-                        >
-                          {OPERATOR_OPTIONS.map((operator) => (
-                            <option key={operator} value={operator}>
-                              {formatRuleOperatorLabel(operator)}
-                            </option>
-                          ))}
-                        </select>
-                        <small className="rule-field-hint">
-                          {selectedTriggerGuide?.items[1]?.hint ?? '设置实际值和阈值的比较方式。'}
-                        </small>
-                      </label>
-                    )}
-
-                    <label className="field">
-                      <span>{RULE_PAGE_TEXT.threshold}</span>
-                      <input
-                        type="number"
-                        step={getRuleThresholdStep(selectedRule.metric)}
-                        value={selectedRule.threshold}
-                        onChange={(event) =>
-                          updateRule(selectedRule.id, {
-                            threshold: parseNumberInput(event.target.value, selectedRule.threshold),
-                          })
-                        }
-                      />
-                      <small className="rule-field-hint">{selectedTriggerGuide?.thresholdHint}</small>
-                    </label>
-
-                    <label className="field">
-                      <span>{RULE_PAGE_TEXT.windowSec}</span>
-                      <input
-                        type="number"
-                        min={1}
-                        value={selectedRule.windowSec}
-                        onChange={(event) =>
-                          updateRule(selectedRule.id, {
-                            windowSec: parseNumberInput(event.target.value, selectedRule.windowSec),
-                          })
-                        }
-                      />
-                      <small className="rule-field-hint">
-                        用来判断短时间变化，当前为 {formatRuleDuration(selectedRule.windowSec)}。
-                      </small>
-                    </label>
-                  </div>
-
-                  <details className="rule-editor-advanced">
-                    <summary>高级触发设置</summary>
-                    <div className="rule-editor-section__grid">
-                      {selectedRule.metric !== 'liquidity_kill' ? null : (
-                        <label className="field">
-                          <span>判断方式</span>
-                          <input value="不低于最低被清空价位" disabled />
-                          <small className="rule-field-hint">
-                            新版盘口斩杀固定按“被清空前的价位是否达到最低门槛”判断。
-                          </small>
-                        </label>
-                      )}
-
-                      <label className="field">
-                        <span>{RULE_PAGE_TEXT.cooldownSec}</span>
-                        <input
-                          type="number"
-                          min={0}
-                          value={selectedRule.cooldownSec}
-                          onChange={(event) =>
-                            updateRule(selectedRule.id, {
-                              cooldownSec: parseNumberInput(event.target.value, selectedRule.cooldownSec),
-                            })
-                          }
-                        />
-                        <small className="rule-field-hint">
-                          命中后暂停重复提醒，当前为 {formatRuleDuration(selectedRule.cooldownSec)}。
-                        </small>
-                      </label>
-
-                      <label className="field">
-                        <span>{RULE_PAGE_TEXT.dedupeWindowSec}</span>
-                        <input
-                          type="number"
-                          min={0}
-                          value={selectedRule.dedupeWindowSec}
-                          onChange={(event) =>
-                            updateRule(selectedRule.id, {
-                              dedupeWindowSec: parseNumberInput(
-                                event.target.value,
-                                selectedRule.dedupeWindowSec,
-                              ),
-                            })
-                          }
-                        />
-                        <small className="rule-field-hint">
-                          相同告警在 {formatRuleDuration(selectedRule.dedupeWindowSec)} 内合并。
-                        </small>
-                      </label>
-
-                      <label className="field">
-                        <span>{RULE_PAGE_TEXT.bubbleWeight}</span>
-                        <input
-                          type="number"
-                          min={0}
-                          value={selectedRule.bubbleWeight}
-                          onChange={(event) =>
-                            updateRule(selectedRule.id, {
-                              bubbleWeight: parseNumberInput(event.target.value, selectedRule.bubbleWeight),
-                            })
-                          }
-                        />
-                        <small className="rule-field-hint">只影响总览泡泡风险权重，不影响是否触发。</small>
-                      </label>
-                    </div>
-                  </details>
-                </section>
-
-                <section className="rule-editor-section">
-                  <div className="rule-editor-section__head">
-                    <strong>{RULE_EDITOR_SECTION_TEXT.scope.title}</strong>
-                    <span>{RULE_EDITOR_SECTION_TEXT.scope.hint}</span>
-                  </div>
-
-                  {selectedScopeGuide ? (
-                    <div className={`rule-scope-guide is-${selectedScopeGuide.tone}`}>
-                      <div className="rule-scope-guide__summary">
-                        <span>监控范围预览</span>
-                        <strong>{selectedScopeGuide.title}</strong>
-                        <p>{selectedScopeGuide.summary}</p>
-                      </div>
-                      <div className="rule-scope-guide__items">
-                        {selectedScopeGuide.items.map((item) => (
-                          <div key={item.label}>
-                            <span>{item.label}</span>
-                            <strong>{item.value}</strong>
-                            <p>{item.hint}</p>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
-
-                  <div className="rule-editor-section__grid">
-                    <label className="field">
-                      <span>{RULE_PAGE_TEXT.marketScope}</span>
-                      <select
-                        value={selectedScopeFilters.marketId}
-                        onChange={(event) => handleMarketScopeChange(selectedRule, event.target.value)}
-                      >
-                        <option value="">{RULE_PAGE_TEXT.allMarkets}</option>
-                        {scopeOptions.markets.map((option) => (
-                          <option key={option.marketId} value={option.marketId}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                      <small className="rule-field-hint">
-                        选择具体盘口会自动锁定城市、日期、温区和方向；不选则使用下面的范围条件。
-                      </small>
-                    </label>
-
-                    <label className="field">
-                      <span>{RULE_PAGE_TEXT.cityScope}</span>
-                      <select
-                        value={selectedScopeFilters.cityKey}
-                        onChange={(event) =>
-                          updateRuleScope(selectedRule.id, {
-                            ...selectedScopeFilters,
-                            cityKey: event.target.value,
-                            marketId: '',
-                          })
-                        }
-                      >
-                        <option value="">全部城市</option>
-                        {scopeOptions.cities.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                      <small className="rule-field-hint">只看某个城市；清空表示全部城市。</small>
-                    </label>
-
-                    <label className="field">
-                      <span>{RULE_PAGE_TEXT.dateScope}</span>
-                      <select
-                        value={selectedScopeFilters.eventDate}
-                        onChange={(event) =>
-                          updateRuleScope(selectedRule.id, {
-                            ...selectedScopeFilters,
-                            eventDate: event.target.value,
-                            marketId: '',
-                          })
-                        }
-                      >
-                        <option value="">全部日期</option>
-                        {scopeOptions.dates.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                      <small className="rule-field-hint">只看某个日期；清空表示全部日期。</small>
-                    </label>
-
-                    <label className="field">
-                      <span>{RULE_PAGE_TEXT.bandScope}</span>
-                      <select
-                        value={selectedScopeFilters.temperatureBand}
-                        onChange={(event) =>
-                          updateRuleScope(selectedRule.id, {
-                            ...selectedScopeFilters,
-                            temperatureBand: event.target.value,
-                            marketId: '',
-                          })
-                        }
-                      >
-                        <option value="">全部温度区间</option>
-                        {scopeOptions.bands.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                      <small className="rule-field-hint">只看某个温度区间；清空表示全部温区。</small>
-                    </label>
-
-                    <label className="field">
-                      <span>{RULE_PAGE_TEXT.sideScope}</span>
-                      <select
-                        value={selectedScopeFilters.side}
-                        onChange={(event) =>
-                          updateRuleScope(selectedRule.id, {
-                            ...selectedScopeFilters,
-                            side: event.target.value as RuleScopeFilters['side'],
-                            marketId: '',
-                          })
-                        }
-                      >
-                        {scopeOptions.sides.map((option) => (
-                          <option key={option.value || 'all'} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                      <small className="rule-field-hint">选择是或否方向；不选表示双边一起看。</small>
-                    </label>
-                  </div>
-                </section>
-
-                <section className="rule-editor-section">
-                  <div className="rule-editor-section__head">
-                    <strong>{RULE_EDITOR_SECTION_TEXT.quiet.title}</strong>
-                    <span>{RULE_EDITOR_SECTION_TEXT.quiet.hint}</span>
-                  </div>
-
-                  <details className="rule-editor-advanced">
-                    <summary>高级通知设置</summary>
-                    <div className="rule-editor-section__grid">
-                      <label className="field field--checkbox">
-                        <input
-                          type="checkbox"
-                          checked={Boolean(selectedRule.quietHours)}
-                          onChange={(event) =>
-                            updateRuleQuietHours(
-                              selectedRule.id,
-                              event.target.checked
-                                ? quietHoursDraftToValue({ start: '23:00', end: '06:00' })
-                                : undefined,
-                            )
-                          }
-                        />
-                        <span>{RULE_PAGE_TEXT.quietCustom}</span>
-                      </label>
-
-                      <label className="field">
-                        <span>{RULE_PAGE_TEXT.quietStart}</span>
-                        <input
-                          type="time"
-                          value={selectedQuietDraft?.start ?? ''}
-                          disabled={!selectedRule.quietHours || !selectedQuietDraft}
-                          onChange={(event) =>
-                            selectedQuietDraft
-                              ? updateQuietDraft(selectedRule.id, selectedQuietDraft, {
-                                  start: event.target.value,
-                                })
-                              : undefined
-                          }
-                        />
-                      </label>
-
-                      <label className="field">
-                        <span>{RULE_PAGE_TEXT.quietEnd}</span>
-                        <input
-                          type="time"
-                          value={selectedQuietDraft?.end ?? ''}
-                          disabled={!selectedRule.quietHours || !selectedQuietDraft}
-                          onChange={(event) =>
-                            selectedQuietDraft
-                              ? updateQuietDraft(selectedRule.id, selectedQuietDraft, {
-                                  end: event.target.value,
-                                })
-                              : undefined
-                          }
-                        />
-                      </label>
-                    </div>
-                  </details>
-                </section>
-              </div>
-            </section>
-          ) : null}
-
           <section className="rules-list-panel">
             <div className="rules-list-panel__head">
               <div>
-                <p className="rules-list-panel__eyebrow">{RULE_LIST_PANEL_TEXT.step}</p>
-                <h3>{RULE_LIST_PANEL_TEXT.title}</h3>
-                <p>{RULE_LIST_PANEL_TEXT.hint}</p>
+                <h3>规则列表</h3>
+                <p>点一下卡片就会弹出修改窗口；启用和停用仍然会立刻生效。</p>
               </div>
               <div className="rules-list-panel__count">
                 <strong>{visibleRules.length}</strong>
@@ -2961,6 +1872,7 @@ export const RulesSettingsView = ({
                 {visibleRules.map((rule) => {
                   const isSelected = selectedRule?.id === rule.id;
                   const listSignal = buildRuleListSignal(rule, marketRows, health);
+                  const latestAlertAt = latestAlertAtByRuleId[rule.id];
 
                   return (
                     <article
@@ -2968,11 +1880,11 @@ export const RulesSettingsView = ({
                       className={`rule-card ${isSelected ? 'is-selected' : ''}`}
                       role="button"
                       tabIndex={0}
-                      onClick={() => setSelectedRuleId(rule.id)}
+                      onClick={() => openRuleEditor(rule.id)}
                       onKeyDown={(event) => {
                         if (event.key === 'Enter' || event.key === ' ') {
                           event.preventDefault();
-                          setSelectedRuleId(rule.id);
+                          openRuleEditor(rule.id);
                         }
                       }}
                     >
@@ -3011,8 +1923,10 @@ export const RulesSettingsView = ({
                             <strong>{buildRuleConditionSummary(rule)}</strong>
                           </div>
                           <div className="rule-card__summary-item">
-                            <span>{RULE_LIST_PANEL_TEXT.scope}</span>
-                            <strong>{buildRuleScopeSummary(rule, marketRows)}</strong>
+                            <span>最近告警</span>
+                            <strong>
+                              {latestAlertAt ? formatDateTimeText(latestAlertAt) : '暂无'}
+                            </strong>
                           </div>
                         </div>
                       </div>
@@ -3045,17 +1959,402 @@ export const RulesSettingsView = ({
               <div className="rules-list-empty">{RULE_LIST_PANEL_TEXT.empty}</div>
             )}
           </section>
+
+          {isRuleEditorOpen && selectedRule ? (
+            <div className="rule-editor-dialog">
+              <div
+                className="rule-editor-dialog__backdrop"
+                data-testid="rule-editor-backdrop"
+                onClick={closeRuleEditor}
+              />
+              <section
+                className="rule-editor-dialog__surface"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby={`rule-editor-title-${selectedRule.id}`}
+              >
+                <header className="rule-editor-dialog__header">
+                  <div className="rule-editor-dialog__title">
+                    <p className="rule-editor-dialog__eyebrow">{RULE_EDITOR_DIALOG_TEXT.eyebrow}</p>
+                    <h3 id={`rule-editor-title-${selectedRule.id}`}>{selectedRule.name}</h3>
+                    <p>{buildRuleConditionSummary(selectedRule)}</p>
+                    <p className="rule-editor-dialog__meta">{RULE_EDITOR_DIALOG_TEXT.liveHint}</p>
+                  </div>
+                  <div className="rule-editor-dialog__actions">
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      onClick={() => void handlePreviewFirstRule()}
+                      disabled={previewBusy}
+                    >
+                      {previewBusy ? RULE_EDITOR_DIALOG_TEXT.previewBusy : RULE_PAGE_TEXT.previewSelected}
+                    </button>
+                    <button
+                      type="button"
+                      className="rule-editor-dialog__close"
+                      aria-label="close-rule-editor"
+                      onClick={closeRuleEditor}
+                    >
+                      关闭
+                    </button>
+                  </div>
+                </header>
+
+                <div className="rule-editor-dialog__body">
+                  <section className={`rule-action-card ${previewFeedbackTone}`}>
+                    <span className="rule-action-card__label">{RULE_EDITOR_DIALOG_TEXT.previewTitle}</span>
+                    <strong>{previewFeedbackTitle}</strong>
+                    <p>
+                      {previewBusy
+                        ? '正在计算这条规则当前会命中的城市和盘口。'
+                        : previewText === RULE_PAGE_TEXT.previewEmpty
+                          ? '需要时可以先预览影响，再决定是否继续微调阈值和窗口。'
+                          : previewText === RULE_EDITOR_DIALOG_TEXT.previewStaleHint
+                            ? '刚刚改过字段，建议重新预览一次，确认实际覆盖面。'
+                            : previewText}
+                    </p>
+                    {previewResult?.sampleMarkets?.length ? (
+                      <ul className="rule-preview-samples">
+                        {previewResult.sampleMarkets.map((row) => (
+                          <li key={`${row.marketId}-${row.side}`}>
+                            <strong>{formatPreviewSampleLabel(row)}</strong>
+                            <span>{formatPreviewSampleQuote(row)}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </section>
+
+                  <section className="rule-editor-layout__form">
+                    <div className="rule-editor-layout__section-head">
+                      <strong>规则详情</strong>
+                      <span>{formatRuleSourceLabel(selectedRule)}</span>
+                    </div>
+                    <p className="control-progress__text">修改后会立即生效，不需要再单独保存。</p>
+
+                    <div className="rule-editor-layout__sections">
+                      <section className="rule-editor-section">
+                        <div className="rule-editor-section__head">
+                          <strong>{RULE_EDITOR_SECTION_TEXT.basic.title}</strong>
+                          <span>{RULE_EDITOR_SECTION_TEXT.basic.hint}</span>
+                        </div>
+
+                        <div className="rule-editor-section__grid">
+                          <label className="field field--checkbox">
+                            <input
+                              type="checkbox"
+                              checked={selectedRule.enabled}
+                              onChange={(event) =>
+                                updateRule(selectedRule.id, {
+                                  enabled: event.target.checked,
+                                })
+                              }
+                            />
+                            <span>{RULE_PAGE_TEXT.ruleEnabled}</span>
+                          </label>
+
+                          <label className="field">
+                            <span>{copy.settings.name}</span>
+                            <input
+                              value={selectedRule.name}
+                              onChange={(event) =>
+                                updateRule(selectedRule.id, {
+                                  name: event.target.value,
+                                })
+                              }
+                            />
+                          </label>
+                        </div>
+                      </section>
+
+                      <section className="rule-editor-section">
+                        <div className="rule-editor-section__head">
+                          <strong>{RULE_EDITOR_SECTION_TEXT.trigger.title}</strong>
+                          <span>{RULE_EDITOR_SECTION_TEXT.trigger.hint}</span>
+                        </div>
+
+                        {selectedTriggerGuide ? (
+                          <div className="rule-trigger-guide">
+                            <div className="rule-trigger-guide__summary">
+                              <span>当前触发逻辑</span>
+                              <strong>{selectedTriggerGuide.title}</strong>
+                              <p>{selectedTriggerGuide.summary}</p>
+                            </div>
+                            <div className="rule-trigger-guide__items">
+                              {selectedTriggerGuide.items.map((item) => (
+                                <div key={item.label}>
+                                  <span>{item.label}</span>
+                                  <strong>{item.value}</strong>
+                                  <p>{item.hint}</p>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+
+                        <div className="rule-editor-section__grid">
+                          <label className="field">
+                            <span>{copy.settings.metric}</span>
+                            <select
+                              value={selectedRule.metric}
+                              onChange={(event) =>
+                                updateRule(selectedRule.id, {
+                                  metric: event.target.value as AlertRule['metric'],
+                                })
+                              }
+                            >
+                              {METRIC_OPTIONS.map((metric) => (
+                                <option key={metric} value={metric}>
+                                  {formatRuleMetricLabel(metric)}
+                                </option>
+                              ))}
+                            </select>
+                            <small className="rule-field-hint">选择这条规则要盯住的盘口变化。</small>
+                          </label>
+
+                          {selectedRule.metric === 'liquidity_kill' ? (
+                            <label className="field">
+                              <span>监控盘口</span>
+                              <select
+                                value={selectedRule.liquiditySide ?? 'both'}
+                                onChange={(event) =>
+                                  updateRule(selectedRule.id, {
+                                    liquiditySide: event.target.value as NonNullable<AlertRule['liquiditySide']>,
+                                  })
+                                }
+                              >
+                                {LIQUIDITY_SIDE_OPTIONS.map((option) => (
+                                  <option key={option.value} value={option.value}>
+                                    {option.label}
+                                  </option>
+                                ))}
+                              </select>
+                              <small className="rule-field-hint">
+                                买盘指买一侧现价盘口，卖盘指卖一侧现价盘口；不是 YES/NO 方向。
+                              </small>
+                            </label>
+                          ) : selectedRule.metric === 'volume_pricing' ||
+                            selectedRule.metric === 'abnormal_lottery' ? (
+                            <label className="field">
+                              <span>判断方式</span>
+                              <input
+                                value={selectedRule.metric === 'abnormal_lottery' ? '超低价 route 确认' : '卖一推高幅度'}
+                                disabled
+                              />
+                              <small className="rule-field-hint">
+                                {selectedRule.metric === 'abnormal_lottery'
+                                  ? '前端固定按异常彩票 route 和 confirmation source 引导，不再单独选择大于/小于。'
+                                  : '后台固定按“卖一被推高至少多少美分，并且有量确认”判断，不需要再选大于/小于。'}
+                              </small>
+                            </label>
+                          ) : (
+                            <label className="field">
+                              <span>判断方式</span>
+                              <select
+                                value={selectedRule.operator}
+                                onChange={(event) =>
+                                  updateRule(selectedRule.id, {
+                                    operator: event.target.value as AlertRule['operator'],
+                                  })
+                                }
+                              >
+                                {OPERATOR_OPTIONS.map((operator) => (
+                                  <option key={operator} value={operator}>
+                                    {formatRuleOperatorLabel(operator)}
+                                  </option>
+                                ))}
+                              </select>
+                              <small className="rule-field-hint">
+                                {selectedTriggerGuide?.items[1]?.hint ?? '设置实际值和阈值的比较方式。'}
+                              </small>
+                            </label>
+                          )}
+
+                          <label className="field">
+                            <span>{RULE_PAGE_TEXT.threshold}</span>
+                            <input
+                              type="number"
+                              step={getRuleThresholdStep(selectedRule.metric)}
+                              value={selectedRule.threshold}
+                              onChange={(event) =>
+                                updateRule(selectedRule.id, {
+                                  threshold: parseNumberInput(event.target.value, selectedRule.threshold),
+                                })
+                              }
+                            />
+                            <small className="rule-field-hint">{selectedTriggerGuide?.thresholdHint}</small>
+                          </label>
+
+                          <label className="field">
+                            <span>{RULE_PAGE_TEXT.windowSec}</span>
+                            <input
+                              type="number"
+                              min={1}
+                              value={selectedRule.windowSec}
+                              onChange={(event) =>
+                                updateRule(selectedRule.id, {
+                                  windowSec: parseNumberInput(event.target.value, selectedRule.windowSec),
+                                })
+                              }
+                            />
+                            <small className="rule-field-hint">
+                              用来判断短时间变化，当前为 {formatRuleDuration(selectedRule.windowSec)}。
+                            </small>
+                          </label>
+                        </div>
+
+                        <details className="rule-editor-advanced">
+                          <summary>高级触发设置</summary>
+                          <div className="rule-editor-section__grid">
+                            {selectedRule.metric !== 'liquidity_kill' ? null : (
+                              <label className="field">
+                                <span>判断方式</span>
+                                <input value="不低于最低清空前价位" disabled />
+                                <small className="rule-field-hint">
+                                  新版盘口斩杀固定按“该侧现价盘口被清空前的价位是否达到最低门槛”判断。
+                                </small>
+                              </label>
+                            )}
+
+                            <label className="field">
+                              <span>{RULE_PAGE_TEXT.cooldownSec}</span>
+                              <input
+                                type="number"
+                                min={0}
+                                value={selectedRule.cooldownSec}
+                                onChange={(event) =>
+                                  updateRule(selectedRule.id, {
+                                    cooldownSec: parseNumberInput(event.target.value, selectedRule.cooldownSec),
+                                  })
+                                }
+                              />
+                              <small className="rule-field-hint">
+                                命中后暂停重复提醒，当前为 {formatRuleDuration(selectedRule.cooldownSec)}。
+                              </small>
+                            </label>
+
+                            <label className="field">
+                              <span>{RULE_PAGE_TEXT.dedupeWindowSec}</span>
+                              <input
+                                type="number"
+                                min={0}
+                                value={selectedRule.dedupeWindowSec}
+                                onChange={(event) =>
+                                  updateRule(selectedRule.id, {
+                                    dedupeWindowSec: parseNumberInput(
+                                      event.target.value,
+                                      selectedRule.dedupeWindowSec,
+                                    ),
+                                  })
+                                }
+                              />
+                              <small className="rule-field-hint">
+                                相同告警在 {formatRuleDuration(selectedRule.dedupeWindowSec)} 内合并。
+                              </small>
+                            </label>
+
+                            <label className="field">
+                              <span>{RULE_PAGE_TEXT.bubbleWeight}</span>
+                              <input
+                                type="number"
+                                min={0}
+                                value={selectedRule.bubbleWeight}
+                                onChange={(event) =>
+                                  updateRule(selectedRule.id, {
+                                    bubbleWeight: parseNumberInput(event.target.value, selectedRule.bubbleWeight),
+                                  })
+                                }
+                              />
+                              <small className="rule-field-hint">只影响总览泡泡风险权重，不影响是否触发。</small>
+                            </label>
+                          </div>
+                        </details>
+                      </section>
+
+                      <section className="rule-editor-section">
+                        <div className="rule-editor-section__head">
+                          <strong>{RULE_EDITOR_SECTION_TEXT.quiet.title}</strong>
+                          <span>{RULE_EDITOR_SECTION_TEXT.quiet.hint}</span>
+                        </div>
+
+                        <details className="rule-editor-advanced">
+                          <summary>高级通知设置</summary>
+                          <div className="rule-editor-section__grid">
+                            <label className="field field--checkbox">
+                              <input
+                                type="checkbox"
+                                checked={Boolean(selectedRule.quietHours)}
+                                onChange={(event) =>
+                                  updateRuleQuietHours(
+                                    selectedRule.id,
+                                    event.target.checked
+                                      ? quietHoursDraftToValue({ start: '23:00', end: '06:00' })
+                                      : undefined,
+                                  )
+                                }
+                              />
+                              <span>{RULE_PAGE_TEXT.quietCustom}</span>
+                            </label>
+
+                            <label className="field">
+                              <span>{RULE_PAGE_TEXT.quietStart}</span>
+                              <input
+                                type="time"
+                                value={selectedQuietDraft?.start ?? ''}
+                                disabled={!selectedRule.quietHours || !selectedQuietDraft}
+                                onChange={(event) =>
+                                  selectedQuietDraft
+                                    ? updateQuietDraft(selectedRule.id, selectedQuietDraft, {
+                                        start: event.target.value,
+                                      })
+                                    : undefined
+                                }
+                              />
+                            </label>
+
+                            <label className="field">
+                              <span>{RULE_PAGE_TEXT.quietEnd}</span>
+                              <input
+                                type="time"
+                                value={selectedQuietDraft?.end ?? ''}
+                                disabled={!selectedRule.quietHours || !selectedQuietDraft}
+                                onChange={(event) =>
+                                  selectedQuietDraft
+                                    ? updateQuietDraft(selectedRule.id, selectedQuietDraft, {
+                                        end: event.target.value,
+                                      })
+                                    : undefined
+                                }
+                              />
+                            </label>
+                          </div>
+                        </details>
+                      </section>
+                    </div>
+                  </section>
+                </div>
+              </section>
+            </div>
+          ) : null}
         </div>
       </section>
 
       <section className="workspace-grid workspace-grid--wide">
-        <section className="panel">
+        <section className="panel panel--settings">
           <header className="panel__header">
             <div>
               <h2>{copy.settings.settingsTitle}</h2>
               <span>{copy.settings.settingsHint}</span>
             </div>
           </header>
+
+          <div className="settings-panel__body">
+
+          <div className="settings-panel__section">
+            <div className="settings-panel__section-head">
+              <strong>运行偏好</strong>
+              <p>启动方式、刷新节奏、安静时段和默认提示音都在这里统一调整。</p>
+            </div>
 
           <div className="field-grid">
             <label className="field field--checkbox">
@@ -3187,7 +2486,7 @@ export const RulesSettingsView = ({
 
             <div className="field">
               <span>{copy.common.details}</span>
-              <p className="rule-hint">{RULE_PAGE_TEXT.settingsNote}</p>
+              <p className="rule-hint">这里的提示音、通知和城市映射会影响全部规则。</p>
             </div>
           </div>
 
@@ -3204,12 +2503,13 @@ export const RulesSettingsView = ({
             ))}
           </div>
 
-          <header className="panel__header panel__header--stacked">
-            <div>
-              <h2>{copy.settings.storageTitle}</h2>
-              <span>{copy.settings.storageHint}</span>
+          </div>
+
+          <div className="settings-panel__section">
+            <div className="settings-panel__section-head">
+              <strong>{copy.settings.storageTitle}</strong>
+              <p>{copy.settings.storageHint}</p>
             </div>
-          </header>
 
           <div className="settings-storage-panel" aria-label="storage-summary">
             {storageOverviewItems.map((item, index) => (
@@ -3293,7 +2593,15 @@ export const RulesSettingsView = ({
             ) : null}
           </details>
 
-          <div className="action-row">
+          </div>
+
+          <div className="settings-panel__section settings-panel__section--compact">
+            <div className="settings-panel__section-head">
+              <strong>辅助操作</strong>
+              <p>试听、登记当前提示音，以及导入示例城市映射。</p>
+            </div>
+
+          <div className="action-row settings-panel__actions">
             <button
               type="button"
               className="ghost-button"
@@ -3325,6 +2633,8 @@ export const RulesSettingsView = ({
           <p className={`rule-settings-feedback is-${cityMapFeedbackTone}`} role="status">
             {cityMapFeedbackText}
           </p>
+          </div>
+          </div>
         </section>
 
         <QuickControlPanel

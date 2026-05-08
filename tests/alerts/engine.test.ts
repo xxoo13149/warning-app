@@ -117,7 +117,7 @@ describe('alert engine for market ticks', () => {
     expect(scopedIn.length).toBe(1);
   });
 
-  it('triggers liquidity kill when bid collapses below threshold', () => {
+  it('triggers liquidity kill when the entire bid side empties', () => {
     const engine = new AlertEngine(new MarketStateStore());
     const t0 = Date.UTC(2026, 0, 1, 0, 0, 0);
     const rule: AlertRule = {
@@ -141,28 +141,36 @@ describe('alert engine for market ticks', () => {
         cityKey: 'nyc',
         timestamp: t0,
         bestBid: 0.2,
+        bidLevelCount: 2,
       },
       t0,
     );
     expect(initial.length).toBe(0);
 
-    const collapsed = engine.evaluateMarketTick(
+    const emptied = engine.evaluateMarketTick(
       [rule],
       {
         tokenId: 'token-liquidity',
         marketId: 'market-liquidity',
         cityKey: 'nyc',
         timestamp: t0 + 30_000,
-        bestBid: 0,
+        bidLevelCount: 0,
       },
       t0 + 30_000,
     );
-    expect(collapsed.length).toBe(1);
-    expect(collapsed[0].ruleId).toBe('rule-liquidity-kill');
-    expect(collapsed[0].messageKey).toBe('liquidity_kill');
+    expect(emptied.length).toBe(1);
+    expect(emptied[0].ruleId).toBe('rule-liquidity-kill');
+    expect(emptied[0].messageKey).toBe('liquidity_kill');
+    expect(emptied[0].messageParams).toMatchObject({
+      side: 'buy',
+      source: 'fallback',
+      reason: 'full_empty',
+      previous: 0.2,
+      actual: 0,
+    });
   });
 
-  it('triggers liquidity kill when ask liquidity disappears', () => {
+  it('triggers liquidity kill when the entire ask side empties', () => {
     const engine = new AlertEngine(new MarketStateStore());
     const t0 = Date.UTC(2026, 0, 1, 0, 0, 0);
     const rule: AlertRule = {
@@ -186,6 +194,7 @@ describe('alert engine for market ticks', () => {
         cityKey: 'nyc',
         timestamp: t0,
         bestAsk: 0.2,
+        askLevelCount: 2,
       },
       t0,
     );
@@ -198,16 +207,23 @@ describe('alert engine for market ticks', () => {
         marketId: 'market-liquidity',
         cityKey: 'nyc',
         timestamp: t0 + 30_000,
+        askLevelCount: 0,
       },
       t0 + 30_000,
     );
     expect(disappeared.length).toBe(1);
     expect(disappeared[0].ruleId).toBe('rule-liquidity-kill-ask');
     expect(disappeared[0].messageKey).toBe('liquidity_kill');
-    expect(disappeared[0].messageParams?.side).toBe('sell');
+    expect(disappeared[0].messageParams).toMatchObject({
+      side: 'sell',
+      source: 'fallback',
+      reason: 'full_empty',
+      previous: 0.2,
+      actual: 0,
+    });
   });
 
-  it('uses explicit removed edges to classify probable trade sweeps', () => {
+  it('does not trigger liquidity kill when only the top bid level is removed', () => {
     const engine = new AlertEngine(new MarketStateStore());
     const t0 = Date.UTC(2026, 0, 1, 0, 1, 0);
     const rule: AlertRule = {
@@ -248,18 +264,61 @@ describe('alert engine for market ticks', () => {
       t0,
     );
 
+    expect(result).toHaveLength(0);
+  });
+
+  it('uses explicit removed edges to classify full-book trade sweeps', () => {
+    const engine = new AlertEngine(new MarketStateStore());
+    const t0 = Date.UTC(2026, 0, 1, 0, 1, 30);
+    const rule: AlertRule = {
+      id: 'rule-liquidity-edge-empty',
+      name: '鐩樺彛鏂╂潃',
+      enabled: true,
+      metric: 'liquidity_kill',
+      operator: '>=',
+      threshold: 0.2,
+      windowSec: 30,
+      cooldownSec: 0,
+      dedupeWindowSec: 0,
+      severity: 'critical',
+      liquiditySide: 'buy',
+    };
+
+    const result = engine.evaluateMarketTick(
+      [rule],
+      {
+        tokenId: 'token-edge-empty',
+        marketId: 'market-edge',
+        cityKey: 'nyc',
+        side: 'yes',
+        timestamp: t0,
+        bidLevelCount: 0,
+        removedBidEdge: {
+          previousPrice: 0.31,
+          previousSize: 4,
+          currentPrice: null,
+          currentSize: 0,
+          levelCountAfter: 0,
+          visibleSizeAfter: 0,
+          source: 'price_change',
+        },
+        lastTradeAt: t0,
+      },
+      t0,
+    );
+
     expect(result).toHaveLength(1);
     expect(result[0].messageParams).toMatchObject({
       outcome: 'yes',
       side: 'buy',
       source: 'trade_sweep',
-      reason: 'top_level',
+      reason: 'full_empty',
       previous: 0.31,
-      actual: 0.18,
+      actual: 0,
     });
   });
 
-  it('respects liquiditySide and uses fallback empty-book detection', () => {
+  it('respects liquiditySide and uses fallback full-empty detection', () => {
     const engine = new AlertEngine(new MarketStateStore());
     const t0 = Date.UTC(2026, 0, 1, 0, 2, 0);
 

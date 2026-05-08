@@ -1,19 +1,31 @@
-import { memo, startTransition, useDeferredValue, useEffect, useMemo, useState } from 'react';
+import { memo, startTransition, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 
 import { useI18n } from '../i18n';
 import { cn } from '../lib/tailwind-utils';
-import type { AppLanguage, MarketQuery, MarketRow, OrderSide } from '../types/contracts';
+import type {
+  AlertEvent,
+  AppLanguage,
+  MarketQuery,
+  MarketRow,
+  OrderSide,
+} from '../types/contracts';
 import {
   formatMarketCentsLabel,
   formatMarketPercent,
   formatTemperatureBandLabel,
   hasMarketQuoteSignal,
 } from '../utils/market-display';
+import {
+  buildAlertSummaryDraft,
+  type AlertFact,
+} from '../utils/alert-summary';
 
 interface MarketExplorerViewProps {
   rows: MarketRow[];
   total: number;
   query: MarketQuery;
+  focusMarketId?: string | null;
+  focusAlert?: AlertEvent | null;
   onQueryChange: (next: Partial<MarketQuery>) => void;
   onRefresh: () => void;
 }
@@ -23,6 +35,11 @@ interface MarketExplorerRowProps {
   formatTime: (value: string) => string;
   language: AppLanguage;
   selected: boolean;
+  alertFocused?: boolean;
+  alertDriven?: boolean;
+  alertTriggerLabel?: string | null;
+  focusedColumn?: PrecisionFocusColumn;
+  focusReferenceValue?: number | null;
   onSelect: (marketId: string) => void;
 }
 
@@ -34,9 +51,139 @@ interface MarketBandProps {
   onSelect: (marketId: string) => void;
 }
 
+interface AlertFactListProps {
+  title: string;
+  items: AlertFact[];
+  accent?: 'highlight' | 'muted';
+}
+
+interface InspectorSignalCardProps {
+  title: string;
+  label: string;
+  value: string;
+}
+
+interface InspectorCompareCardProps {
+  title: string;
+  leftLabel: string;
+  leftValue: string;
+  rightLabel: string;
+  rightValue: string;
+  detail?: string | null;
+  leftShare?: number | null;
+  emphasis?: 'default' | 'primary';
+}
+
+interface AlertTriggerStep {
+  label: string;
+  value: string;
+}
+
+interface AlertTriggerRail {
+  title: string;
+  actualLabel: string;
+  actualValue: string;
+  thresholdLabel: string;
+  thresholdValue: string;
+  deltaLabel: string;
+  deltaValue: string;
+  share: number | null;
+  direction: 'above' | 'below' | 'touch';
+}
+
+interface AlertThresholdSnapshot {
+  actualValue: string;
+  thresholdValue: string;
+  deltaValue: string;
+  share: number | null;
+  direction: AlertTriggerRail['direction'];
+}
+
+interface AlertTriggerEvidence {
+  visualMeta: ReturnType<typeof getAlertRuleVisualMeta>;
+  primaryFact: AlertFact | null;
+  actual: number | null | undefined;
+  threshold: number | null | undefined;
+  thresholdSnapshot: AlertThresholdSnapshot | null;
+  alertMarketLabel: string;
+  selectedMarketLabel: string;
+  ruleLabel: string;
+  primarySignalValue: string;
+  rowTriggerLabel: string;
+}
+
+interface AlertTriggerHighlight {
+  headline: string;
+  summary: string;
+  metrics: Array<{ label: string; value: string }>;
+  flowTitle: string;
+  flowCaption: string;
+  flowSteps: AlertTriggerStep[];
+  rail: AlertTriggerRail | null;
+}
+
+interface PrecisionFocusGuideFact {
+  key: 'market' | 'actual' | 'threshold' | 'trigger' | 'scope' | 'compare' | 'context';
+  label: string;
+  value: string;
+  actionLabel?: string;
+  actionMarketId?: string;
+}
+
+interface PrecisionFocusGuide {
+  column: Exclude<PrecisionFocusColumn, null>;
+  mode: 'alert' | 'compare';
+  title: string;
+  summary: string;
+  facts: PrecisionFocusGuideFact[];
+  rail: AlertTriggerRail | null;
+}
+
+interface PrecisionJudgementContextFact {
+  key: string;
+  label: string;
+  value: string;
+}
+
+interface PrecisionJudgementPanelData {
+  column: Exclude<PrecisionFocusColumn, null>;
+  mode: 'alert' | 'compare';
+  selectedMarketId: string;
+  headline: string;
+  summary: string;
+  leadFacts: PrecisionFocusGuideFact[];
+  contextFacts: PrecisionJudgementContextFact[];
+  contextSummary: string;
+  actionLabel: string | null;
+  actionMarketId: string | null;
+  rail: AlertTriggerRail | null;
+}
+
+interface PrecisionJudgementSource {
+  column: Exclude<PrecisionFocusColumn, null>;
+  mode: 'alert' | 'compare';
+  selectedMarketId: string | null;
+  focusLabel: string;
+  focusTitle: string;
+  focusSummary: string;
+  leadFacts: PrecisionFocusGuideFact[];
+  guideFacts: PrecisionFocusGuideFact[];
+  contextFacts: PrecisionJudgementContextFact[];
+  contextSummary: string;
+  actionLabel: string | null;
+  actionMarketId: string | null;
+  rail: AlertTriggerRail | null;
+}
+
+interface PrecisionJudgementPanelProps {
+  panel: PrecisionJudgementPanelData;
+  onSelectMarket: (marketId: string) => void;
+}
+
 type MarketExplorerMode = 'overview' | 'precise';
 type MarketSideFilter = '' | Extract<OrderSide, 'YES' | 'NO'>;
 type MarketExplorerPreset = 'all' | 'watchlist';
+type PrecisionFocusColumn = 'yesPrice' | 'bid' | 'ask' | 'spread' | 'change5m' | 'lottery' | 'updated' | null;
 
 const MARKET_STATUS_LABELS: Record<MarketRow['status'], string> = {
   active: '交易中',
@@ -159,6 +306,295 @@ const formatLotteryNotionalLabel = (value: number | null | undefined, language: 
   }).format(value);
 };
 
+const isFiniteMetric = (value: number | null | undefined): value is number =>
+  typeof value === 'number' && Number.isFinite(value);
+
+const clampShare = (value: number) => Math.min(0.92, Math.max(0.08, value));
+
+const buildMetricShare = (
+  leftValue: number | null | undefined,
+  rightValue: number | null | undefined,
+) => {
+  if (!isFiniteMetric(leftValue) || !isFiniteMetric(rightValue)) {
+    return null;
+  }
+
+  const total = Math.abs(leftValue) + Math.abs(rightValue);
+  if (total <= 0) {
+    return 0.5;
+  }
+
+  return clampShare(Math.abs(leftValue) / total);
+};
+
+const formatAlertMetricValue = (
+  alert: AlertEvent,
+  value: number | null | undefined,
+  language: AppLanguage,
+) => {
+  if (!isFiniteMetric(value)) {
+    return '--';
+  }
+
+  if (alert.messageKey === 'price_change_pct') {
+    return formatMarketPercent(value);
+  }
+
+  if (alert.messageKey === 'feed_stale') {
+    return language === 'zh-CN'
+      ? `${Math.round(value).toLocaleString(language)} 秒`
+      : `${Math.round(value).toLocaleString(language)}s`;
+  }
+
+  return formatMarketCentsLabel(value, { compact: true }, language);
+};
+
+const buildAlertThresholdSnapshot = (
+  alert: AlertEvent,
+  actual: number | null | undefined,
+  threshold: number | null | undefined,
+  language: AppLanguage,
+): AlertThresholdSnapshot | null => {
+  if (!isFiniteMetric(actual) || !isFiniteMetric(threshold)) {
+    return null;
+  }
+
+  const delta = actual - threshold;
+  return {
+    actualValue: formatAlertMetricValue(alert, actual, language),
+    thresholdValue: formatAlertMetricValue(alert, threshold, language),
+    deltaValue: formatAlertMetricValue(alert, Math.abs(delta), language),
+    share: buildMetricShare(actual, threshold),
+    direction: delta === 0 ? 'touch' : delta > 0 ? 'above' : 'below',
+  };
+};
+
+const getAlertRuleVisualMeta = (alert: AlertEvent) => {
+  const key = (alert.messageKey ?? alert.ruleId ?? '').toLowerCase();
+
+  if (key.includes('spread')) {
+    return {
+      flowTitle: '价差越线判定',
+      signalLabel: '当前价差',
+      thresholdLabel: '价差阈值',
+      overLabel: '超出幅度',
+      underLabel: '低于幅度',
+      caption: '先看原始盘口的价差，再对照阈值，最后确认这次命中的规则。',
+    };
+  }
+
+  if (key.includes('price_change')) {
+    return {
+      flowTitle: '短时波动判定',
+      signalLabel: '当前波动',
+      thresholdLabel: '波动阈值',
+      overLabel: '超出幅度',
+      underLabel: '低于幅度',
+      caption: '先看原始盘口的短时变化，再对照阈值，确认是否进入异常波动。',
+    };
+  }
+
+  if (key.includes('price_threshold')) {
+    return {
+      flowTitle: '价格越线判定',
+      signalLabel: '当前价格',
+      thresholdLabel: '价格阈值',
+      overLabel: '高出幅度',
+      underLabel: '低于幅度',
+      caption: '先看原始盘口当前价格，再对照规则阈值，确认是哪一次越线触发。',
+    };
+  }
+
+  if (key.includes('feed')) {
+    return {
+      flowTitle: '停更超时判定',
+      signalLabel: '停更时长',
+      thresholdLabel: '超时阈值',
+      overLabel: '超时幅度',
+      underLabel: '剩余缓冲',
+      caption: '先看数据停更了多久，再对照超时阈值，判断是否已经进入告警区。',
+    };
+  }
+
+  if (key.includes('liquidity')) {
+    return {
+      flowTitle: '盘口抽空判定',
+      signalLabel: '当前深度',
+      thresholdLabel: '深度阈值',
+      overLabel: '高出幅度',
+      underLabel: '缺口幅度',
+      caption: '先看原始盘口深度，再对照最小深度阈值，确认这次是否属于抽空风险。',
+    };
+  }
+
+  if (key.includes('lottery')) {
+    return {
+      flowTitle: '异常抬升判定',
+      signalLabel: '抬升幅度',
+      thresholdLabel: '抬升阈值',
+      overLabel: '超出幅度',
+      underLabel: '低于幅度',
+      caption: '先看原始盘口抬升幅度，再对照阈值，判断是不是这次异常彩票信号。',
+    };
+  }
+
+  if (key.includes('volume_pricing')) {
+    return {
+      flowTitle: '带量定价判定',
+      signalLabel: '成交影响',
+      thresholdLabel: '定价阈值',
+      overLabel: '超出幅度',
+      underLabel: '低于幅度',
+      caption: '先看原始盘口成交带来的价格影响，再对照阈值，确认是否命中带量定价规则。',
+    };
+  }
+
+  return {
+    flowTitle: '规则命中判定',
+    signalLabel: '关键指标',
+    thresholdLabel: '规则阈值',
+    overLabel: '超出幅度',
+    underLabel: '低于幅度',
+    caption: '先确认原始盘口，再看关键指标，最后确认是哪条规则触发了这次告警。',
+  };
+};
+
+const getPrecisionFocusColumn = (alert: AlertEvent | null): PrecisionFocusColumn => {
+  if (!alert) {
+    return null;
+  }
+
+  const key = (alert.messageKey ?? alert.ruleId ?? '').toLowerCase();
+  const liquiditySide = alert.messageParams?.side?.toLowerCase();
+
+  if (key.includes('spread')) {
+    return 'spread';
+  }
+
+  if (key.includes('price_threshold')) {
+    return 'yesPrice';
+  }
+
+  if (key.includes('price_change')) {
+    return 'change5m';
+  }
+
+  if (key.includes('volume_pricing')) {
+    return 'ask';
+  }
+
+  if (key.includes('lottery')) {
+    return 'lottery';
+  }
+
+  if (key.includes('feed')) {
+    return 'updated';
+  }
+
+  if (key.includes('liquidity')) {
+    if (liquiditySide === 'buy') {
+      return 'bid';
+    }
+
+    if (liquiditySide === 'sell') {
+      return 'ask';
+    }
+  }
+
+  return null;
+};
+
+const getPrecisionFocusMetricValue = (
+  row: MarketRow,
+  column: Exclude<PrecisionFocusColumn, null>,
+): number | null => {
+  switch (column) {
+    case 'yesPrice':
+      return isFiniteMetric(row.yesPrice) ? row.yesPrice : null;
+    case 'bid':
+      return isFiniteMetric(row.bestBid) ? row.bestBid : null;
+    case 'ask':
+      return isFiniteMetric(row.bestAsk) ? row.bestAsk : null;
+    case 'spread':
+      return isFiniteMetric(row.spread) ? row.spread : null;
+    case 'change5m':
+      return isFiniteMetric(row.change5m) ? row.change5m : null;
+    case 'lottery':
+      return isFiniteMetric(row.lotteryLift) ? row.lotteryLift : null;
+    case 'updated': {
+      const timestamp = Date.parse(row.updatedAt);
+      return Number.isFinite(timestamp) ? timestamp : null;
+    }
+    default:
+      return null;
+  }
+};
+
+const formatPrecisionDeltaDuration = (minutes: number, language: AppLanguage) => {
+  if (minutes < 60) {
+    return language === 'zh-CN' ? `${minutes} 分钟` : `${minutes}m`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  const remainMinutes = minutes % 60;
+  if (language === 'zh-CN') {
+    return remainMinutes > 0 ? `${hours} 小时 ${remainMinutes} 分钟` : `${hours} 小时`;
+  }
+
+  return remainMinutes > 0 ? `${hours}h ${remainMinutes}m` : `${hours}h`;
+};
+
+const formatPrecisionFocusDelta = (
+  column: Exclude<PrecisionFocusColumn, null>,
+  currentValue: number | null,
+  referenceValue: number | null,
+  language: AppLanguage,
+) => {
+  if (!isFiniteMetric(currentValue) || !isFiniteMetric(referenceValue)) {
+    return null;
+  }
+
+  const delta = currentValue - referenceValue;
+
+  switch (column) {
+    case 'yesPrice':
+    case 'bid':
+    case 'ask':
+    case 'spread':
+    case 'lottery': {
+      if (Math.abs(delta) < 0.0005) {
+        return language === 'zh-CN' ? '与告警持平' : 'Matches alert';
+      }
+
+      return `${language === 'zh-CN' ? '较告警' : 'vs alert'} ${delta > 0 ? '+' : '-'}${formatMarketCentsLabel(
+        Math.abs(delta),
+        { compact: true },
+        language,
+      )}`;
+    }
+    case 'change5m':
+      if (Math.abs(delta) < 0.05) {
+        return language === 'zh-CN' ? '与告警持平' : 'Matches alert';
+      }
+
+      return `${language === 'zh-CN' ? '较告警' : 'vs alert'} ${formatMarketPercent(delta)}`;
+    case 'updated': {
+      const deltaMinutes = Math.round(Math.abs(delta) / 60000);
+      if (deltaMinutes < 1) {
+        return language === 'zh-CN' ? '与告警同步' : 'Matches alert';
+      }
+
+      if (language === 'zh-CN') {
+        return `较告警 ${delta > 0 ? '晚' : '早'} ${formatPrecisionDeltaDuration(deltaMinutes, language)}`;
+      }
+
+      return `vs alert ${formatPrecisionDeltaDuration(deltaMinutes, language)} ${delta > 0 ? 'later' : 'earlier'}`;
+    }
+    default:
+      return null;
+  }
+};
+
 const getMarketBandClassName = (row: MarketRow, selected: boolean) =>
   cn(
     'market-band',
@@ -168,8 +604,20 @@ const getMarketBandClassName = (row: MarketRow, selected: boolean) =>
     selected && 'is-selected',
   );
 
-const getMarketRowClassName = (row: MarketRow, selected: boolean) =>
-  cn('market-table-row', marketHasLotterySignal(row) && 'market-table-row--lottery', selected && 'is-selected');
+const getMarketRowClassName = (row: MarketRow, selected: boolean, alertFocused = false) =>
+  cn(
+    'market-table-row',
+    marketHasLotterySignal(row) && 'market-table-row--lottery',
+    selected && 'is-selected',
+    alertFocused && 'is-alert-focus',
+  );
+
+const getFocusedColumnClassName = (
+  focusedColumn: PrecisionFocusColumn,
+  column: Exclude<PrecisionFocusColumn, null>,
+  extraClassName?: string,
+) =>
+  cn(extraClassName, focusedColumn === column && 'is-focus-column');
 
 const groupMarketsByCity = (rows: MarketRow[]) => {
   const groups = new Map<
@@ -235,33 +683,227 @@ const groupMarketsByCity = (rows: MarketRow[]) => {
   });
 };
 
+const buildVisibleOverviewRows = (
+  rows: MarketRow[],
+  selectedMarketId: string | null,
+  limit: number,
+) => {
+  const visibleRows = rows.slice(0, limit);
+  if (!selectedMarketId || visibleRows.some((row) => row.marketId === selectedMarketId)) {
+    return visibleRows;
+  }
+
+  const selectedRow = rows.find((row) => row.marketId === selectedMarketId);
+  if (!selectedRow) {
+    return visibleRows;
+  }
+
+  return [selectedRow, ...visibleRows.filter((row) => row.marketId !== selectedMarketId)].slice(
+    0,
+    limit,
+  );
+};
+
+const compareMarketsByAttention = (left: MarketRow, right: MarketRow) => {
+  const severityDelta = SEVERITY_WEIGHT[right.bubbleSeverity] - SEVERITY_WEIGHT[left.bubbleSeverity];
+  if (severityDelta !== 0) {
+    return severityDelta;
+  }
+
+  const lotteryDelta = Number(marketHasLotterySignal(right)) - Number(marketHasLotterySignal(left));
+  if (lotteryDelta !== 0) {
+    return lotteryDelta;
+  }
+
+  const spreadDelta = Number(marketHasWideSpread(right)) - Number(marketHasWideSpread(left));
+  if (spreadDelta !== 0) {
+    return spreadDelta;
+  }
+
+  const changeDelta = Math.abs((right.change5m ?? 0) as number) - Math.abs((left.change5m ?? 0) as number);
+  if (changeDelta !== 0) {
+    return changeDelta;
+  }
+
+  return Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
+};
+
+const pickLeadMarketRow = (rows: MarketRow[]) =>
+  rows.reduce<MarketRow | null>((best, row) => {
+    if (!best) {
+      return row;
+    }
+
+    return compareMarketsByAttention(best, row) > 0 ? row : best;
+  }, null);
+
+const buildCityRiskSummary = (row: MarketRow, language: AppLanguage) => {
+  if (marketHasLotterySignal(row)) {
+    return {
+      band: formatTemperatureBandLabel(row.temperatureBand, language),
+      headline: '异常彩票抬升',
+      detail: `抬升 ${formatLotteryLiftLabel(row.lotteryLift, language)} · ${MARKET_SEVERITY_LABELS[row.bubbleSeverity]}`,
+    };
+  }
+
+  if (marketHasWideSpread(row)) {
+    return {
+      band: formatTemperatureBandLabel(row.temperatureBand, language),
+      headline: '价差偏高',
+      detail: `价差 ${formatMarketCentsLabel(row.spread, { compact: true }, language)} · 5m ${formatMarketPercent(
+        row.change5m,
+      )}`,
+    };
+  }
+
+  return {
+    band: formatTemperatureBandLabel(row.temperatureBand, language),
+    headline: MARKET_SEVERITY_LABELS[row.bubbleSeverity],
+    detail: `5m ${formatMarketPercent(row.change5m)} · YES ${formatMarketCentsLabel(
+      row.yesPrice,
+      { compact: true, treatZeroAsUnknown: !hasMarketQuoteSignal(row) },
+      language,
+    )}`,
+  };
+};
+
 const MarketExplorerRow = memo(
-  ({ row, formatTime, language, selected, onSelect }: MarketExplorerRowProps) => {
+  ({
+    row,
+    formatTime,
+    language,
+    selected,
+    alertFocused = false,
+    alertDriven = false,
+    alertTriggerLabel = null,
+    focusedColumn = null,
+    focusReferenceValue = null,
+    onSelect,
+  }: MarketExplorerRowProps) => {
     const spreadClass = marketHasWideSpread(row) ? 'value-down' : '';
     const changeClass = row.change5m >= 0 ? 'value-up' : 'value-down';
     const hasQuotes = hasMarketQuoteSignal(row);
     const lotteryLift = marketHasLotterySignal(row) ? formatLotteryLiftLabel(row.lotteryLift, language) : '--';
     const lotteryRoute = formatLotteryRouteLabel(row, language);
+    const focusBadgeLabel =
+      alertDriven && focusedColumn
+        ? alertFocused
+          ? '告警值'
+          : selected
+            ? '对照值'
+            : null
+        : null;
+    const focusDeltaLabel =
+      alertDriven && focusedColumn && selected && !alertFocused
+        ? formatPrecisionFocusDelta(
+            focusedColumn,
+            getPrecisionFocusMetricValue(row, focusedColumn),
+            focusReferenceValue,
+            language,
+          )
+        : null;
+    const renderFocusedCell = (
+      column: Exclude<PrecisionFocusColumn, null>,
+      value: string,
+      options: {
+        className?: string;
+        title?: string;
+      } = {},
+    ) => {
+      const className = getFocusedColumnClassName(focusedColumn, column, options.className);
+
+      if (focusedColumn === column && focusBadgeLabel) {
+        return (
+          <td className={className} title={options.title}>
+            <div className="market-table-cell__focus">
+              <strong>{value}</strong>
+              <div className="market-table-cell__focus-meta">
+                <span
+                  className="market-table-cell__focus-badge"
+                  data-testid={`market-precision-focus-badge-${row.marketId}`}
+                >
+                  {focusBadgeLabel}
+                </span>
+                {focusDeltaLabel ? (
+                  <span
+                    className="market-table-cell__focus-delta"
+                    data-testid={`market-precision-focus-delta-${row.marketId}`}
+                  >
+                    {focusDeltaLabel}
+                  </span>
+                ) : null}
+              </div>
+            </div>
+          </td>
+        );
+      }
+
+      return (
+        <td className={className} title={options.title}>
+          {value}
+        </td>
+      );
+    };
 
     return (
-      <tr className={getMarketRowClassName(row, selected)} onClick={() => onSelect(row.marketId)}>
-        <td>{row.cityName}</td>
+      <tr
+        className={getMarketRowClassName(row, selected, alertFocused)}
+        data-testid={`market-precision-row-${row.marketId}`}
+        onClick={() => onSelect(row.marketId)}
+      >
+        <td>
+          <div className="market-table-row__identity">
+            <strong>{row.cityName}</strong>
+            <small className="market-table-row__market-id">{row.marketId}</small>
+            {alertDriven && (selected || alertFocused) ? (
+              <div className="market-table-row__badges">
+                {alertFocused ? (
+                  <span className="market-table-row__badge market-table-row__badge--alert">
+                    原始盘口
+                  </span>
+                ) : null}
+                {selected ? (
+                  <span className="market-table-row__badge market-table-row__badge--selected">
+                    {alertFocused ? '当前盘口' : '对照盘口'}
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
+            {alertFocused && alertTriggerLabel ? (
+              <small
+                className="market-table-row__trigger"
+                data-testid={`market-precision-row-trigger-${row.marketId}`}
+              >
+                {alertTriggerLabel}
+              </small>
+            ) : null}
+          </div>
+        </td>
         <td>{row.eventDate}</td>
         <td>{formatTemperatureBandLabel(row.temperatureBand, language)}</td>
-        <td>{formatMarketCentsLabel(row.yesPrice, { treatZeroAsUnknown: !hasQuotes }, language)}</td>
-        <td>{formatMarketCentsLabel(row.bestBid, { treatZeroAsUnknown: !hasQuotes }, language)}</td>
-        <td>{formatMarketCentsLabel(row.bestAsk, { treatZeroAsUnknown: !hasQuotes }, language)}</td>
-        <td className={spreadClass}>
-          {formatMarketCentsLabel(row.spread, { treatZeroAsUnknown: !hasQuotes }, language)}
-        </td>
-        <td className={changeClass}>{formatMarketPercent(row.change5m)}</td>
-        <td
-          className={marketHasLotterySignal(row) ? 'value-up market-table-cell--lottery' : 'market-table-cell--lottery'}
-          title={lotteryRoute ?? undefined}
-        >
-          {lotteryLift}
-        </td>
-        <td>{formatTime(row.updatedAt)}</td>
+        {renderFocusedCell(
+          'yesPrice',
+          formatMarketCentsLabel(row.yesPrice, { treatZeroAsUnknown: !hasQuotes }, language),
+        )}
+        {renderFocusedCell(
+          'bid',
+          formatMarketCentsLabel(row.bestBid, { treatZeroAsUnknown: !hasQuotes }, language),
+        )}
+        {renderFocusedCell(
+          'ask',
+          formatMarketCentsLabel(row.bestAsk, { treatZeroAsUnknown: !hasQuotes }, language),
+        )}
+        {renderFocusedCell(
+          'spread',
+          formatMarketCentsLabel(row.spread, { treatZeroAsUnknown: !hasQuotes }, language),
+          { className: spreadClass },
+        )}
+        {renderFocusedCell('change5m', formatMarketPercent(row.change5m), { className: changeClass })}
+        {renderFocusedCell('lottery', lotteryLift, {
+          className: marketHasLotterySignal(row) ? 'value-up market-table-cell--lottery' : 'market-table-cell--lottery',
+          title: lotteryRoute ?? undefined,
+        })}
+        {renderFocusedCell('updated', formatTime(row.updatedAt))}
       </tr>
     );
   },
@@ -330,10 +972,159 @@ const MarketBand = memo(
   },
 );
 
+const AlertFactList = ({ title, items, accent = 'muted' }: AlertFactListProps) => {
+  if (items.length === 0) {
+    return null;
+  }
+
+  return (
+    <section className={`market-alert-facts market-alert-facts--${accent}`}>
+      <div className="market-alert-facts__head">
+        <strong>{title}</strong>
+        <span>{items.length} 项</span>
+      </div>
+      <div className="market-alert-facts__grid">
+        {items.map((item) => (
+          <div key={`${title}-${item.label}-${item.value}`} className="market-alert-facts__item">
+            <span>{item.label}</span>
+            <strong>{item.value}</strong>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+};
+
+const PrecisionJudgementPanel = ({ panel, onSelectMarket }: PrecisionJudgementPanelProps) => (
+  <section
+    className="market-precision-judgement"
+    data-testid="market-precision-judgement-panel"
+    data-focus-column={panel.column}
+    data-focus-mode={panel.mode}
+    data-selected-market-id={panel.selectedMarketId}
+  >
+    <div
+      className="market-precision-judgement__primary"
+      data-testid="market-precision-judgement-primary"
+    >
+      <span className="market-precision-judgement__eyebrow">首屏判读</span>
+      <strong>{panel.headline}</strong>
+      <p>{panel.summary}</p>
+      <div className="market-precision-judgement__facts">
+        {panel.leadFacts.map((fact) => (
+          <div key={fact.key} className="market-precision-judgement__fact">
+            <span>{fact.label}</span>
+            <strong>{fact.value}</strong>
+          </div>
+        ))}
+      </div>
+      {panel.rail ? (
+        <div
+          className={cn(
+            'market-precision-judgement__rail',
+            'market-inspector__trigger-rail',
+            `is-${panel.rail.direction}`,
+          )}
+        >
+          <div className="market-inspector__trigger-rail-values">
+            <div>
+              <span>{panel.rail.actualLabel}</span>
+              <strong>{panel.rail.actualValue}</strong>
+            </div>
+            <div>
+              <span>{panel.rail.thresholdLabel}</span>
+              <strong>{panel.rail.thresholdValue}</strong>
+            </div>
+            <div>
+              <span>{panel.rail.deltaLabel}</span>
+              <strong>{panel.rail.deltaValue}</strong>
+            </div>
+          </div>
+          <div className="market-inspector__trigger-rail-track" aria-hidden="true">
+            <span
+              className="market-inspector__trigger-rail-fill"
+              style={panel.rail.share === null ? undefined : { width: `${panel.rail.share * 100}%` }}
+            />
+          </div>
+        </div>
+      ) : null}
+    </div>
+    <div
+      className="market-precision-judgement__context"
+      data-testid="market-precision-judgement-context"
+    >
+      <div className="market-precision-judgement__context-hero">
+        <span>当前语境</span>
+        <strong>{panel.mode === 'alert' ? '原始盘口' : '对照盘口'}</strong>
+        <p>{panel.contextSummary}</p>
+      </div>
+      <div className="market-precision-judgement__context-grid">
+        {panel.contextFacts.map((fact) => (
+          <div key={fact.key} className="market-precision-judgement__context-fact">
+            <span>{fact.label}</span>
+            <strong>{fact.value}</strong>
+          </div>
+        ))}
+      </div>
+      {panel.actionMarketId ? (
+        <button
+          type="button"
+          className="market-precision-judgement__action"
+          data-testid="market-precision-judgement-action"
+          onClick={() => onSelectMarket(panel.actionMarketId ?? '')}
+        >
+          {panel.actionLabel}
+        </button>
+      ) : null}
+    </div>
+  </section>
+);
+
+const InspectorSignalCard = ({ title, label, value }: InspectorSignalCardProps) => (
+  <div className="market-inspector-signal-card">
+    <span>{title}</span>
+    <strong>{value}</strong>
+    <em>{label}</em>
+  </div>
+);
+
+const InspectorCompareCard = ({
+  title,
+  leftLabel,
+  leftValue,
+  rightLabel,
+  rightValue,
+  detail = null,
+  leftShare = null,
+  emphasis = 'default',
+}: InspectorCompareCardProps) => (
+  <div className={cn('market-inspector-compare-card', emphasis === 'primary' && 'is-primary')}>
+    <div className="market-inspector-compare-card__head">
+      <strong>{title}</strong>
+      {detail ? <span>{detail}</span> : null}
+    </div>
+    <div className="market-inspector-compare-card__values">
+      <div>
+        <span>{leftLabel}</span>
+        <strong>{leftValue}</strong>
+      </div>
+      <div>
+        <span>{rightLabel}</span>
+        <strong>{rightValue}</strong>
+      </div>
+    </div>
+    <div className="market-inspector-compare-card__meter" aria-hidden="true">
+      <span style={leftShare === null ? undefined : { width: `${leftShare * 100}%` }} />
+    </div>
+  </div>
+);
+
 export const MarketExplorerView = ({
   rows,
   total,
   query,
+  focusMarketId = null,
+  focusAlert = null,
   onQueryChange,
   onRefresh,
 }: MarketExplorerViewProps) => {
@@ -346,13 +1137,10 @@ export const MarketExplorerView = ({
   const [watchlistOnly, setWatchlistOnly] = useState(Boolean(query.watchlistedOnly));
   const [viewMode, setViewMode] = useState<MarketExplorerMode>('overview');
   const [selectedMarketId, setSelectedMarketId] = useState<string | null>(null);
+  const pendingFocusMarketIdRef = useRef<string | null>(null);
 
   const deferredCityKey = useDeferredValue(cityKey);
   const cityGroups = useMemo(() => groupMarketsByCity(rows), [rows]);
-  const visibleCityGroups = useMemo(
-    () => cityGroups.slice(0, OVERVIEW_CITY_GROUP_LIMIT),
-    [cityGroups],
-  );
   const visiblePrecisionRows = useMemo(
     () => rows.slice(0, PRECISION_TABLE_ROW_LIMIT),
     [rows],
@@ -361,10 +1149,636 @@ export const MarketExplorerView = ({
     () => rows.find((row) => row.marketId === selectedMarketId) ?? rows[0] ?? null,
     [rows, selectedMarketId],
   );
+  const hasFocusContext = Boolean(focusAlert || focusMarketId);
+  const focusedCityGroupKey = hasFocusContext
+    ? selectedMarket?.cityKey || selectedMarket?.cityName || focusAlert?.cityKey || null
+    : null;
+  const visibleCityGroups = useMemo(() => {
+    if (!focusedCityGroupKey) {
+      return cityGroups.slice(0, OVERVIEW_CITY_GROUP_LIMIT);
+    }
+
+    const focusedGroup = cityGroups.find((group) => group.key === focusedCityGroupKey);
+    if (!focusedGroup) {
+      return cityGroups.slice(0, OVERVIEW_CITY_GROUP_LIMIT);
+    }
+
+    return [
+      focusedGroup,
+      ...cityGroups.filter((group) => group.key !== focusedGroup.key).slice(
+        0,
+        OVERVIEW_CITY_GROUP_LIMIT - 1,
+      ),
+    ];
+  }, [cityGroups, focusedCityGroupKey]);
   const selectedMarketHasQuotes = hasMarketQuoteSignal(selectedMarket);
   const selectedLotteryRoute = selectedMarket ? formatLotteryRouteLabel(selectedMarket, language) : null;
   const selectedLotterySource = selectedMarket
     ? formatLotterySourceLabel(selectedMarket.lotteryConfirmationSource, language)
+    : null;
+  const focusedAlertSummary = useMemo(
+    () => (focusAlert ? buildAlertSummaryDraft(focusAlert) : null),
+    [focusAlert],
+  );
+  const focusedAlertPresentation = focusedAlertSummary?.presentation ?? null;
+  const focusedAlertNotification = focusedAlertSummary?.notification ?? null;
+  const focusedAlertFacts = focusedAlertSummary?.visibleFacts ?? focusedAlertPresentation?.facts.slice(0, 4) ?? [];
+  const focusedAlertContext = focusedAlertPresentation?.context ?? [];
+  const focusedAlertSignalCards = useMemo(
+    () =>
+      focusedAlertFacts.slice(0, 3).map((fact) => ({
+        title: fact.label,
+        label: focusedAlertPresentation?.ruleLabel ?? '告警',
+        value: fact.value,
+      })),
+    [focusedAlertFacts, focusedAlertPresentation],
+  );
+  const alertTriggerEvidence = useMemo<AlertTriggerEvidence | null>(() => {
+    if (!focusAlert) {
+      return null;
+    }
+
+    const visualMeta = getAlertRuleVisualMeta(focusAlert);
+    const primaryFact = focusedAlertSummary?.primaryFact ?? focusedAlertFacts[0] ?? null;
+    const actual = focusAlert.messageParams?.actual;
+    const threshold = focusAlert.messageParams?.threshold;
+    const thresholdSnapshot = buildAlertThresholdSnapshot(focusAlert, actual, threshold, language);
+    const alertMarketLabel = focusedAlertSummary?.marketId ?? focusAlert.marketId;
+    const selectedMarketLabel = selectedMarket?.marketId ?? alertMarketLabel;
+    const ruleLabel = focusedAlertPresentation?.ruleLabel ?? '告警';
+    const primarySignalValue = primaryFact
+      ? `${primaryFact.label} ${primaryFact.value}`
+      : focusedAlertSummary?.triggerSummary ?? ruleLabel;
+    const rowTriggerLabel = (() => {
+      if (thresholdSnapshot) {
+        const operator = focusAlert.messageParams?.operator?.trim();
+        const operatorLabel = operator && ['>', '>=', '<', '<='].includes(operator) ? operator : 'vs';
+        return `触发：${thresholdSnapshot.actualValue} ${operatorLabel} ${thresholdSnapshot.thresholdValue}`;
+      }
+
+      if (primaryFact) {
+        return `触发：${primaryFact.label} ${primaryFact.value}`;
+      }
+
+      return focusedAlertSummary?.triggerSummary ?? `触发：${ruleLabel}`;
+    })();
+
+    return {
+      visualMeta,
+      primaryFact,
+      actual,
+      threshold,
+      thresholdSnapshot,
+      alertMarketLabel,
+      selectedMarketLabel,
+      ruleLabel,
+      primarySignalValue,
+      rowTriggerLabel,
+    };
+  }, [
+    focusAlert,
+    focusedAlertFacts,
+    focusedAlertPresentation,
+    focusedAlertSummary,
+    language,
+    selectedMarket,
+  ]);
+  const alertThresholdCompare = useMemo(() => {
+    if (!alertTriggerEvidence?.thresholdSnapshot) {
+      return null;
+    }
+
+    return {
+      title: '触发值 vs 阈值',
+      leftLabel: '触发值',
+      leftValue: alertTriggerEvidence.thresholdSnapshot.actualValue,
+      rightLabel: '阈值',
+      rightValue: alertTriggerEvidence.thresholdSnapshot.thresholdValue,
+      detail: alertTriggerEvidence.ruleLabel,
+      leftShare: alertTriggerEvidence.thresholdSnapshot.share,
+      emphasis: 'primary',
+    } satisfies InspectorCompareCardProps;
+  }, [alertTriggerEvidence]);
+  const alertTriggerHighlight = useMemo<AlertTriggerHighlight | null>(() => {
+    if (!alertTriggerEvidence) {
+      return null;
+    }
+
+    const {
+      visualMeta,
+      primaryFact,
+      thresholdSnapshot,
+      alertMarketLabel,
+      selectedMarketLabel,
+      ruleLabel,
+      primarySignalValue,
+    } = alertTriggerEvidence;
+
+    if (thresholdSnapshot) {
+      const delta = thresholdSnapshot.direction === 'touch' ? 0 : thresholdSnapshot.direction === 'above' ? 1 : -1;
+      const headline =
+        delta === 0 ? '刚好触及阈值' : delta > 0 ? `高出阈值 ${thresholdSnapshot.deltaValue}` : `低于阈值 ${thresholdSnapshot.deltaValue}`;
+      const deltaLabel =
+        delta === 0 ? '阈值关系' : delta > 0 ? visualMeta.overLabel : visualMeta.underLabel;
+
+      return {
+        headline,
+        summary: `${selectedMarketLabel} 的${primaryFact?.label ?? '关键指标'}当前为 ${thresholdSnapshot.actualValue}，阈值为 ${thresholdSnapshot.thresholdValue}，因此触发 ${ruleLabel}。`,
+        metrics: [
+          {
+            label: '触发值',
+            value: thresholdSnapshot.actualValue,
+          },
+          {
+            label: '阈值',
+            value: thresholdSnapshot.thresholdValue,
+          },
+          {
+            label: delta === 0 ? '阈值关系' : delta > 0 ? '超出幅度' : '低于幅度',
+            value: delta === 0 ? '触及' : thresholdSnapshot.deltaValue,
+          },
+        ],
+        flowTitle: visualMeta.flowTitle,
+        flowCaption: visualMeta.caption,
+        flowSteps: [
+          {
+            label: '原始盘口',
+            value: alertMarketLabel,
+          },
+          {
+            label: visualMeta.signalLabel,
+            value: thresholdSnapshot.actualValue,
+          },
+          {
+            label: '命中规则',
+            value: ruleLabel,
+          },
+        ],
+        rail: {
+          title: visualMeta.flowTitle,
+          actualLabel: visualMeta.signalLabel,
+          actualValue: thresholdSnapshot.actualValue,
+          thresholdLabel: visualMeta.thresholdLabel,
+          thresholdValue: thresholdSnapshot.thresholdValue,
+          deltaLabel,
+          deltaValue: delta === 0 ? '触及' : thresholdSnapshot.deltaValue,
+          share: thresholdSnapshot.share,
+          direction: thresholdSnapshot.direction,
+        },
+      };
+    }
+
+    if (primaryFact) {
+      return {
+        headline: `${primaryFact.value} 触发告警`,
+        summary: `${selectedMarketLabel} 的${primaryFact.label}是本次最关键的异常信号，当前按照 ${ruleLabel} 进入重点核对。`,
+        metrics: [
+          {
+            label: primaryFact.label,
+            value: primaryFact.value,
+          },
+          {
+            label: '规则',
+            value: ruleLabel,
+          },
+        ],
+        flowTitle: visualMeta.flowTitle,
+        flowCaption: visualMeta.caption,
+        flowSteps: [
+          {
+            label: '原始盘口',
+            value: alertMarketLabel,
+          },
+          {
+            label: '关键指标',
+            value: primarySignalValue,
+          },
+          {
+            label: '命中规则',
+            value: ruleLabel,
+          },
+        ],
+        rail: null,
+      };
+    }
+
+    return {
+      headline: focusedAlertNotification?.title ?? ruleLabel,
+      summary: focusedAlertSummary?.triggerSummary ?? focusedAlertNotification?.body ?? `当前已按 ${ruleLabel} 进入重点核对。`,
+      metrics: [
+        {
+          label: '盘口',
+          value: selectedMarketLabel,
+        },
+        {
+          label: '规则',
+          value: ruleLabel,
+        },
+      ],
+      flowTitle: visualMeta.flowTitle,
+      flowCaption: visualMeta.caption,
+      flowSteps: [
+        {
+          label: '原始盘口',
+          value: alertMarketLabel,
+        },
+        {
+          label: '关键指标',
+          value: primarySignalValue,
+        },
+        {
+          label: '命中规则',
+          value: ruleLabel,
+        },
+      ],
+      rail: null,
+    };
+  }, [
+    alertTriggerEvidence,
+    focusedAlertNotification,
+    focusedAlertSummary,
+  ]);
+  const yesNoCompare = useMemo(
+    () =>
+      selectedMarket
+        ? ({
+            title: 'YES vs NO',
+            leftLabel: 'YES',
+            leftValue: formatMarketCentsLabel(
+              selectedMarket.yesPrice,
+              { treatZeroAsUnknown: !selectedMarketHasQuotes },
+              language,
+            ),
+            rightLabel: 'NO',
+            rightValue: formatMarketCentsLabel(
+              selectedMarket.noPrice,
+              { treatZeroAsUnknown: !selectedMarketHasQuotes },
+              language,
+            ),
+            detail: '方向平衡',
+            leftShare: buildMetricShare(selectedMarket.yesPrice, selectedMarket.noPrice),
+          } satisfies InspectorCompareCardProps)
+        : null,
+    [language, selectedMarket, selectedMarketHasQuotes],
+  );
+  const bidAskCompare = useMemo(
+    () =>
+      selectedMarket
+        ? ({
+            title: '买一 vs 卖一',
+            leftLabel: '买一',
+            leftValue: formatMarketCentsLabel(
+              selectedMarket.bestBid,
+              { treatZeroAsUnknown: !selectedMarketHasQuotes },
+              language,
+            ),
+            rightLabel: '卖一',
+            rightValue: formatMarketCentsLabel(
+              selectedMarket.bestAsk,
+              { treatZeroAsUnknown: !selectedMarketHasQuotes },
+              language,
+            ),
+            detail: `价差 ${formatMarketCentsLabel(
+              selectedMarket.spread,
+              { treatZeroAsUnknown: !selectedMarketHasQuotes },
+              language,
+            )}`,
+            leftShare: buildMetricShare(selectedMarket.bestBid, selectedMarket.bestAsk),
+          } satisfies InspectorCompareCardProps)
+        : null,
+    [language, selectedMarket, selectedMarketHasQuotes],
+  );
+  const relatedCityMarkets = useMemo(() => {
+    if (!selectedMarket) {
+      return [] as MarketRow[];
+    }
+
+    return rows
+      .filter(
+        (row) =>
+          row.cityKey === selectedMarket.cityKey && row.eventDate === selectedMarket.eventDate,
+      )
+      .slice(0, 6);
+  }, [rows, selectedMarket]);
+  const relatedCityMarketCount = useMemo(() => {
+    if (!selectedMarket) {
+      return 0;
+    }
+
+    return rows.filter(
+      (row) =>
+        row.cityKey === selectedMarket.cityKey && row.eventDate === selectedMarket.eventDate,
+    ).length;
+  }, [rows, selectedMarket]);
+  const hiddenRelatedCityMarketCount = Math.max(
+    0,
+    relatedCityMarketCount - relatedCityMarkets.length,
+  );
+  const alertFocusedMarket = useMemo(
+    () => (focusAlert ? rows.find((row) => row.marketId === focusAlert.marketId) ?? null : null),
+    [focusAlert, rows],
+  );
+  const isAlertMarketSelected = Boolean(
+    focusAlert && selectedMarket && selectedMarket.marketId === focusAlert.marketId,
+  );
+  const focusedAlertEntryTitle = focusAlert
+    ? `已定位到 ${focusedAlertSummary?.marketId ?? focusAlert.marketId}`
+    : null;
+  const focusedAlertEntryHint =
+    focusAlert && selectedMarket
+      ? `${selectedMarket.cityName} · ${selectedMarket.eventDate} · ${formatTemperatureBandLabel(selectedMarket.temperatureBand, language)} · 先看触发原因，再横向核对对照盘口。`
+      : focusedAlertSummary?.locatorSubtitle
+        ? `${focusedAlertSummary.locatorSubtitle} · 先看触发原因，再横向核对对照盘口。`
+        : focusedAlertPresentation
+          ? `${focusedAlertPresentation.cityLabel} · 先看触发原因，再横向核对对照盘口。`
+        : null;
+  const focusedAlertObjectSummary =
+    focusedAlertSummary?.objectSummary ??
+    focusedAlertNotification?.title ??
+    focusedAlertEntryTitle;
+  const focusedAlertTriggerSummary =
+    focusedAlertSummary?.triggerSummary ?? focusedAlertNotification?.body ?? null;
+  const focusedAlertDetail = focusedAlertSummary?.detailText ?? focusedAlertPresentation?.detail ?? null;
+  const focusedAlertMetaDetail = selectedMarket
+    ? `${selectedMarket.cityName} · ${selectedMarket.eventDate}`
+    : focusedAlertSummary?.locatorSubtitle ?? focusedAlertPresentation?.cityLabel ?? null;
+  const preciseFocusTitle = selectedMarket
+    ? focusAlert && !isAlertMarketSelected
+      ? `正在对照 ${selectedMarket.marketId}`
+      : `正在精确核对 ${selectedMarket.marketId}`
+    : null;
+  const preciseFocusSummary = selectedMarket
+    ? focusAlert
+      ? alertFocusedMarket
+        ? isAlertMarketSelected
+          ? '原始盘口。'
+          : `对照盘口，原始盘口是 ${focusAlert.marketId}。`
+        : `原始盘口 ${focusAlert.marketId} 不在当前结果里。`
+      : '已进入精确模式。'
+    : null;
+  const preciseAlertRowTriggerLabel = alertTriggerEvidence?.rowTriggerLabel ?? null;
+  const preciseFocusColumn = useMemo(() => getPrecisionFocusColumn(focusAlert), [focusAlert]);
+  const preciseFocusReferenceValue = useMemo(() => {
+    if (!alertFocusedMarket || !preciseFocusColumn) {
+      return null;
+    }
+
+    return getPrecisionFocusMetricValue(alertFocusedMarket, preciseFocusColumn);
+  }, [alertFocusedMarket, preciseFocusColumn]);
+  const sameCityCompareMeta = useMemo(() => {
+    if (!selectedMarket || !alertFocusedMarket || selectedMarket.marketId === alertFocusedMarket.marketId) {
+      return null;
+    }
+
+    if (
+      selectedMarket.cityKey !== alertFocusedMarket.cityKey ||
+      selectedMarket.eventDate !== alertFocusedMarket.eventDate
+    ) {
+      return null;
+    }
+
+    const relatedRows = rows.filter(
+      (row) =>
+        row.cityKey === alertFocusedMarket.cityKey && row.eventDate === alertFocusedMarket.eventDate,
+    );
+    const position = relatedRows.findIndex((row) => row.marketId === selectedMarket.marketId);
+    if (position < 0) {
+      return null;
+    }
+
+    return {
+      position: position + 1,
+      total: relatedRows.length,
+    };
+  }, [alertFocusedMarket, rows, selectedMarket]);
+  const preciseJudgementSource = useMemo<PrecisionJudgementSource | null>(() => {
+    if (!focusAlert || !preciseFocusColumn) {
+      return null;
+    }
+
+    const columnLabelMap: Record<Exclude<PrecisionFocusColumn, null>, string> = {
+      yesPrice: copy.dashboard.yesPrice,
+      bid: copy.dashboard.bid,
+      ask: copy.dashboard.ask,
+      spread: copy.dashboard.spread,
+      change5m: copy.dashboard.change5m,
+      lottery: '异常彩票',
+      updated: copy.common.updated,
+    };
+
+    const focusLabel = columnLabelMap[preciseFocusColumn];
+    const focusTitle = `先看 ${focusLabel}`;
+    const alertMarketId = alertTriggerEvidence?.alertMarketLabel ?? focusedAlertSummary?.marketId ?? focusAlert.marketId;
+    const triggerDetail = preciseAlertRowTriggerLabel ?? focusedAlertSummary?.triggerSummary ?? null;
+    const selectedMarketId = selectedMarket?.marketId ?? null;
+    const activeContext = isAlertMarketSelected
+      ? '原始盘口'
+      : selectedMarketId
+        ? `对照盘口 ${selectedMarketId}`
+        : '结果列表';
+    const thresholdSnapshot = alertTriggerEvidence?.thresholdSnapshot ?? null;
+    const compareDelta =
+      !isAlertMarketSelected && selectedMarket && alertFocusedMarket
+        ? formatPrecisionFocusDelta(
+            preciseFocusColumn,
+            getPrecisionFocusMetricValue(selectedMarket, preciseFocusColumn),
+            getPrecisionFocusMetricValue(alertFocusedMarket, preciseFocusColumn),
+            language,
+          )
+        : null;
+    const rail =
+      thresholdSnapshot
+        ? ({
+            title: '告警值与阈值',
+            actualLabel: '告警值',
+            actualValue: thresholdSnapshot.actualValue,
+            thresholdLabel: '阈值',
+            thresholdValue: thresholdSnapshot.thresholdValue,
+            deltaLabel:
+              thresholdSnapshot.direction === 'touch'
+                ? '阈值关系'
+                : thresholdSnapshot.direction === 'above'
+                  ? '高出幅度'
+                  : '低于幅度',
+            deltaValue: thresholdSnapshot.direction === 'touch' ? '刚好触及' : thresholdSnapshot.deltaValue,
+            share: thresholdSnapshot.share,
+            direction: thresholdSnapshot.direction,
+          } satisfies AlertTriggerRail)
+        : null;
+    const marketFact: PrecisionFocusGuideFact = {
+      key: 'market',
+      label: '原始盘口',
+      value: alertMarketId,
+    };
+    const actualFact = thresholdSnapshot
+      ? ({
+          key: 'actual',
+          label: '告警值',
+          value: thresholdSnapshot.actualValue,
+        } satisfies PrecisionFocusGuideFact)
+      : null;
+    const thresholdFact = thresholdSnapshot
+      ? ({
+          key: 'threshold',
+          label: '阈值',
+          value: thresholdSnapshot.thresholdValue,
+        } satisfies PrecisionFocusGuideFact)
+      : triggerDetail
+        ? ({
+            key: 'trigger',
+            label: '触发说明',
+            value: triggerDetail,
+          } satisfies PrecisionFocusGuideFact)
+        : null;
+    const scopeFact = sameCityCompareMeta
+      ? ({
+          key: 'scope',
+          label: '同城位置',
+          value: `${sameCityCompareMeta.position} / ${sameCityCompareMeta.total}`,
+        } satisfies PrecisionFocusGuideFact)
+      : null;
+    const compareFact = compareDelta
+      ? ({
+          key: 'compare',
+          label: '当前差值',
+          value: compareDelta,
+        } satisfies PrecisionFocusGuideFact)
+      : null;
+    const contextFact: PrecisionFocusGuideFact = isAlertMarketSelected
+      ? {
+          key: 'context',
+          label: '当前盘口',
+          value: activeContext,
+        }
+      : {
+          key: 'context',
+          label: '当前盘口',
+          value: activeContext,
+          actionLabel: '切回原始盘口',
+          actionMarketId: focusAlert.marketId,
+        };
+    const guideFacts = [marketFact, actualFact, thresholdFact, scopeFact, compareFact, contextFact].filter(
+      (item): item is PrecisionFocusGuideFact => Boolean(item),
+    );
+    const leadFacts = [marketFact, actualFact, thresholdFact].filter(
+      (item): item is PrecisionFocusGuideFact => Boolean(item),
+    );
+    const contextFacts = [
+      {
+        key: 'current',
+        label: '当前盘口',
+        value: selectedMarketId ?? alertMarketId,
+      },
+      {
+        key: 'focus',
+        label: '重点列',
+        value: focusLabel,
+      },
+      scopeFact
+        ? {
+            key: 'scope',
+            label: scopeFact.label,
+            value: scopeFact.value,
+          }
+        : null,
+      compareFact
+        ? {
+            key: 'compare',
+            label: compareFact.label,
+            value: compareFact.value,
+          }
+        : null,
+    ].filter((fact): fact is PrecisionJudgementContextFact => Boolean(fact));
+
+    return {
+      column: preciseFocusColumn,
+      mode: isAlertMarketSelected ? 'alert' : 'compare',
+      selectedMarketId,
+      focusLabel,
+      focusTitle,
+      focusSummary: isAlertMarketSelected ? '对照告警值，确认为什么触发。' : '先对照告警值，再看当前差值。',
+      leadFacts,
+      guideFacts,
+      contextFacts,
+      contextSummary: isAlertMarketSelected
+        ? '这就是触发告警的原始盘口。'
+        : `当前为对照盘口，原始盘口是 ${alertMarketId}。`,
+      actionLabel: !isAlertMarketSelected ? '切回原始盘口' : null,
+      actionMarketId: !isAlertMarketSelected ? focusAlert.marketId : null,
+      rail,
+    };
+  }, [
+    copy.common.updated,
+    copy.dashboard.ask,
+    copy.dashboard.bid,
+    copy.dashboard.change5m,
+    copy.dashboard.spread,
+    copy.dashboard.yesPrice,
+    alertTriggerEvidence,
+    focusAlert,
+    isAlertMarketSelected,
+    focusedAlertSummary,
+    language,
+    preciseAlertRowTriggerLabel,
+    preciseFocusColumn,
+    sameCityCompareMeta,
+    selectedMarket,
+  ]);
+  const preciseFocusGuide = useMemo<PrecisionFocusGuide | null>(() => {
+    if (!preciseJudgementSource) {
+      return null;
+    }
+
+    return {
+      column: preciseJudgementSource.column,
+      mode: preciseJudgementSource.mode,
+      title: preciseJudgementSource.focusTitle,
+      summary: preciseJudgementSource.focusSummary,
+      facts: preciseJudgementSource.guideFacts,
+      rail: preciseJudgementSource.rail,
+    };
+  }, [preciseJudgementSource]);
+  const preciseJudgementPanel = useMemo<PrecisionJudgementPanelData | null>(() => {
+    if (!preciseJudgementSource || !preciseJudgementSource.selectedMarketId) {
+      return null;
+    }
+
+    return {
+      column: preciseJudgementSource.column,
+      mode: preciseJudgementSource.mode,
+      selectedMarketId: preciseJudgementSource.selectedMarketId,
+      headline: alertTriggerHighlight?.headline ?? preciseJudgementSource.focusTitle,
+      summary: alertTriggerHighlight?.summary ?? preciseJudgementSource.focusSummary,
+      leadFacts: preciseJudgementSource.leadFacts,
+      contextFacts: preciseJudgementSource.contextFacts,
+      contextSummary: preciseJudgementSource.contextSummary,
+      actionLabel: preciseJudgementSource.actionLabel,
+      actionMarketId: preciseJudgementSource.actionMarketId,
+      rail: preciseJudgementSource.rail,
+    };
+  }, [alertTriggerHighlight, preciseJudgementSource]);
+  const preciseFocusPills = [
+    focusAlert ? focusedAlertPresentation?.ruleLabel ?? '告警' : '精确模式',
+    selectedMarket ? selectedMarket.cityName : null,
+    !focusAlert && relatedCityMarketCount > 0 ? `同城同日 ${relatedCityMarketCount} 个盘口` : null,
+  ].filter((value): value is string => Boolean(value));
+  const hasPreciseJudgementPanel = Boolean(preciseJudgementPanel);
+  const isPreciseAlertContext = viewMode === 'precise' && hasPreciseJudgementPanel;
+  const inspectorIdentityLabel = focusAlert
+    ? alertFocusedMarket
+      ? isAlertMarketSelected
+        ? '原始盘口'
+        : '对照盘口'
+      : '结果回退'
+    : '当前盘口';
+  const inspectorIdentitySummary = selectedMarket
+    ? focusAlert
+      ? alertFocusedMarket
+        ? isAlertMarketSelected
+          ? '已定位到原始盘口。'
+          : `当前为对照盘口，原始盘口是 ${focusAlert.marketId}。`
+        : `原始盘口 ${focusAlert.marketId} 不在当前结果里。`
+      : '可继续结合右侧指标核对。'
     : null;
   const visibleCityCount = cityGroups.length;
   const riskCount = rows.filter(
@@ -423,8 +1837,29 @@ export const MarketExplorerView = ({
   }, [eventDate, onQueryChange, sideFilter, watchlistOnly]);
 
   useEffect(() => {
+    const nextFocusMarketId = focusMarketId ?? focusAlert?.marketId ?? null;
+    if (!nextFocusMarketId) {
+      pendingFocusMarketIdRef.current = null;
+      return;
+    }
+
+    pendingFocusMarketIdRef.current = nextFocusMarketId;
+    setSelectedMarketId(nextFocusMarketId);
+    setViewMode('overview');
+  }, [focusAlert, focusMarketId]);
+
+  useEffect(() => {
     if (rows.length === 0) {
       setSelectedMarketId(null);
+      return;
+    }
+
+    const pendingFocusMarketId = pendingFocusMarketIdRef.current;
+    if (pendingFocusMarketId && rows.some((row) => row.marketId === pendingFocusMarketId)) {
+      if (selectedMarketId !== pendingFocusMarketId) {
+        setSelectedMarketId(pendingFocusMarketId);
+      }
+      pendingFocusMarketIdRef.current = null;
       return;
     }
 
@@ -500,6 +1935,24 @@ export const MarketExplorerView = ({
         </header>
 
         <div className="market-explorer-toolbar">
+          {focusAlert && focusedAlertPresentation && focusedAlertNotification ? (
+            <div className="market-alert-entry" data-testid="market-alert-entry">
+              <div className="market-alert-entry__eyebrow">
+                <span>原始盘口</span>
+                <strong>{focusedAlertPresentation.ruleLabel}</strong>
+              </div>
+              <div className="market-alert-entry__body">
+                <div>
+                  <h3>{focusedAlertObjectSummary ?? focusedAlertEntryTitle ?? focusedAlertNotification.title}</h3>
+                  <p>{focusedAlertTriggerSummary ?? focusedAlertNotification.body}</p>
+                  {focusedAlertEntryHint ? (
+                    <small className="market-alert-entry__hint">{focusedAlertEntryHint}</small>
+                  ) : null}
+                </div>
+                <time dateTime={focusAlert.triggeredAt}>{formatTime(focusAlert.triggeredAt)}</time>
+              </div>
+            </div>
+          ) : null}
           <div className="market-explorer-presets" role="group" aria-label="运营预设">
             <button
               type="button"
@@ -615,6 +2068,102 @@ export const MarketExplorerView = ({
 
         <div className="market-explorer-body">
           <main className="market-explorer-main">
+            {focusAlert && focusedAlertPresentation && focusedAlertNotification ? (
+              <section className="market-alert-spotlight" data-testid="market-alert-spotlight">
+                <div className="market-alert-spotlight__hero">
+                  <div className="market-alert-spotlight__copy">
+                    <span className="market-alert-spotlight__eyebrow">
+                      {focusedAlertPresentation.alertLabel} · {focusedAlertEntryTitle}
+                    </span>
+                    <h3>{focusedAlertObjectSummary ?? focusedAlertNotification.title}</h3>
+                    <p>{focusedAlertTriggerSummary ?? focusedAlertNotification.body}</p>
+                    {focusedAlertDetail ? (
+                      <small>{focusedAlertDetail}</small>
+                    ) : null}
+                  </div>
+                  <div className="market-alert-spotlight__meta">
+                    <span className="market-alert-spotlight__badge">已定位原始盘口</span>
+                    <strong>{focusedAlertSummary?.marketId ?? focusAlert.marketId}</strong>
+                    {focusedAlertMetaDetail ? <em>{focusedAlertMetaDetail}</em> : null}
+                    <small>先看触发原因，再切换对照盘口横向核对。</small>
+                  </div>
+                </div>
+
+                <div className="market-alert-spotlight__body">
+                  <AlertFactList title="触发关键信号" items={focusedAlertFacts} accent="highlight" />
+                  <AlertFactList title="定位信息" items={focusedAlertContext} />
+                </div>
+
+                {selectedMarket && relatedCityMarkets.length > 0 ? (
+                  <section className="market-alert-related" data-testid="market-alert-related">
+                    <div className="market-alert-related__head">
+                      <div>
+                        <strong>同城横向核对</strong>
+                        <span>已定位 {focusAlert.marketId}，可切换同城同日盘口，再进入精确模式查看全量明细。</span>
+                      </div>
+                      <button
+                        type="button"
+                        className="ghost-button"
+                        data-testid="market-alert-open-precise"
+                        onClick={() => setViewMode('precise')}
+                      >
+                        进入精确核对
+                      </button>
+                    </div>
+
+                    <div className="market-alert-related__strip">
+                      {relatedCityMarkets.map((row) => (
+                        <button
+                          key={`related-${row.marketId}`}
+                          type="button"
+                          className={cn(
+                            'market-alert-related__item',
+                            row.marketId === selectedMarket.marketId && 'is-selected',
+                          )}
+                          aria-pressed={row.marketId === selectedMarket.marketId}
+                          onClick={() => setSelectedMarketId(row.marketId)}
+                        >
+                          <div className="market-alert-related__item-head">
+                            <strong>{formatTemperatureBandLabel(row.temperatureBand, language)}</strong>
+                            <span>
+                              {row.marketId === selectedMarket.marketId
+                                ? `当前盘口 · ${MARKET_SEVERITY_LABELS[row.bubbleSeverity]}`
+                                : MARKET_SEVERITY_LABELS[row.bubbleSeverity]}
+                            </span>
+                          </div>
+                          <div className="market-alert-related__item-metrics">
+                            <span>
+                              YES{' '}
+                              {formatMarketCentsLabel(
+                                row.yesPrice,
+                                { treatZeroAsUnknown: !hasMarketQuoteSignal(row) },
+                                language,
+                              )}
+                            </span>
+                            <span>
+                              价差{' '}
+                              {formatMarketCentsLabel(
+                                row.spread,
+                                { treatZeroAsUnknown: !hasMarketQuoteSignal(row) },
+                                language,
+                              )}
+                            </span>
+                            <span>5m {formatMarketPercent(row.change5m)}</span>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+
+                    {hiddenRelatedCityMarketCount > 0 ? (
+                      <p className="market-alert-related__hint">
+                        当前先展示 {relatedCityMarkets.length} 个，同城剩余 {hiddenRelatedCityMarketCount} 个可进入精确模式继续核对。
+                      </p>
+                    ) : null}
+                  </section>
+                ) : null}
+              </section>
+            ) : null}
+
             <div className="market-explorer-summary">
               <div>
                 <span>当前结果</span>
@@ -638,18 +2187,40 @@ export const MarketExplorerView = ({
                 {cityGroups.length > 0 ? (
                   <>
                     {visibleCityGroups.map((group) => {
-                      const visibleRows = group.rows.slice(0, OVERVIEW_MARKETS_PER_CITY_LIMIT);
+                      const visibleRows = buildVisibleOverviewRows(
+                        group.rows,
+                        selectedMarket?.marketId ?? null,
+                        OVERVIEW_MARKETS_PER_CITY_LIMIT,
+                      );
                       const hiddenGroupRowCount = group.rows.length - visibleRows.length;
+                      const isFocusedGroup = focusedCityGroupKey === group.key;
+                      const leadRow = pickLeadMarketRow(group.rows);
+                      const leadSummary = leadRow ? buildCityRiskSummary(leadRow, language) : null;
                       return (
-                        <section className="market-city-group" key={group.key}>
+                        <section
+                          className={cn('market-city-group', isFocusedGroup && 'is-focused')}
+                          key={group.key}
+                        >
                           <header className="market-city-group__header">
                             <div>
                               <strong>{group.cityName}</strong>
                               <span>
                                 {group.rows.length} 个盘口 · 最新更新 {formatTime(group.latestUpdatedAt)}
                               </span>
+                              {leadSummary ? (
+                                <div
+                                  className="market-city-group__signal"
+                                  data-testid={`market-city-group-signal-${group.key}`}
+                                >
+                                  <em>最异常</em>
+                                  <strong>{leadSummary.band}</strong>
+                                  <span>{leadSummary.headline}</span>
+                                  <span>{leadSummary.detail}</span>
+                                </div>
+                              ) : null}
                             </div>
                             <div className="market-city-group__stats">
+                              {isFocusedGroup ? <span className="market-city-group__badge--focus">已定位盘口</span> : null}
                               <span>{group.riskCount} 个重点风险</span>
                               <span>{group.watchlistedCount} 个关注</span>
                             </div>
@@ -688,6 +2259,155 @@ export const MarketExplorerView = ({
             ) : (
               rows.length > 0 ? (
                 <>
+                  {selectedMarket && preciseFocusTitle && preciseFocusSummary ? (
+                    <section
+                      className={cn(
+                        'market-precision-focus',
+                        hasPreciseJudgementPanel && 'market-precision-focus--compact',
+                      )}
+                      data-testid="market-precision-focus"
+                    >
+                      <div className="market-precision-focus__main">
+                        <div className="market-precision-focus__copy">
+                          <span className="market-precision-focus__eyebrow">
+                            {focusAlert ? '告警精确核对' : '精确核对'}
+                          </span>
+                          <strong>{preciseFocusTitle}</strong>
+                          <p>{preciseFocusSummary}</p>
+                        </div>
+                      </div>
+                      <div className="market-precision-focus__meta">
+                        {preciseFocusPills.map((pill) => (
+                          <span key={pill} className="market-precision-focus__pill">
+                            {pill}
+                          </span>
+                        ))}
+                      </div>
+                    </section>
+                  ) : null}
+                  {preciseJudgementPanel ? (
+                    <PrecisionJudgementPanel
+                      panel={preciseJudgementPanel}
+                      onSelectMarket={setSelectedMarketId}
+                    />
+                  ) : null}
+                  {preciseFocusGuide ? (
+                    <div
+                      className={cn(
+                        'market-precision-guide',
+                        hasPreciseJudgementPanel && 'market-precision-guide--compact',
+                      )}
+                      data-testid="market-precision-guide"
+                      data-focus-column={preciseFocusGuide.column}
+                      data-focus-mode={preciseFocusGuide.mode}
+                    >
+                      <strong>{preciseFocusGuide.title}</strong>
+                      {!hasPreciseJudgementPanel ? <p>{preciseFocusGuide.summary}</p> : null}
+                      {!hasPreciseJudgementPanel && preciseFocusGuide.rail ? (
+                        <div
+                          className={cn(
+                            'market-precision-guide__rail',
+                            `is-${preciseFocusGuide.rail.direction}`,
+                            'market-inspector__trigger-rail',
+                          )}
+                          data-testid="market-precision-guide-rail"
+                          data-rail-direction={preciseFocusGuide.rail.direction}
+                        >
+                          <div className="market-inspector__trigger-rail-values">
+                            <div>
+                              <span>{preciseFocusGuide.rail.actualLabel}</span>
+                              <strong>{preciseFocusGuide.rail.actualValue}</strong>
+                            </div>
+                            <div>
+                              <span>{preciseFocusGuide.rail.thresholdLabel}</span>
+                              <strong>{preciseFocusGuide.rail.thresholdValue}</strong>
+                            </div>
+                            <div>
+                              <span>{preciseFocusGuide.rail.deltaLabel}</span>
+                              <strong>{preciseFocusGuide.rail.deltaValue}</strong>
+                            </div>
+                          </div>
+                          <div className="market-inspector__trigger-rail-track" aria-hidden="true">
+                            <span
+                              className="market-inspector__trigger-rail-fill"
+                              style={
+                                preciseFocusGuide.rail.share === null
+                                  ? undefined
+                                  : { width: `${preciseFocusGuide.rail.share * 100}%` }
+                              }
+                              />
+                          </div>
+                        </div>
+                      ) : null}
+                      {hasPreciseJudgementPanel ? (
+                        <div className="market-precision-guide__facts">
+                          {preciseJudgementSource ? (
+                            preciseJudgementSource.actionMarketId ? (
+                              <button
+                                type="button"
+                                className="market-precision-guide__fact market-precision-guide__fact--button"
+                                data-testid="market-precision-guide-fact-context"
+                                onClick={() =>
+                                  setSelectedMarketId(preciseJudgementSource.actionMarketId ?? null)
+                                }
+                              >
+                                <span>
+                                  {preciseJudgementSource.mode === 'alert' ? '原始盘口' : '对照盘口'}
+                                </span>
+                                <strong>{preciseJudgementSource.selectedMarketId}</strong>
+                                {preciseJudgementSource.actionLabel ? (
+                                  <small data-testid="market-precision-guide-context-action">
+                                    {preciseJudgementSource.actionLabel}
+                                  </small>
+                                ) : null}
+                              </button>
+                            ) : (
+                              <span
+                                className="market-precision-guide__fact"
+                                data-testid="market-precision-guide-fact-context"
+                              >
+                                <span>
+                                  {preciseJudgementSource.mode === 'alert' ? '原始盘口' : '对照盘口'}
+                                </span>
+                                <strong>{preciseJudgementSource.selectedMarketId}</strong>
+                              </span>
+                            )
+                          ) : null}
+                        </div>
+                      ) : (
+                        <div className="market-precision-guide__facts">
+                          {preciseFocusGuide.facts.map((fact) =>
+                            fact.actionMarketId ? (
+                              <button
+                                key={fact.key}
+                                type="button"
+                                className="market-precision-guide__fact market-precision-guide__fact--button"
+                                data-testid={`market-precision-guide-fact-${fact.key}`}
+                                onClick={() => setSelectedMarketId(fact.actionMarketId ?? null)}
+                              >
+                                <span>{fact.label}</span>
+                                <strong>{fact.value}</strong>
+                                {fact.actionLabel ? (
+                                  <small data-testid="market-precision-guide-context-action">
+                                    {fact.actionLabel}
+                                  </small>
+                                ) : null}
+                              </button>
+                            ) : (
+                              <span
+                                key={fact.key}
+                                className="market-precision-guide__fact"
+                                data-testid={`market-precision-guide-fact-${fact.key}`}
+                              >
+                                <span>{fact.label}</span>
+                                <strong>{fact.value}</strong>
+                              </span>
+                            ),
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ) : null}
                   <div className="table-wrapper market-precision-table">
                     <table className="dense-table dense-table--scrollable">
                       <thead>
@@ -695,13 +2415,55 @@ export const MarketExplorerView = ({
                           <th>{copy.common.city}</th>
                           <th>{copy.common.date}</th>
                           <th>{copy.dashboard.temperatureBand}</th>
-                          <th>{copy.dashboard.yesPrice}</th>
-                          <th>{copy.dashboard.bid}</th>
-                          <th>{copy.dashboard.ask}</th>
-                          <th>{copy.dashboard.spread}</th>
-                          <th>{copy.dashboard.change5m}</th>
-                          <th>异常彩票</th>
-                          <th>{copy.common.updated}</th>
+                          <th
+                            className={getFocusedColumnClassName(preciseFocusColumn, 'yesPrice')}
+                            data-testid="market-precision-header-yesPrice"
+                          >
+                            {copy.dashboard.yesPrice}
+                            {preciseFocusColumn === 'yesPrice' ? <span>重点</span> : null}
+                          </th>
+                          <th
+                            className={getFocusedColumnClassName(preciseFocusColumn, 'bid')}
+                            data-testid="market-precision-header-bid"
+                          >
+                            {copy.dashboard.bid}
+                            {preciseFocusColumn === 'bid' ? <span>重点</span> : null}
+                          </th>
+                          <th
+                            className={getFocusedColumnClassName(preciseFocusColumn, 'ask')}
+                            data-testid="market-precision-header-ask"
+                          >
+                            {copy.dashboard.ask}
+                            {preciseFocusColumn === 'ask' ? <span>重点</span> : null}
+                          </th>
+                          <th
+                            className={getFocusedColumnClassName(preciseFocusColumn, 'spread')}
+                            data-testid="market-precision-header-spread"
+                          >
+                            {copy.dashboard.spread}
+                            {preciseFocusColumn === 'spread' ? <span>重点</span> : null}
+                          </th>
+                          <th
+                            className={getFocusedColumnClassName(preciseFocusColumn, 'change5m')}
+                            data-testid="market-precision-header-change5m"
+                          >
+                            {copy.dashboard.change5m}
+                            {preciseFocusColumn === 'change5m' ? <span>重点</span> : null}
+                          </th>
+                          <th
+                            className={getFocusedColumnClassName(preciseFocusColumn, 'lottery')}
+                            data-testid="market-precision-header-lottery"
+                          >
+                            异常彩票
+                            {preciseFocusColumn === 'lottery' ? <span>重点</span> : null}
+                          </th>
+                          <th
+                            className={getFocusedColumnClassName(preciseFocusColumn, 'updated')}
+                            data-testid="market-precision-header-updated"
+                          >
+                            {copy.common.updated}
+                            {preciseFocusColumn === 'updated' ? <span>重点</span> : null}
+                          </th>
                         </tr>
                       </thead>
                       <tbody>
@@ -712,6 +2474,13 @@ export const MarketExplorerView = ({
                             formatTime={formatTime}
                             language={language}
                             selected={row.marketId === selectedMarket?.marketId}
+                            alertFocused={row.marketId === focusAlert?.marketId}
+                            alertDriven={Boolean(focusAlert)}
+                            alertTriggerLabel={
+                              row.marketId === focusAlert?.marketId ? preciseAlertRowTriggerLabel : null
+                            }
+                            focusedColumn={preciseFocusColumn}
+                            focusReferenceValue={preciseFocusReferenceValue}
                             onSelect={setSelectedMarketId}
                           />
                         ))}
@@ -734,14 +2503,164 @@ export const MarketExplorerView = ({
             {selectedMarket ? (
               <>
                 <div className="market-inspector__header">
-                  <span>选中盘口</span>
+                  <span>{inspectorIdentityLabel}</span>
                   <strong>{selectedMarket.cityName}</strong>
                   <em>
                     {selectedMarket.eventDate} · {formatTemperatureBandLabel(selectedMarket.temperatureBand, language)}
                   </em>
+                  <div className="market-inspector__identity" data-testid="market-inspector-context">
+                    <div className="market-inspector__identity-badges">
+                      <span className="market-inspector__identity-badge market-inspector__identity-badge--primary">
+                        {inspectorIdentityLabel}
+                      </span>
+                      <span className="market-inspector__identity-badge">{selectedMarket.marketId}</span>
+                      {focusAlert && focusedAlertPresentation?.ruleLabel ? (
+                        <span className="market-inspector__identity-badge">
+                          {focusedAlertPresentation.ruleLabel}
+                        </span>
+                      ) : null}
+                    </div>
+                    {inspectorIdentitySummary ? <p>{inspectorIdentitySummary}</p> : null}
+                  </div>
                 </div>
 
-                <div className="market-inspector__hero">
+                {focusAlert && alertTriggerHighlight ? (
+                  <section
+                    className={cn(
+                      'market-inspector__trigger',
+                      isPreciseAlertContext && 'market-inspector__trigger--compact',
+                    )}
+                    data-testid="market-inspector-trigger"
+                  >
+                    <span className="market-inspector__trigger-eyebrow">
+                      {isPreciseAlertContext ? '辅助核对' : '本次触发原因'}
+                    </span>
+                    <strong>{alertTriggerHighlight.headline}</strong>
+                    <p>
+                      {isPreciseAlertContext
+                        ? preciseJudgementSource?.contextSummary ?? alertTriggerHighlight.summary
+                        : alertTriggerHighlight.summary}
+                    </p>
+                    {isPreciseAlertContext ? (
+                      <div
+                        className="market-inspector__trigger-strip"
+                        data-testid="market-inspector-trigger-strip"
+                      >
+                        {preciseJudgementSource?.contextFacts.slice(0, 2).map((fact) => (
+                          <span key={fact.key}>
+                            <em>{fact.label}</em>
+                            <strong>{fact.value}</strong>
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <>
+                        <div className="market-inspector__trigger-metrics">
+                          {alertTriggerHighlight.metrics.map((item) => (
+                            <div key={`${item.label}-${item.value}`}>
+                              <span>{item.label}</span>
+                              <strong>{item.value}</strong>
+                            </div>
+                          ))}
+                        </div>
+                        <div
+                          className="market-inspector__trigger-flow"
+                          data-testid="market-inspector-trigger-flow"
+                        >
+                          <div className="market-inspector__trigger-flow-head">
+                            <strong>{alertTriggerHighlight.flowTitle}</strong>
+                            <span>{alertTriggerHighlight.flowCaption}</span>
+                          </div>
+                          {alertTriggerHighlight.rail ? (
+                            <div
+                              className={cn(
+                                'market-inspector__trigger-rail',
+                                `is-${alertTriggerHighlight.rail.direction}`,
+                              )}
+                              data-testid="market-inspector-trigger-rail"
+                            >
+                              <div className="market-inspector__trigger-rail-values">
+                                <div>
+                                  <span>{alertTriggerHighlight.rail.actualLabel}</span>
+                                  <strong>{alertTriggerHighlight.rail.actualValue}</strong>
+                                </div>
+                                <div>
+                                  <span>{alertTriggerHighlight.rail.thresholdLabel}</span>
+                                  <strong>{alertTriggerHighlight.rail.thresholdValue}</strong>
+                                </div>
+                                <div>
+                                  <span>{alertTriggerHighlight.rail.deltaLabel}</span>
+                                  <strong>{alertTriggerHighlight.rail.deltaValue}</strong>
+                                </div>
+                              </div>
+                              <div className="market-inspector__trigger-rail-track" aria-hidden="true">
+                                <span
+                                  className="market-inspector__trigger-rail-fill"
+                                  style={
+                                    alertTriggerHighlight.rail.share === null
+                                      ? undefined
+                                      : { width: `${alertTriggerHighlight.rail.share * 100}%` }
+                                  }
+                                />
+                              </div>
+                            </div>
+                          ) : null}
+                          <div className="market-inspector__trigger-steps">
+                            {alertTriggerHighlight.flowSteps.map((step) => (
+                              <div
+                                key={`${step.label}-${step.value}`}
+                                className="market-inspector__trigger-step"
+                              >
+                                <span>{step.label}</span>
+                                <strong>{step.value}</strong>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </section>
+                ) : null}
+
+                {focusAlert && !isPreciseAlertContext && focusedAlertSignalCards.length > 0 ? (
+                  <section className="market-inspector__section" data-testid="market-inspector-analysis">
+                    <div className="market-inspector__section-head">
+                      <strong>告警拆解</strong>
+                      <span>把这次触发拆成几条最关键的信号。</span>
+                    </div>
+                    <div className="market-inspector__signal-grid">
+                      {focusedAlertSignalCards.map((card) => (
+                        <InspectorSignalCard
+                          key={`${card.title}-${card.value}`}
+                          title={card.title}
+                          label={card.label}
+                          value={card.value}
+                        />
+                      ))}
+                    </div>
+                  </section>
+                ) : null}
+
+                {focusAlert && !isPreciseAlertContext ? (
+                  <section className="market-inspector__section" data-testid="market-inspector-compare">
+                    <div className="market-inspector__section-head">
+                      <strong>关键对比</strong>
+                      <span>先看触发条件，再看盘口两侧和方向失衡。</span>
+                    </div>
+                    <div className="market-inspector__compare-grid">
+                      {alertThresholdCompare ? <InspectorCompareCard {...alertThresholdCompare} /> : null}
+                      {yesNoCompare ? <InspectorCompareCard {...yesNoCompare} /> : null}
+                      {bidAskCompare ? <InspectorCompareCard {...bidAskCompare} /> : null}
+                    </div>
+                  </section>
+                ) : null}
+
+                <div
+                  className={cn(
+                    'market-inspector__hero',
+                    isPreciseAlertContext && 'market-inspector__hero--compact',
+                  )}
+                >
                   <div>
                     <span>“是”价格</span>
                     <strong>
@@ -773,7 +2692,13 @@ export const MarketExplorerView = ({
                       <strong>{formatLotteryLiftLabel(selectedMarket.lotteryLift, language)}</strong>
                       <em>{selectedLotteryRoute ?? '超低价盘口被快速推高'}</em>
                     </div>
-                    <div className="market-inspector__metrics market-inspector__metrics--lottery">
+                    <div
+                      className={cn(
+                        'market-inspector__metrics',
+                        'market-inspector__metrics--lottery',
+                        isPreciseAlertContext && 'market-inspector__metrics--compact',
+                      )}
+                    >
                       <div>
                         <span>确认路径</span>
                         <strong>{selectedLotterySource}</strong>
@@ -798,7 +2723,12 @@ export const MarketExplorerView = ({
                   </div>
                 ) : null}
 
-                <div className="market-inspector__metrics">
+                <div
+                  className={cn(
+                    'market-inspector__metrics',
+                    isPreciseAlertContext && 'market-inspector__metrics--compact',
+                  )}
+                >
                   <div>
                     <span>买一</span>
                     <strong>
@@ -840,8 +2770,12 @@ export const MarketExplorerView = ({
                     <strong>{MARKET_STATUS_LABELS[selectedMarket.status]}</strong>
                   </div>
                   <div>
-                    <span>风险</span>
+                    <span>风险等级</span>
                     <strong>{MARKET_SEVERITY_LABELS[selectedMarket.bubbleSeverity]}</strong>
+                  </div>
+                  <div>
+                    <span>{copy.common.updated}</span>
+                    <strong>{formatTime(selectedMarket.updatedAt)}</strong>
                   </div>
                 </div>
 

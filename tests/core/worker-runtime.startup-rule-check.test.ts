@@ -76,13 +76,42 @@ vi.mock('../../src/core/services/polymarket-data-service', () => {
 import type { AlertRule as EngineAlertRule } from '../../src/core/alerts/types';
 import { WorkerRuntime } from '../../src/core/worker-runtime';
 
+type RuntimeUnderTest = {
+  serviceStarted: boolean;
+  hasSuccessfulDiscovery: boolean;
+  startupRuleCheckCompleted: boolean;
+  engineRules: EngineAlertRule[];
+  latestTokenStateById: Map<string, Record<string, unknown>>;
+  tokenMetaById: Map<string, Record<string, unknown>>;
+  alertEngine: {
+    evaluateMarketTick: (...args: unknown[]) => unknown[];
+  };
+  marketState: {
+    recordTick: (...args: unknown[]) => void;
+  };
+  feedState: {
+    upsert: (state: Record<string, unknown>) => void;
+  };
+  maybeRunStartupRuleCheck: (nowMs: number) => void;
+  runCurrentRuleCheck: (
+    maxAlerts: number,
+    options?: {
+      nowMs?: number;
+      source?: string;
+      latestStateFilter?: (state: { lastMessageAt: number }) => boolean;
+    },
+  ) => void;
+  persistAndEmitAlerts: (...args: unknown[]) => void;
+  handleTokenState: (state: Record<string, unknown>) => Promise<void>;
+};
+
 const createRuntime = () => {
   const { port1, port2 } = new MessageChannel();
   const runtime = new WorkerRuntime(port1, {
     dbPath: path.join(tmpdir(), `weather-monitor-${randomUUID()}.sqlite`),
-  });
+  }) as unknown as RuntimeUnderTest;
   port2.close();
-  return runtime as any;
+  return runtime;
 };
 
 const createRule = (metric: EngineAlertRule['metric']): EngineAlertRule => ({

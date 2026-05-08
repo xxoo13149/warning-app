@@ -10,8 +10,8 @@ import type {
   RuntimeState,
 } from '../contracts/ipc';
 import { DEFAULT_HEALTH as DEFAULT_HEALTH_VALUE } from '../contracts/ipc';
-import { IPC_CHANNELS } from '@/shared/constants';
-import type { RuntimeRendererMemoryReport } from '@/shared/monitor-contracts';
+import { IPC_CHANNELS } from '../../shared/constants';
+import type { RuntimeRendererMemoryReport } from '../../shared/monitor-contracts';
 import type { CoreWorkerClient } from '../services/core-worker-client';
 import type { RuntimeMemoryTelemetryService } from '../services/runtime-memory-telemetry';
 import type { PreviewSoundPlaybackResult } from '../services/audio-window';

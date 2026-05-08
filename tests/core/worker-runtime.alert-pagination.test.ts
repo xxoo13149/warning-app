@@ -48,13 +48,24 @@ vi.mock('../../src/core/services/polymarket-data-service', () => {
 
 import { WorkerRuntime } from '../../src/core/worker-runtime';
 
-const createdRuntimes: any[] = [];
+type RuntimeUnderTest = {
+  port?: { close?: () => void };
+  uiRules: Array<{ id: string; soundProfileId: string }>;
+  listAlerts: (query: {
+    limit: number;
+    acknowledged?: boolean;
+    cursor?: { triggeredAt: string; id: string };
+  }) => unknown;
+  queryAllAlertEventRows: (query: { acknowledged?: boolean }) => Array<{ id: string }>;
+};
+
+const createdRuntimes: RuntimeUnderTest[] = [];
 
 const createRuntime = () => {
   const { port1, port2 } = new MessageChannel();
   const runtime = new WorkerRuntime(port1, {
     dbPath: path.join(tmpdir(), `warning-app-alerts-${randomUUID()}.sqlite`),
-  }) as any;
+  }) as unknown as RuntimeUnderTest;
   port2.close();
   createdRuntimes.push(runtime);
   return runtime;

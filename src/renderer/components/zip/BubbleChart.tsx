@@ -74,7 +74,7 @@ const seededBetween = (seed: string, salt: string, min: number, max: number) =>
 
 const FILTER_MODE_LABELS = {
   ALL: '全部',
-  ALERTS: '强告警',
+  ALERTS: '有告警',
 } as const;
 
 const REGION_LABELS = {
@@ -372,6 +372,20 @@ const getRiskTextColor = (city: DashboardBubbleCityData) => {
 
 const getStrengthLabel = (city: DashboardBubbleCityData) => STRENGTH_LABELS[city.status_level];
 
+export const shouldShowBubbleCity = (
+  city: DashboardBubbleCityData,
+  filterMode: 'ALL' | 'ALERTS',
+  regionFilter: 'ALL' | 'NA' | 'EU' | 'ASIA' | 'OTHER',
+) => {
+  if (filterMode === 'ALERTS' && city.alertCount <= 0) {
+    return false;
+  }
+  if (regionFilter !== 'ALL' && city.region !== regionFilter) {
+    return false;
+  }
+  return true;
+};
+
 type TooltipSide = 'top' | 'bottom';
 
 const buildTooltipLayout = (
@@ -445,16 +459,7 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
   );
 
   const filteredVisualData = useMemo(
-    () =>
-      visualData.filter((city) => {
-        if (filterMode === 'ALERTS' && !city.is_new_alert && city.status_level !== 'CRITICAL') {
-          return false;
-        }
-        if (regionFilter !== 'ALL' && city.region !== regionFilter) {
-          return false;
-        }
-        return true;
-      }),
+    () => visualData.filter((city) => shouldShowBubbleCity(city, filterMode, regionFilter)),
     [visualData, filterMode, regionFilter],
   );
 
@@ -1031,6 +1036,7 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
         containerRef.current?.clientHeight ?? TOOLTIP_HEIGHT + TOOLTIP_EDGE_GAP * 2,
       )
     : null;
+  const showFilterEmptyState = visualData.length > 0 && filteredVisualData.length === 0;
 
   return (
     <div
@@ -1044,6 +1050,28 @@ export const BubbleChart = ({ physicsData, visualData, layoutKey, onOpenCity }: 
           backgroundSize: '24px 24px',
         }}
       />
+
+      {showFilterEmptyState ? (
+        <div className="absolute inset-0 z-20 grid place-items-center px-4">
+          <div className="max-w-sm rounded-2xl border border-[#2D2D3A] bg-[#111118]/92 px-5 py-4 text-center shadow-2xl backdrop-blur-md">
+            <div className="text-sm font-medium text-[#E4E4E7]">当前筛选下没有可显示的泡泡</div>
+            <div className="mt-2 text-xs leading-5 text-[#A1A1AA]">
+              可以重置到“全部 / 全部区域”，马上恢复总览视图。
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                const store = useSettingsStore.getState();
+                store.setFilterMode('ALL');
+                store.setRegionFilter('ALL');
+              }}
+              className="mt-4 rounded-full border border-[#3F3F46] px-4 py-2 text-xs font-medium text-white transition-colors hover:border-[#52525B] hover:bg-[#18181F]"
+            >
+              重置筛选
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       <div className="absolute right-4 top-4 z-20 flex gap-2">
         <div className="flex rounded-md border border-[#2D2D3A] bg-[#16161E]/80 p-1 font-mono text-xs backdrop-blur-md">

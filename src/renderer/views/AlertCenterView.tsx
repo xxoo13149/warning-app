@@ -1,10 +1,17 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  type KeyboardEvent,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 
 import { useI18n } from '../i18n';
 import type { AlertEvent } from '../types/contracts';
 import {
-  buildAlertNotificationContent,
-  buildAlertPresentation,
+  buildAlertSummaryDraft,
   type AlertPresentation,
 } from '../utils/alert-summary';
 
@@ -16,11 +23,13 @@ interface AlertCenterViewProps {
   loadingMore: boolean;
   onLoadMore: () => void;
   loadMoreError?: string | null;
+  onOpenMarket?: (alert: AlertEvent) => void;
 }
 
 interface AlertViewModel {
   alert: AlertEvent;
   presentation: AlertPresentation;
+  summary: ReturnType<typeof buildAlertSummaryDraft>;
 }
 
 interface AlertModelCacheEntry {
@@ -42,6 +51,17 @@ interface AlertCenterPersistedState {
   ruleSearch: string;
   citySearch: string;
   sortBy: AlertSortKey;
+}
+
+interface AlertListSnapshot {
+  scrollTop: number;
+  isNearTop: boolean;
+  ruleFilter: string;
+  cityFilter: string;
+  sortBy: AlertSortKey;
+  anchorAlertId: string | null;
+  anchorAlertIndex: number;
+  offsetsById: Map<string, number>;
 }
 
 const pageText = {
@@ -108,6 +128,8 @@ const ALERT_CARD_ESTIMATED_HEIGHT = 286;
 const ALERT_CARD_GAP = 10;
 const ALERT_CARD_OVERSCAN = 4;
 const ALERT_LIST_VIEWPORT_HEIGHT_FALLBACK = 760;
+const ALERT_LIST_TOP_THRESHOLD = 24;
+const LATEST_ALERTS_CTA_LABEL = '\u67e5\u770b\u6700\u65b0\u544a\u8b66';
 
 const countBy = (items: AlertViewModel[], getKey: (item: AlertViewModel) => string) => {
   const counts = new Map<string, number>();
@@ -139,6 +161,9 @@ const filterOptionsByQuery = (options: FilterOption[], query: string) => {
   }
   return options.filter((option) => normalizeSearchText(option.label).includes(keyword));
 };
+
+const buildLatestAlertsCtaLabel = (count: number) =>
+  count > 0 ? `${LATEST_ALERTS_CTA_LABEL} (${count})` : LATEST_ALERTS_CTA_LABEL;
 
 const readPersistedAlertCenterState = (): AlertCenterPersistedState => {
   if (typeof window === 'undefined') {
@@ -217,28 +242,21 @@ const sortAlertModels = (items: AlertViewModel[], sortBy: AlertSortKey) =>
     return compareAlertTime(left, right);
   });
 
-const getPresentationContextValue = (presentation: AlertPresentation, label: string) =>
-  presentation.context.find((item) => item.label === label)?.value ?? '';
-
-const sanitizeCardDetail = (detail: string | null, notificationBody: string) => {
-  if (!detail) {
-    return null;
+const findAnchorAlertIndex = (
+  items: AlertViewModel[],
+  offsets: number[],
+  heights: number[],
+  currentScrollTop: number,
+) => {
+  const anchorThreshold = currentScrollTop + 1;
+  for (let index = 0; index < items.length; index += 1) {
+    const bottom = (offsets[index] ?? 0) + (heights[index] ?? ALERT_CARD_ESTIMATED_HEIGHT);
+    if (bottom > anchorThreshold) {
+      return index;
+    }
   }
 
-  const parts = detail
-    .split(' · ')
-    .map((part) => part.trim())
-    .filter(
-      (part) =>
-        part.length > 0 &&
-        !notificationBody.includes(part) &&
-        !part.startsWith(`${pageText.band}:`) &&
-        !part.startsWith(`${pageText.band}：`) &&
-        !part.startsWith(`${pageText.marketId}:`) &&
-        !part.startsWith(`${pageText.marketId}：`),
-    );
-
-  return parts.length > 0 ? parts.join(' · ') : null;
+  return items.length > 0 ? items.length - 1 : -1;
 };
 
 const buildAlertModels = (
@@ -256,9 +274,11 @@ const buildAlertModels = (
       continue;
     }
 
+    const summary = buildAlertSummaryDraft(alert);
     const model = {
       alert,
-      presentation: buildAlertPresentation(alert),
+      presentation: summary.presentation,
+      summary,
     } satisfies AlertViewModel;
     cache.set(alert.id, { source: alert, model });
     models.push(model);
@@ -278,6 +298,7 @@ interface AlertCenterCardProps {
   highlighted: boolean;
   formatDateTime: (value: string) => string;
   registerCard: (id: string, node: HTMLElement | null) => void;
+  onOpenMarket?: (alert: AlertEvent) => void;
 }
 
 const AlertCenterCard = ({
@@ -285,34 +306,62 @@ const AlertCenterCard = ({
   highlighted,
   formatDateTime,
   registerCard,
+  onOpenMarket,
 }: AlertCenterCardProps) => {
-  const { alert, presentation } = model;
-  const notificationContent = buildAlertNotificationContent(alert);
-  const temperatureBand = getPresentationContextValue(presentation, pageText.band);
-  const marketId = getPresentationContextValue(presentation, pageText.marketId);
-  const detailText = sanitizeCardDetail(presentation.detail, notificationContent.body);
+  const { alert, presentation, summary } = model;
+  const notificationContent = summary.notification;
+  const detailText = summary.detailText;
+  const objectSummary = [
+    summary.presentation.cityLabel,
+    summary.temperatureBand,
+    summary.marketId ? `盘口 ${summary.marketId}` : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  const triggerSummary = summary.triggerSummary;
   const badges = [
     presentation.alertLabel,
-    ...(temperatureBand ? [`温区: ${temperatureBand}`] : []),
+    presentation.ruleLabel,
   ];
-  const visibleFacts = presentation.facts
-    .filter((fact) => !notificationContent.body.includes(fact.value))
-    .slice(0, 4);
-  const quickFacts = [
-    { label: pageText.city, value: presentation.cityLabel },
-    ...(temperatureBand ? [{ label: pageText.band, value: temperatureBand }] : []),
-    { label: pageText.rule, value: presentation.ruleLabel },
-    ...(marketId ? [{ label: pageText.marketId, value: marketId }] : []),
-  ];
+  const visibleFacts = summary.visibleFacts;
+  const locatorTitle = summary.locatorTitle;
+  const locatorSubtitle = summary.locatorSubtitle;
+  const locatorMeta = summary.locatorMeta.map((item) => ({
+    label:
+      item.key === 'marketId'
+        ? pageText.marketId
+        : item.key === 'temperatureBand'
+          ? pageText.band
+          : pageText.rule,
+    value: item.value,
+  }));
+  const isInteractive = typeof onOpenMarket === 'function';
+  const handleOpen = () => {
+    onOpenMarket?.(alert);
+  };
+  const handleKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if (!isInteractive) {
+      return;
+    }
+
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      onOpenMarket(alert);
+    }
+  };
 
   return (
     <article
       ref={(node) => registerCard(alert.id, node)}
       id={`alert-center-card-${alert.id}`}
-      className={`alert-center-card ${
-        highlighted ? 'alert-center-card--focused' : ''
+      className={`alert-center-card ${highlighted ? 'alert-center-card--focused' : ''} ${
+        isInteractive ? 'alert-center-card--interactive' : ''
       }`}
-      tabIndex={highlighted ? -1 : undefined}
+      data-alert-id={alert.id}
+      role={isInteractive ? 'button' : undefined}
+      tabIndex={isInteractive ? 0 : highlighted ? -1 : undefined}
+      onClick={isInteractive ? handleOpen : undefined}
+      onKeyDown={isInteractive ? handleKeyDown : undefined}
     >
       <div className="alert-center-card__main">
         <div className="alert-center-card__top">
@@ -324,9 +373,15 @@ const AlertCenterCard = ({
                 </span>
               ))}
             </div>
-            <h3>{notificationContent.title}</h3>
-            <p className="alert-center-card__summary alert-center-card__summary--lead">
-              {notificationContent.body}
+            <span className="alert-center-card__eyebrow">{notificationContent.title}</span>
+            <h3 data-testid={`alert-center-card-object-${alert.id}`}>
+              {objectSummary || notificationContent.title}
+            </h3>
+            <p
+              className="alert-center-card__summary alert-center-card__summary--lead"
+              data-testid={`alert-center-card-trigger-${alert.id}`}
+            >
+              {triggerSummary}
             </p>
           </div>
           <time className="alert-center-card__time" dateTime={alert.triggeredAt}>
@@ -355,12 +410,23 @@ const AlertCenterCard = ({
 
       <aside className="alert-center-card__context" aria-label={pageText.context}>
         <span>{pageText.context}</span>
-        {quickFacts.map((item) => (
-          <div key={`${alert.id}-${item.label}`}>
-            <small>{item.label}</small>
-            <strong>{item.value}</strong>
-          </div>
-        ))}
+        <div
+          className="alert-center-card__context-spotlight"
+          data-testid={`alert-center-card-locator-${alert.id}`}
+        >
+          <small>{summary.marketId ? pageText.marketId : pageText.band}</small>
+          <strong>{locatorTitle}</strong>
+          {locatorSubtitle ? <p>{locatorSubtitle}</p> : null}
+        </div>
+        <div className="alert-center-card__context-meta">
+          {locatorMeta.map((item) => (
+            <div key={`${alert.id}-${item.label}`}>
+              <small>{item.label}</small>
+              <strong>{item.value}</strong>
+            </div>
+          ))}
+        </div>
+        {isInteractive ? <p className="alert-center-card__context-hint">点击后自动定位到对应盘口</p> : null}
       </aside>
     </article>
   );
@@ -473,6 +539,7 @@ export const AlertCenterView = ({
   loadingMore,
   onLoadMore,
   loadMoreError = null,
+  onOpenMarket,
 }: AlertCenterViewProps) => {
   const { formatDateTime } = useI18n();
   const persistedState = useMemo(readPersistedAlertCenterState, []);
@@ -480,6 +547,7 @@ export const AlertCenterView = ({
   const listViewportRef = useRef<HTMLDivElement | null>(null);
   const alertCardNodesRef = useRef(new Map<string, HTMLElement>());
   const alertCardHeightsRef = useRef(new Map<string, number>());
+  const listSnapshotRef = useRef<AlertListSnapshot | null>(null);
   const [ruleFilter, setRuleFilter] = useState(persistedState.ruleFilter);
   const [cityFilter, setCityFilter] = useState(persistedState.cityFilter);
   const [ruleSearch, setRuleSearch] = useState(persistedState.ruleSearch);
@@ -489,6 +557,7 @@ export const AlertCenterView = ({
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(ALERT_LIST_VIEWPORT_HEIGHT_FALLBACK);
   const [layoutVersion, setLayoutVersion] = useState(0);
+  const [pendingLatestCount, setPendingLatestCount] = useState(0);
 
   const alertModels = useMemo<AlertViewModel[]>(
     () => buildAlertModels(alerts, alertModelCacheRef.current),
@@ -558,6 +627,8 @@ export const AlertCenterView = ({
       ? pageText.emptyCanLoadMore
       : pageText.emptyCanLoadMoreUnfiltered
     : pageText.empty;
+  const isAwayFromTop = scrollTop > ALERT_LIST_TOP_THRESHOLD;
+  const latestAlertsCtaLabel = buildLatestAlertsCtaLabel(pendingLatestCount);
   const shouldShowPagination =
     hasMore || alerts.length > 0 || total > 0 || Boolean(loadMoreError);
   const registerAlertCard = useCallback((id: string, node: HTMLElement | null) => {
@@ -681,6 +752,80 @@ export const AlertCenterView = ({
     [visibleAlerts, virtualLayout.endIndex, virtualLayout.offsets, virtualLayout.startIndex],
   );
 
+  useLayoutEffect(() => {
+    const viewport = listViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+
+    const offsetsById = new Map<string, number>();
+    visibleAlerts.forEach((item, index) => {
+      offsetsById.set(item.alert.id, virtualLayout.offsets[index] ?? 0);
+    });
+
+    const previousSnapshot = listSnapshotRef.current;
+    if (
+      previousSnapshot &&
+      previousSnapshot.sortBy === sortBy &&
+      previousSnapshot.ruleFilter === ruleFilter &&
+      previousSnapshot.cityFilter === cityFilter &&
+      !previousSnapshot.isNearTop &&
+      previousSnapshot.anchorAlertId
+    ) {
+      const previousOffset = previousSnapshot.offsetsById.get(previousSnapshot.anchorAlertId);
+      const nextOffset = offsetsById.get(previousSnapshot.anchorAlertId);
+
+      if (previousOffset != null && nextOffset != null && nextOffset !== previousOffset) {
+        const nextScrollTop = Math.max(
+          previousSnapshot.scrollTop + (nextOffset - previousOffset),
+          0,
+        );
+        viewport.scrollTop = nextScrollTop;
+        if (nextScrollTop !== scrollTop) {
+          setScrollTop(nextScrollTop);
+        }
+      }
+
+      if (sortBy === 'latest') {
+        const nextAnchorIndex = visibleAlerts.findIndex(
+          (item) => item.alert.id === previousSnapshot.anchorAlertId,
+        );
+        const insertedAboveAnchor = nextAnchorIndex - previousSnapshot.anchorAlertIndex;
+        if (insertedAboveAnchor > 0) {
+          setPendingLatestCount((current) => current + insertedAboveAnchor);
+        }
+      }
+    }
+
+    const currentScrollTop = viewport.scrollTop;
+    const anchorAlertIndex = findAnchorAlertIndex(
+      visibleAlerts,
+      virtualLayout.offsets,
+      virtualLayout.heights,
+      currentScrollTop,
+    );
+
+    listSnapshotRef.current = {
+      scrollTop: currentScrollTop,
+      isNearTop: currentScrollTop <= ALERT_LIST_TOP_THRESHOLD,
+      ruleFilter,
+      cityFilter,
+      sortBy,
+      anchorAlertId:
+        anchorAlertIndex >= 0 ? visibleAlerts[anchorAlertIndex]?.alert.id ?? null : null,
+      anchorAlertIndex,
+      offsetsById,
+    };
+  }, [
+    cityFilter,
+    ruleFilter,
+    scrollTop,
+    sortBy,
+    virtualLayout.heights,
+    virtualLayout.offsets,
+    visibleAlerts,
+  ]);
+
   useEffect(() => {
     if (ruleFilter !== 'all' && !ruleOptions.some((option) => option.value === ruleFilter)) {
       setRuleFilter('all');
@@ -731,7 +876,14 @@ export const AlertCenterView = ({
 
     viewport.scrollTop = 0;
     setScrollTop(0);
+    setPendingLatestCount(0);
   }, [cityFilter, ruleFilter, sortBy]);
+
+  useEffect(() => {
+    if (scrollTop <= ALERT_LIST_TOP_THRESHOLD && pendingLatestCount > 0) {
+      setPendingLatestCount(0);
+    }
+  }, [pendingLatestCount, scrollTop]);
 
   useEffect(() => {
     if (!highlightedAlertId) {
@@ -774,6 +926,22 @@ export const AlertCenterView = ({
       window.clearTimeout(timeout);
     };
   }, [highlightedAlertId, viewportHeight, virtualLayout.heights, virtualLayout.offsets, visibleAlerts]);
+
+  const handleJumpToLatest = useCallback(() => {
+    const viewport = listViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+
+    if (typeof viewport.scrollTo === 'function') {
+      viewport.scrollTo({ top: 0, behavior: 'smooth' });
+    } else {
+      viewport.scrollTop = 0;
+    }
+
+    setScrollTop(0);
+    setPendingLatestCount(0);
+  }, []);
 
   return (
     <section className="workspace">
@@ -870,6 +1038,16 @@ export const AlertCenterView = ({
 
           {visibleAlerts.length > 0 ? (
             <div className="alert-center-list-shell">
+              {isAwayFromTop ? (
+                <button
+                  type="button"
+                  className="alert-center-latest-cta"
+                  data-testid="alert-center-latest-cta"
+                  onClick={handleJumpToLatest}
+                >
+                  {latestAlertsCtaLabel}
+                </button>
+              ) : null}
               <div
                 ref={listViewportRef}
                 className="alert-center-list-viewport"
@@ -883,6 +1061,7 @@ export const AlertCenterView = ({
                         highlighted={highlightedAlertId === item.alert.id}
                         formatDateTime={formatDateTime}
                         registerCard={registerAlertCard}
+                        onOpenMarket={onOpenMarket}
                       />
                     </div>
                   ))}

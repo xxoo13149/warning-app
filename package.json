@@ -14,6 +14,7 @@
     "postpackage": "node scripts/update-windows-shortcuts.mjs",
     "premake": "node scripts/prepare-runtime-deps.mjs",
     "make": "electron-forge make",
+    "postmake": "node scripts/update-windows-shortcuts.mjs",
     "publish": "electron-forge publish",
     "shortcuts:update": "node scripts/update-windows-shortcuts.mjs",
     "lint": "eslint --ext .ts,.tsx src tests forge.config.ts vite.*.ts",

@@ -114,8 +114,8 @@ export const metricMeta: Record<AlertMetricKey, LocalizedMeta> = {
     en: 'Orderbook Wipeout',
     zhAlias: 'liquidity_kill',
     enAlias: 'liquidity_kill',
-    descriptionZh: '当买盘或卖盘的顶档在短时间内被清空时触发。',
-    descriptionEn: 'Triggers when the bid or ask edge of the book is rapidly wiped out.',
+    descriptionZh: '当买盘或卖盘该侧现价盘口在短时间内被整边清空时触发。',
+    descriptionEn: 'Triggers when the current bid or ask side of the book is rapidly wiped out in full.',
   },
   volume_pricing: {
     zh: '带量定价',
@@ -126,11 +126,11 @@ export const metricMeta: Record<AlertMetricKey, LocalizedMeta> = {
     descriptionEn: 'Triggers when the best ask is lifted quickly with trade or depth confirmation.',
   },
   abnormal_lottery: {
-    zh: '寮傚父褰╃エ',
+    zh: '异常彩票',
     en: 'Abnormal Lottery',
     zhAlias: 'abnormal_lottery',
     enAlias: 'abnormal_lottery',
-    descriptionZh: '褰撹秴浣庝环 YES 鍗栦竴琚揩閫熸帹楂樹笖鏈夐噺纭鏃惰Е鍙戯紝浣庝环瓒婁綆瓒婃洿鏁忔劅銆?',
+    descriptionZh: '当超低价 YES 卖一被快速推高且有量确认时触发，对越低的价格越敏感。',
     descriptionEn:
       'Triggers when an ultra-low YES ask is rapidly lifted with confirmation, using lower-price-sensitive thresholds.',
   },
@@ -207,8 +207,8 @@ export const builtinRuleMeta: Record<BuiltinRuleKey, LocalizedMeta> = {
     en: 'Orderbook Wipeout',
     zhAlias: 'liquidity_kill',
     enAlias: 'liquidity_kill',
-    descriptionZh: '监控买盘或卖盘顶档被快速清空的异常情况。',
-    descriptionEn: 'Monitors abrupt wipeouts at the bid or ask edge.',
+    descriptionZh: '监控买盘或卖盘该侧现价盘口被快速整边清空的异常情况。',
+    descriptionEn: 'Monitors abrupt full wipeouts of the current bid or ask side of the book.',
   },
   volume_pricing: {
     zh: '带量定价',
@@ -219,11 +219,11 @@ export const builtinRuleMeta: Record<BuiltinRuleKey, LocalizedMeta> = {
     descriptionEn: 'Monitors fast ask repricing backed by trade or order book size.',
   },
   abnormal_lottery: {
-    zh: '寮傚父褰╃エ',
+    zh: '异常彩票',
     en: 'Abnormal Lottery',
     zhAlias: 'abnormal_lottery',
     enAlias: 'abnormal_lottery',
-    descriptionZh: '鐩戞帶瓒呬綆浠?YES 鍗栦竴琚揩閫熸帹楂樼殑寮傚父浜嬩欢锛屽苟瀵逛綆浠锋洿鏁忔劅銆?',
+    descriptionZh: '监控超低价 YES 卖一被快速推高的异常事件，并对更低价位更敏感。',
     descriptionEn:
       'Monitors ultra-low YES asks that are rapidly repriced upward, with extra sensitivity at lower prices.',
   },
@@ -403,9 +403,13 @@ const formatLiquidityReason = (
 ) => {
   switch (reason) {
     case 'full_empty':
-      return locale === 'zh-CN' ? '该侧盘口已全空' : 'that side of the book is now empty';
+      return locale === 'zh-CN'
+        ? '该侧现价盘口已整边清空'
+        : 'that side of the current book is now fully empty';
     case 'top_level':
-      return locale === 'zh-CN' ? '买一/卖一已被清空' : 'the top level was cleared';
+      return locale === 'zh-CN'
+        ? '仅顶档被清空，未达到整边清空'
+        : 'only the top level was cleared; the full side was not emptied';
     default:
       return '';
   }
@@ -479,13 +483,13 @@ const formatMessageBody = (
       const sizeText = formatSize(params.effectiveSize, locale);
       const notionalText = formatUsd(params.effectiveNotional, locale);
       return locale === 'zh-CN'
-        ? `${marketLabel}${formatOutcomeSide(params.outcome, locale)}寮傚父褰╃エ锛氳秴浣庝环鍗栦竴浠?${formatCents(
+        ? `${marketLabel}${formatOutcomeSide(params.outcome, locale)}异常彩票：超低价卖一从 ${formatCents(
             params.previous,
             locale,
-          )} 鎺ㄩ珮鍒?${formatCents(params.actual, locale)}锛岃Е鍙戦槇鍊?${formatCents(
+          )} 推高到 ${formatCents(params.actual, locale)}，触发阈值 ${formatCents(
             params.threshold,
             locale,
-          )}锛?{sourceText}锛屾湁鏁堥噺 ${sizeText} / ${notionalText}`
+          )}，${sourceText}，有效量 ${sizeText} / ${notionalText}`
         : `${marketLabel} ${formatOutcomeSide(
             params.outcome,
             locale,
@@ -531,12 +535,13 @@ const formatMessageBodyV2 = (
   )}${formatLiquiditySide(params.side, locale)}`;
   const fromValue = formatCents(params.previous, locale);
   const toValue = formatCents(params.actual, locale);
+  const isTopLevelOnly = params.reason === 'top_level';
 
   if (locale === 'zh-CN') {
-    return `${prefix}盘口斩杀：从 ${fromValue} 降到 ${toValue}${suffix}`;
+    return `${prefix}${isTopLevelOnly ? '顶档清空' : '盘口斩杀'}：从 ${fromValue} 降到 ${toValue}${suffix}`;
   }
 
-  return `${prefix} orderbook wipeout from ${fromValue} to ${toValue}${suffix}`;
+  return `${prefix} ${isTopLevelOnly ? 'top level cleared' : 'orderbook wipeout'} from ${fromValue} to ${toValue}${suffix}`;
 };
 
 export const formatAlertMessage = (locale: DisplayLocale, alert: AlertMessageEnvelope) => {

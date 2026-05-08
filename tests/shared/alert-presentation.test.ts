@@ -43,7 +43,7 @@ describe('alert notification content', () => {
     expect(presentation.cityLabel).toContain('Los Angeles');
     expect(presentation.title).toBe('洛杉矶 · KLAX · Los Angeles · 70 至 71 华氏度');
     expect(presentation.summary).toBe(
-      '盘口斩杀：YES 买盘从 20 美分降到 0 美分（疑似成交扫空，该侧盘口已空）',
+      '盘口斩杀：YES 买盘从 20 美分降到 0 美分（疑似成交扫空，该侧现价盘口已整边清空）',
     );
   });
 
@@ -51,7 +51,7 @@ describe('alert notification content', () => {
     const notification = buildAlertNotificationContent(buildAlert());
     expect(notification.title).toBe('洛杉矶 · KLAX · Los Angeles · 70 至 71 华氏度');
     expect(notification.body).toBe(
-      '盘口斩杀 · YES 买盘 20 美分 → 0 美分 · 疑似成交扫空，该侧盘口已空 · 当前价格 41 美分',
+      '盘口斩杀 · YES 买盘 20 美分 → 0 美分 · 疑似成交扫空，该侧现价盘口已整边清空 · 当前价格 41 美分',
     );
   });
 
@@ -153,6 +153,29 @@ describe('alert notification content', () => {
     expect(presentation.summary).toContain('5 美分');
     expect(notification.body).toContain('异常彩票');
     expect(notification.body).toContain('YES');
+  });
+
+  it('prefers builtin abnormal lottery identity over a misleading spread message key', () => {
+    const expectedLabel = buildAlertPresentation(
+      buildAlert({
+        ruleId: 'abnormal-lottery',
+        builtinKey: 'abnormal_lottery',
+        messageKey: 'abnormal_lottery',
+      }),
+    ).ruleLabel;
+    const presentation = buildAlertPresentation(
+      buildAlert({
+        ruleId: 'abnormal-lottery',
+        builtinKey: 'abnormal_lottery',
+        messageKey: 'spread_threshold',
+        messageParams: {
+          actual: 0.03,
+          threshold: 0.02,
+        },
+      }),
+    );
+
+    expect(presentation.ruleLabel).toBe(expectedLabel);
   });
 
   it('falls back to a short system notification title', () => {

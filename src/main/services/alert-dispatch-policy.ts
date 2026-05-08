@@ -59,20 +59,12 @@ export const parseClockTimeToMinutes = (value: string): number | null => {
 };
 
 export const isQuietHoursActive = (
-  settings: Pick<RuntimeState['settingsPayload']['settings'], 'quietHoursStart' | 'quietHoursEnd'>,
-  now = new Date(),
+  _settings: Pick<RuntimeState['settingsPayload']['settings'], 'quietHoursStart' | 'quietHoursEnd'>,
+  _now = new Date(),
 ): boolean => {
-  const start = parseClockTimeToMinutes(settings.quietHoursStart);
-  const end = parseClockTimeToMinutes(settings.quietHoursEnd);
-  if (start === null || end === null) {
-    return false;
-  }
-  if (start === end) {
-    return true;
-  }
-
-  const current = now.getHours() * 60 + now.getMinutes();
-  return start < end ? current >= start && current < end : current >= start || current < end;
+  void _settings;
+  void _now;
+  return false;
 };
 
 export class AlertDispatchPolicy {
