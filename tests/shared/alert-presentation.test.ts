@@ -55,6 +55,55 @@ describe('alert notification content', () => {
     );
   });
 
+  it('summarizes temperature ladder liquidity kills with anchor and confirmation bands', () => {
+    const alert = buildAlert({
+      cityKey: 'warsaw',
+      marketId: 'warsaw-13c',
+      messageParams: {
+        outcome: 'yes',
+        side: 'buy',
+        direction: 'higher',
+        previous: 0.102,
+        actual: 0,
+        threshold: 0.08,
+        source: 'temperature_ladder',
+        reason: 'temperature_ladder_high',
+        anchorMarketId: 'warsaw-13c',
+        anchorTemperatureBand: '13°C',
+        confirmationMarketId: 'warsaw-14c',
+        confirmationTemperatureBand: '14°C',
+      },
+      marketSnapshot: {
+        cityName: 'Warsaw',
+        airportCode: 'EPWA',
+        eventDate: '2026-05-09',
+        temperatureBand: '13°C',
+        yesPrice: 0,
+        bestBid: 0,
+        bestAsk: 0.01,
+        spread: 0.01,
+      },
+    });
+
+    const presentation = buildAlertPresentation(alert);
+    const notification = buildAlertNotificationContent(alert);
+
+    expect(presentation.summary).toContain('高温斩杀');
+    expect(presentation.summary).toContain('13 摄氏度 YES');
+    expect(presentation.summary).toContain('10 美分');
+    expect(presentation.summary).toContain('14 摄氏度 相邻确认');
+    expect(presentation.facts).toEqual(
+      expect.arrayContaining([
+        { label: '斩杀类型', value: '高温斩杀', tone: 'strong' },
+        { label: '被斩温度档', value: '13 摄氏度', tone: undefined },
+        { label: '相邻确认', value: '14 摄氏度', tone: undefined },
+      ]),
+    );
+    expect(notification.body).toBe(
+      '盘口斩杀 · 高温斩杀 · 13 摄氏度 YES 10 美分 → 0 美分 · 14 摄氏度 相邻确认 · 当前价格 0 美分',
+    );
+  });
+
   it('keeps threshold details compact for spread alerts', () => {
     const notification = buildAlertNotificationContent(
       buildAlert({

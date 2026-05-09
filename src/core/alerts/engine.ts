@@ -19,8 +19,13 @@ interface NumericEvaluation {
   actual?: number;
   previous?: number;
   side?: 'buy' | 'sell';
+  direction?: 'higher' | 'lower';
   source?: string;
   reason?: string;
+  anchorMarketId?: string;
+  anchorTemperatureBand?: string;
+  confirmationMarketId?: string;
+  confirmationTemperatureBand?: string;
   effectiveSize?: number;
   effectiveNotional?: number;
   referencePrice?: number;
@@ -213,8 +218,13 @@ export class AlertEngine {
         actual: ladderSignal.currentPrice,
         previous: ladderSignal.previousPrice,
         side: 'buy',
+        direction: ladderSignal.direction,
         source: ladderSignal.source,
         reason: ladderSignal.reason,
+        anchorMarketId: ladderSignal.anchorMarketId,
+        anchorTemperatureBand: ladderSignal.anchorTemperatureBand,
+        confirmationMarketId: ladderSignal.confirmationMarketId,
+        confirmationTemperatureBand: ladderSignal.confirmationTemperatureBand,
       };
     }
 
@@ -532,11 +542,16 @@ export class AlertEngine {
           messageParams: {
             outcome: input.side ?? null,
             side: evaluation.side,
+            direction: evaluation.direction,
             threshold: rule.threshold,
             actual: evaluation.actual,
             previous: evaluation.previous,
             source: evaluation.source,
             reason: evaluation.reason,
+            anchorMarketId: evaluation.anchorMarketId,
+            anchorTemperatureBand: evaluation.anchorTemperatureBand,
+            confirmationMarketId: evaluation.confirmationMarketId,
+            confirmationTemperatureBand: evaluation.confirmationTemperatureBand,
           },
         };
       }

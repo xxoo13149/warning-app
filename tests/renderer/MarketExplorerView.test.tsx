@@ -679,6 +679,29 @@ describe('MarketExplorerView', () => {
         },
       },
     },
+    {
+      name: 'temperature ladder liquidity kill',
+      expectedColumn: 'yesPrice',
+      alertOverrides: {
+        ruleId: 'liquidity-kill',
+        messageKey: 'liquidity_kill' as const,
+        messageParams: {
+          actual: 0,
+          previous: 0.102,
+          threshold: 0.08,
+          operator: '>=',
+          side: 'buy',
+          outcome: 'yes',
+          direction: 'higher',
+          source: 'temperature_ladder',
+          reason: 'temperature_ladder_high',
+          anchorMarketId: 'market-0',
+          anchorTemperatureBand: '60F to 61F',
+          confirmationMarketId: 'market-1',
+          confirmationTemperatureBand: '61F to 62F',
+        },
+      },
+    },
   ];
 
   it.each(precisionFocusCases)(
@@ -715,6 +738,77 @@ describe('MarketExplorerView', () => {
       expect(focusHeader?.textContent).toContain('重点');
     },
   );
+
+  it('shows a temperature ladder kill story after jumping from a liquidity alert', async () => {
+    const rows = [
+      buildMarket(0, {
+        temperatureBand: '13°C',
+        yesPrice: 0,
+        bestBid: 0,
+        bestAsk: 0.01,
+      }),
+      buildMarket(1, {
+        temperatureBand: '14°C',
+        yesPrice: 0.68,
+        bestBid: 0.66,
+        bestAsk: 0.7,
+      }),
+      buildMarket(2, {
+        temperatureBand: '15°C',
+        yesPrice: 0.15,
+        bestBid: 0.12,
+        bestAsk: 0.17,
+      }),
+    ];
+    const view = await renderView(rows, {}, {}, {
+      focusAlert: buildAlert('alert-temperature-kill', {
+        marketId: 'market-0',
+        cityKey: 'city-0',
+        ruleId: 'liquidity-kill',
+        messageKey: 'liquidity_kill',
+        messageParams: {
+          actual: 0,
+          previous: 0.102,
+          threshold: 0.08,
+          operator: '>=',
+          side: 'buy',
+          outcome: 'yes',
+          direction: 'higher',
+          source: 'temperature_ladder',
+          reason: 'temperature_ladder_high',
+          anchorMarketId: 'market-0',
+          anchorTemperatureBand: '13°C',
+          confirmationMarketId: 'market-1',
+          confirmationTemperatureBand: '14°C',
+          windowSec: 60,
+        },
+        marketSnapshot: {
+          cityName: 'City 0',
+          airportCode: 'K000',
+          eventDate: '2026-04-26',
+          temperatureBand: '13°C',
+          yesPrice: 0,
+          bestBid: 0,
+          bestAsk: 0.01,
+          spread: 0.01,
+          change5m: -10,
+        },
+      }),
+    });
+
+    const panels = view.querySelectorAll('[data-testid="market-temperature-kill-panel"]');
+    const ladder = view.querySelector('[data-testid="market-temperature-kill-ladder"]');
+    const trigger = view.querySelector('[data-testid="market-inspector-trigger"]');
+
+    expect(panels.length).toBeGreaterThanOrEqual(1);
+    expect(panels[0]?.textContent).toContain('高温斩杀');
+    expect(panels[0]?.textContent).toContain('13 摄氏度');
+    expect(panels[0]?.textContent).toContain('14 摄氏度');
+    expect(panels[0]?.textContent).toContain('10.2 美分');
+    expect(ladder?.textContent).toContain('Bid 66 美分');
+    expect(trigger?.textContent).toContain('温度阶梯斩杀');
+    expect(trigger?.textContent).toContain('相邻确认');
+  });
 
   it('highlights the lottery column header for lottery-driven precise focus', async () => {
     const rows = [

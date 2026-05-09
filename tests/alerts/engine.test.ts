@@ -427,10 +427,15 @@ describe('alert engine for market ticks', () => {
     expect(result[0].messageParams).toMatchObject({
       outcome: 'yes',
       side: 'buy',
+      direction: 'higher',
       source: 'temperature_ladder',
       reason: 'temperature_ladder_high',
       previous: 0.102,
       actual: 0,
+      anchorMarketId: 'warsaw-13c',
+      anchorTemperatureBand: '13°C',
+      confirmationMarketId: 'warsaw-14c',
+      confirmationTemperatureBand: '14°C',
     });
   });
 

@@ -37,4 +37,33 @@ describe('alert display abnormal lottery copy', () => {
     expect(message).toContain('触发阈值');
     expect(message).toContain('有效量 150 张 / $7.50');
   });
+
+  it('formats temperature ladder liquidity kill alerts with adjacent confirmation', () => {
+    const message = formatAlertMessage('zh-CN', {
+      messageKey: 'liquidity_kill',
+      messageParams: {
+        outcome: 'yes',
+        side: 'buy',
+        direction: 'higher',
+        previous: 0.102,
+        actual: 0,
+        threshold: 0.08,
+        source: 'temperature_ladder',
+        reason: 'temperature_ladder_high',
+        anchorTemperatureBand: '13°C',
+        confirmationTemperatureBand: '14°C',
+      },
+      marketSnapshot: {
+        cityName: 'Warsaw',
+        airportCode: 'EPWA',
+        temperatureBand: '13°C',
+      },
+    });
+
+    expect(message).toContain('高温斩杀');
+    expect(message).toContain('13°C YES');
+    expect(message).toContain('10¢');
+    expect(message).toContain('14°C 相邻确认');
+    expect(message).toContain('基于盘口异动推断');
+  });
 });

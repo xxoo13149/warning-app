@@ -2795,6 +2795,8 @@ export class WorkerRuntime {
       bestBidSize: tokenLatest?.bestBidSize ?? null,
       bestAsk: tokenLatest?.bestAsk ?? row.bestAsk,
       bestAskSize: tokenLatest?.bestAskSize ?? null,
+      bidLevelCount: tokenLatest?.bidLevelCount ?? null,
+      askLevelCount: tokenLatest?.askLevelCount ?? null,
       bidVisibleSize: tokenLatest?.bidVisibleSize ?? null,
       askVisibleSize: tokenLatest?.askVisibleSize ?? null,
       spread: tokenLatest?.spread ?? row.spread,

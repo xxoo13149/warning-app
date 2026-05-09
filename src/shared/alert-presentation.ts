@@ -402,6 +402,25 @@ const getLiquidityOutcome = (alert: AlertPresentationSource) => {
   return '';
 };
 
+const isTemperatureLadderLiquidityKill = (alert: AlertPresentationSource) =>
+  alert.messageParams?.source === 'temperature_ladder' ||
+  alert.messageParams?.reason === 'temperature_ladder_high' ||
+  alert.messageParams?.reason === 'temperature_ladder_low';
+
+const getTemperatureKillTitle = (alert: AlertPresentationSource) =>
+  alert.messageParams?.direction === 'lower' ||
+  alert.messageParams?.reason === 'temperature_ladder_low'
+    ? '低温斩杀'
+    : '高温斩杀';
+
+const getTemperatureKillAnchorBand = (alert: AlertPresentationSource) =>
+  compactTemperatureBand(
+    alert.messageParams?.anchorTemperatureBand ?? alert.marketSnapshot?.temperatureBand,
+  );
+
+const getTemperatureKillConfirmationBand = (alert: AlertPresentationSource) =>
+  compactTemperatureBand(alert.messageParams?.confirmationTemperatureBand);
+
 const getLiquidityCauseText = (alert: AlertPresentationSource) => {
   const notes: string[] = [];
   switch (alert.messageParams?.source) {
@@ -500,6 +519,24 @@ const buildReasonText = (alert: AlertPresentationSource) => {
         const target = outcome ? `${outcome} ${sideLabel}` : sideLabel;
         const cause = getLiquidityCauseText(alert);
         const isTopLevelOnly = alert.messageParams?.reason === 'top_level';
+        if (isTemperatureLadderLiquidityKill(alert)) {
+          const anchorBand = getTemperatureKillAnchorBand(alert);
+          const confirmationBand = getTemperatureKillConfirmationBand(alert);
+          const ladderTarget = anchorBand ? `${anchorBand} YES` : target;
+          if (hasValue(previous) && hasValue(actual)) {
+            return [
+              `${getTemperatureKillTitle(alert)}：${ladderTarget} 从 ${formatCents(previous)}快速归零到 ${formatCents(actual)}`,
+              confirmationBand ? `${confirmationBand} 相邻确认` : '温度阶梯确认',
+              '基于盘口异动推断',
+            ].join('，');
+          }
+          return [
+            `${getTemperatureKillTitle(alert)}：${ladderTarget} 出现盘口斩杀`,
+            confirmationBand ? `${confirmationBand} 相邻确认` : cause,
+          ]
+            .filter(Boolean)
+            .join('，');
+        }
         if (hasValue(previous) && hasValue(actual)) {
           return cause
             ? `${target}从 ${formatCents(previous)}降到 ${formatCents(actual)}（${cause}）`
@@ -584,10 +621,27 @@ const buildFacts = (alert: AlertPresentationSource) => {
   } else if (key === 'spread_threshold') {
     pushFact(facts, '触发价差', formatCents(actual), 'strong');
   } else if (key === 'liquidity_kill') {
-    pushFact(facts, '监控盘口', `${getLiquidityOutcome(alert) ? `${getLiquidityOutcome(alert)} ` : ''}${getLiquiditySide(alert)}`);
-    pushFact(facts, '当前边缘价', formatCents(actual), 'strong');
-    pushFact(facts, '被清空前', formatCents(previous));
-    pushFact(facts, '事件归因', getLiquidityCauseText(alert));
+    if (isTemperatureLadderLiquidityKill(alert)) {
+      const anchorBand = getTemperatureKillAnchorBand(alert);
+      const confirmationBand = getTemperatureKillConfirmationBand(alert);
+      pushFact(facts, '斩杀类型', getTemperatureKillTitle(alert), 'strong');
+      pushFact(facts, '被斩温度档', anchorBand);
+      pushFact(
+        facts,
+        '价格路径',
+        hasValue(previous) && hasValue(actual)
+          ? `${formatCents(previous)} → ${formatCents(actual)}`
+          : null,
+        'strong',
+      );
+      pushFact(facts, '相邻确认', confirmationBand);
+      pushFact(facts, '盘口来源', '温度阶梯确认');
+    } else {
+      pushFact(facts, '监控盘口', `${getLiquidityOutcome(alert) ? `${getLiquidityOutcome(alert)} ` : ''}${getLiquiditySide(alert)}`);
+      pushFact(facts, '当前边缘价', formatCents(actual), 'strong');
+      pushFact(facts, '被清空前', formatCents(previous));
+      pushFact(facts, '事件归因', getLiquidityCauseText(alert));
+    }
   } else if (key === 'abnormal_lottery') {
     pushFact(facts, '监控合约', `${getLiquidityOutcome(alert) || 'YES/NO'} 超低价卖一`);
     pushFact(facts, '异常价', formatCents(actual), 'strong');
@@ -673,6 +727,21 @@ const buildNotificationValueParts = (alert: AlertPresentationSource) => {
       const outcome = getLiquidityOutcome(alert);
       const prefix = outcome ? `${outcome} ${getLiquiditySide(alert)}` : getLiquiditySide(alert);
       const cause = getLiquidityCauseText(alert);
+      if (isTemperatureLadderLiquidityKill(alert)) {
+        const anchorBand = getTemperatureKillAnchorBand(alert);
+        const confirmationBand = getTemperatureKillConfirmationBand(alert);
+        const route =
+          hasValue(previous) && hasValue(actual)
+            ? `${anchorBand ? `${anchorBand} YES ` : ''}${formatCents(previous)} → ${formatCents(actual)}`
+            : anchorBand
+              ? `${anchorBand} YES`
+              : null;
+        return [
+          getTemperatureKillTitle(alert),
+          route,
+          confirmationBand ? `${confirmationBand} 相邻确认` : '温度阶梯确认',
+        ].filter((value): value is string => Boolean(value));
+      }
       if (hasValue(previous) && hasValue(actual)) {
         return cause
           ? [`${prefix} ${formatCents(previous)} → ${formatCents(actual)}`, cause]

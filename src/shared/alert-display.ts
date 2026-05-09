@@ -45,6 +45,8 @@ export interface AlertMarketSnapshot {
   bestBidSize?: number | null;
   bestAsk?: number | null;
   bestAskSize?: number | null;
+  bidLevelCount?: number | null;
+  askLevelCount?: number | null;
   bidVisibleSize?: number | null;
   askVisibleSize?: number | null;
   spread?: number | null;
@@ -61,8 +63,13 @@ export interface AlertMessageParams {
   outcome?: 'yes' | 'no' | null;
   feedKey?: string | null;
   side?: 'buy' | 'sell' | null;
+  direction?: 'higher' | 'lower' | null;
   source?: string | null;
   reason?: string | null;
+  anchorMarketId?: string | null;
+  anchorTemperatureBand?: string | null;
+  confirmationMarketId?: string | null;
+  confirmationTemperatureBand?: string | null;
   effectiveSize?: number | null;
   effectiveNotional?: number | null;
   referencePrice?: number | null;
@@ -425,6 +432,23 @@ const formatLiquidityReason = (
   }
 };
 
+const isTemperatureLadderLiquidity = (params: AlertMessageParams) =>
+  params.source === 'temperature_ladder' ||
+  params.reason === 'temperature_ladder_high' ||
+  params.reason === 'temperature_ladder_low';
+
+const formatTemperatureLadderDirection = (
+  params: AlertMessageParams,
+  locale: DisplayLocale,
+) => {
+  const isLower =
+    params.direction === 'lower' || params.reason === 'temperature_ladder_low';
+  if (locale === 'zh-CN') {
+    return isLower ? '低温斩杀' : '高温斩杀';
+  }
+  return isLower ? 'lower-temperature kill' : 'higher-temperature kill';
+};
+
 const formatMessageBody = (
   locale: DisplayLocale,
   key: AlertMessageKey,
@@ -546,6 +570,22 @@ const formatMessageBodyV2 = (
   const fromValue = formatCents(params.previous, locale);
   const toValue = formatCents(params.actual, locale);
   const isTopLevelOnly = params.reason === 'top_level';
+
+  if (isTemperatureLadderLiquidity(params)) {
+    const title = formatTemperatureLadderDirection(params, locale);
+    const anchor = params.anchorTemperatureBand ?? snapshot?.temperatureBand ?? marketLabel;
+    const confirmation = params.confirmationTemperatureBand;
+
+    if (locale === 'zh-CN') {
+      return `${marketLabel}${title}：${anchor} YES 从 ${fromValue} 快速归零到 ${toValue}${
+        confirmation ? `，${confirmation} 相邻确认` : ''
+      }，基于盘口异动推断`;
+    }
+
+    return `${marketLabel} ${title}: ${anchor} YES moved from ${fromValue} to ${toValue}${
+      confirmation ? ` with ${confirmation} confirmation` : ''
+    } from order book movement`;
+  }
 
   if (locale === 'zh-CN') {
     return `${prefix}${isTopLevelOnly ? '顶档清空' : '盘口斩杀'}：从 ${fromValue} 降到 ${toValue}${suffix}`;

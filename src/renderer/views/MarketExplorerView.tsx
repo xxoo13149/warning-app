@@ -122,6 +122,31 @@ interface AlertTriggerHighlight {
   rail: AlertTriggerRail | null;
 }
 
+interface TemperatureKillStory {
+  active: boolean;
+  title: string;
+  killedBand: string | null;
+  confirmationBand: string | null;
+  killedMarketId: string;
+  confirmationMarketId: string | null;
+  priceRoute: string | null;
+  previousPrice: string | null;
+  currentPrice: string | null;
+  directionLabel: string;
+  windowLabel: string | null;
+  sourceLabel: string;
+  inferenceNote: string;
+  ladderRows: Array<{
+    marketId: string;
+    band: string;
+    bid: string;
+    ask: string;
+    yes: string;
+    selected: boolean;
+    confirmation: boolean;
+  }>;
+}
+
 interface PrecisionFocusGuideFact {
   key: 'market' | 'actual' | 'threshold' | 'trigger' | 'scope' | 'compare' | 'context';
   label: string;
@@ -306,6 +331,12 @@ const formatLotteryNotionalLabel = (value: number | null | undefined, language: 
   }).format(value);
 };
 
+const isTemperatureLadderKillAlert = (alert: AlertEvent | null | undefined) =>
+  alert?.messageKey === 'liquidity_kill' &&
+  (alert.messageParams?.source === 'temperature_ladder' ||
+    alert.messageParams?.reason === 'temperature_ladder_high' ||
+    alert.messageParams?.reason === 'temperature_ladder_low');
+
 const isFiniteMetric = (value: number | null | undefined): value is number =>
   typeof value === 'number' && Number.isFinite(value);
 
@@ -417,6 +448,17 @@ const getAlertRuleVisualMeta = (alert: AlertEvent) => {
   }
 
   if (key.includes('liquidity')) {
+    if (isTemperatureLadderKillAlert(alert)) {
+      return {
+        flowTitle: '温度阶梯斩杀',
+        signalLabel: '被斩价格',
+        thresholdLabel: '触发门槛',
+        overLabel: '清空前溢价',
+        underLabel: '归零幅度',
+        caption: '按同城同日温度阶梯核对：被斩档快速归零，并由相邻温度档确认方向。',
+      };
+    }
+
     return {
       flowTitle: '盘口抽空判定',
       signalLabel: '当前深度',
@@ -492,6 +534,10 @@ const getPrecisionFocusColumn = (alert: AlertEvent | null): PrecisionFocusColumn
   }
 
   if (key.includes('liquidity')) {
+    if (isTemperatureLadderKillAlert(alert)) {
+      return 'yesPrice';
+    }
+
     if (liquiditySide === 'buy') {
       return 'bid';
     }
@@ -1119,6 +1165,167 @@ const InspectorCompareCard = ({
   </div>
 );
 
+const extractTemperatureSortValue = (value: string) => {
+  const match = value.match(/-?\d+(?:\.\d+)?/);
+  return match ? Number(match[0]) : Number.POSITIVE_INFINITY;
+};
+
+const formatPreciseMarketCentsLabel = (
+  value: number | null | undefined,
+  language: AppLanguage,
+) => {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return '--';
+  }
+
+  if (value <= 0) {
+    return language === 'zh-CN' ? '0 美分' : '0¢';
+  }
+
+  const cents = value * 100;
+  const formatted =
+    Math.abs(cents) < 1
+      ? cents.toFixed(2)
+      : Math.abs(cents) < 100
+        ? cents.toFixed(1)
+        : cents.toFixed(0);
+  const trimmed = formatted.replace(/\.0$/, '');
+  return language === 'zh-CN' ? `${trimmed} 美分` : `${trimmed}¢`;
+};
+
+const buildTemperatureKillStory = (
+  alert: AlertEvent | null,
+  selectedMarket: MarketRow | null,
+  relatedRows: MarketRow[],
+  language: AppLanguage,
+): TemperatureKillStory | null => {
+  if (!alert || !isTemperatureLadderKillAlert(alert)) {
+    return null;
+  }
+
+  const params = alert.messageParams ?? {};
+  const killedMarketId = params.anchorMarketId ?? alert.marketId;
+  const confirmationMarketId = params.confirmationMarketId ?? null;
+  const killedBand = params.anchorTemperatureBand ?? alert.marketSnapshot?.temperatureBand ?? selectedMarket?.temperatureBand ?? null;
+  const confirmationBand = params.confirmationTemperatureBand ?? null;
+  const title =
+    params.direction === 'lower' || params.reason === 'temperature_ladder_low'
+      ? '低温斩杀'
+      : '高温斩杀';
+  const directionLabel =
+    params.direction === 'lower' || params.reason === 'temperature_ladder_low'
+      ? '温度锚点下移'
+      : '温度锚点上移';
+  const previousPrice = formatPreciseMarketCentsLabel(params.previous, language);
+  const currentPrice = formatPreciseMarketCentsLabel(params.actual, language);
+  const killedBandLabel = killedBand ? formatTemperatureBandLabel(killedBand, language) : null;
+  const confirmationBandLabel = confirmationBand
+    ? formatTemperatureBandLabel(confirmationBand, language)
+    : null;
+  const priceRoute = killedBandLabel
+    ? `${killedBandLabel} YES ${previousPrice} → ${currentPrice}`
+    : `${previousPrice} → ${currentPrice}`;
+  const sortedRows = [...relatedRows].sort(
+    (left, right) =>
+      extractTemperatureSortValue(left.temperatureBand) -
+        extractTemperatureSortValue(right.temperatureBand) ||
+      left.temperatureBand.localeCompare(right.temperatureBand, language),
+  );
+  const focusedIndex = sortedRows.findIndex((row) => row.marketId === killedMarketId);
+  const sliceStart =
+    sortedRows.length <= 8
+      ? 0
+      : Math.max(0, Math.min((focusedIndex >= 0 ? focusedIndex : 0) - 3, sortedRows.length - 8));
+  const ladderRows = sortedRows.slice(sliceStart, sliceStart + 8).map((row) => {
+    const hasQuotes = hasMarketQuoteSignal(row);
+    return {
+      marketId: row.marketId,
+      band: formatTemperatureBandLabel(row.temperatureBand, language),
+      bid: formatMarketCentsLabel(row.bestBid, { compact: true, treatZeroAsUnknown: !hasQuotes }, language),
+      ask: formatMarketCentsLabel(row.bestAsk, { compact: true, treatZeroAsUnknown: !hasQuotes }, language),
+      yes: formatMarketCentsLabel(row.yesPrice, { compact: true, treatZeroAsUnknown: !hasQuotes }, language),
+      selected: row.marketId === killedMarketId,
+      confirmation: row.marketId === confirmationMarketId,
+    };
+  });
+  const windowLabel =
+    typeof params.windowSec === 'number' && Number.isFinite(params.windowSec)
+      ? `${Math.round(params.windowSec)} 秒窗口`
+      : null;
+
+  return {
+    active: true,
+    title,
+    killedBand: killedBandLabel,
+    confirmationBand: confirmationBandLabel,
+    killedMarketId,
+    confirmationMarketId,
+    priceRoute,
+    previousPrice,
+    currentPrice,
+    directionLabel,
+    windowLabel,
+    sourceLabel: '盘口阶梯确认',
+    inferenceNote: '基于市场盘口异动推断，不代表实况数据。',
+    ladderRows,
+  };
+};
+
+const TemperatureKillStoryPanel = ({
+  story,
+  onSelectMarket,
+}: {
+  story: TemperatureKillStory;
+  onSelectMarket: (marketId: string) => void;
+}) => (
+  <section className="market-temperature-kill" data-testid="market-temperature-kill-panel">
+    <div className="market-temperature-kill__head">
+      <span>{story.title}</span>
+      <strong>{story.priceRoute}</strong>
+      <p>{story.directionLabel} · {story.inferenceNote}</p>
+    </div>
+
+    <div className="market-temperature-kill__route">
+      <div className="market-temperature-kill__step is-killed">
+        <span>被斩温度档</span>
+        <strong>{story.killedBand ?? story.killedMarketId}</strong>
+        <em>{story.previousPrice} → {story.currentPrice}</em>
+      </div>
+      <div className="market-temperature-kill__step is-confirmation">
+        <span>相邻确认档</span>
+        <strong>{story.confirmationBand ?? story.confirmationMarketId ?? '--'}</strong>
+        <em>{story.sourceLabel}</em>
+      </div>
+      <div className="market-temperature-kill__step">
+        <span>判读窗口</span>
+        <strong>{story.windowLabel ?? '实时窗口'}</strong>
+        <em>同城同日阶梯</em>
+      </div>
+    </div>
+
+    {story.ladderRows.length > 0 ? (
+      <div className="market-temperature-kill__ladder" data-testid="market-temperature-kill-ladder">
+        {story.ladderRows.map((row) => (
+          <button
+            key={`temperature-kill-${row.marketId}`}
+            type="button"
+            className={cn(
+              'market-temperature-kill__ladder-row',
+              row.selected && 'is-killed',
+              row.confirmation && 'is-confirmation',
+            )}
+            onClick={() => onSelectMarket(row.marketId)}
+          >
+            <span>{row.band}</span>
+            <strong>Bid {row.bid}</strong>
+            <em>Ask {row.ask}</em>
+          </button>
+        ))}
+      </div>
+    ) : null}
+  </section>
+);
+
 export const MarketExplorerView = ({
   rows,
   total,
@@ -1193,6 +1400,44 @@ export const MarketExplorerView = ({
       })),
     [focusedAlertFacts, focusedAlertPresentation],
   );
+  const relatedCityMarkets = useMemo(() => {
+    if (!selectedMarket) {
+      return [] as MarketRow[];
+    }
+
+    return rows
+      .filter(
+        (row) =>
+          row.cityKey === selectedMarket.cityKey && row.eventDate === selectedMarket.eventDate,
+      )
+      .slice(0, 6);
+  }, [rows, selectedMarket]);
+  const relatedCityMarketCount = useMemo(() => {
+    if (!selectedMarket) {
+      return 0;
+    }
+
+    return rows.filter(
+      (row) =>
+        row.cityKey === selectedMarket.cityKey && row.eventDate === selectedMarket.eventDate,
+    ).length;
+  }, [rows, selectedMarket]);
+  const temperatureKillStory = useMemo(
+    () =>
+      buildTemperatureKillStory(
+        focusAlert,
+        selectedMarket,
+        selectedMarket
+          ? rows.filter(
+              (row) =>
+                row.cityKey === selectedMarket.cityKey &&
+                row.eventDate === selectedMarket.eventDate,
+            )
+          : [],
+        language,
+      ),
+    [focusAlert, language, rows, selectedMarket],
+  );
   const alertTriggerEvidence = useMemo<AlertTriggerEvidence | null>(() => {
     if (!focusAlert) {
       return null;
@@ -1244,7 +1489,7 @@ export const MarketExplorerView = ({
     selectedMarket,
   ]);
   const alertThresholdCompare = useMemo(() => {
-    if (!alertTriggerEvidence?.thresholdSnapshot) {
+    if (!alertTriggerEvidence?.thresholdSnapshot || temperatureKillStory) {
       return null;
     }
 
@@ -1258,7 +1503,7 @@ export const MarketExplorerView = ({
       leftShare: alertTriggerEvidence.thresholdSnapshot.share,
       emphasis: 'primary',
     } satisfies InspectorCompareCardProps;
-  }, [alertTriggerEvidence]);
+  }, [alertTriggerEvidence, temperatureKillStory]);
   const alertTriggerHighlight = useMemo<AlertTriggerHighlight | null>(() => {
     if (!alertTriggerEvidence) {
       return null;
@@ -1275,6 +1520,54 @@ export const MarketExplorerView = ({
     } = alertTriggerEvidence;
 
     if (thresholdSnapshot) {
+      if (temperatureKillStory) {
+        return {
+          headline: temperatureKillStory.title,
+          summary: `${temperatureKillStory.priceRoute ?? selectedMarketLabel}，${temperatureKillStory.confirmationBand ?? '相邻温度档'}确认。${temperatureKillStory.inferenceNote}`,
+          metrics: [
+            {
+              label: '被斩档',
+              value: temperatureKillStory.killedBand ?? temperatureKillStory.killedMarketId,
+            },
+            {
+              label: '价格路径',
+              value: temperatureKillStory.priceRoute ?? `${temperatureKillStory.previousPrice} → ${temperatureKillStory.currentPrice}`,
+            },
+            {
+              label: '确认档',
+              value: temperatureKillStory.confirmationBand ?? '--',
+            },
+          ],
+          flowTitle: '温度阶梯斩杀',
+          flowCaption: '按同城同日温度阶梯核对：被斩温度档快速归零，相邻温度档确认方向。',
+          flowSteps: [
+            {
+              label: '被斩温度档',
+              value: temperatureKillStory.killedBand ?? temperatureKillStory.killedMarketId,
+            },
+            {
+              label: '价格路径',
+              value: temperatureKillStory.priceRoute ?? '--',
+            },
+            {
+              label: '相邻确认',
+              value: temperatureKillStory.confirmationBand ?? temperatureKillStory.confirmationMarketId ?? '--',
+            },
+          ],
+          rail: {
+            title: '被斩价格路径',
+            actualLabel: '归零后',
+            actualValue: thresholdSnapshot.actualValue,
+            thresholdLabel: '触发门槛',
+            thresholdValue: thresholdSnapshot.thresholdValue,
+            deltaLabel: '清空前',
+            deltaValue: temperatureKillStory.previousPrice ?? thresholdSnapshot.deltaValue,
+            share: thresholdSnapshot.share,
+            direction: 'below',
+          },
+        };
+      }
+
       const delta = thresholdSnapshot.direction === 'touch' ? 0 : thresholdSnapshot.direction === 'above' ? 1 : -1;
       const headline =
         delta === 0 ? '刚好触及阈值' : delta > 0 ? `高出阈值 ${thresholdSnapshot.deltaValue}` : `低于阈值 ${thresholdSnapshot.deltaValue}`;
@@ -1397,6 +1690,7 @@ export const MarketExplorerView = ({
     alertTriggerEvidence,
     focusedAlertNotification,
     focusedAlertSummary,
+    temperatureKillStory,
   ]);
   const yesNoCompare = useMemo(
     () =>
@@ -1448,28 +1742,6 @@ export const MarketExplorerView = ({
         : null,
     [language, selectedMarket, selectedMarketHasQuotes],
   );
-  const relatedCityMarkets = useMemo(() => {
-    if (!selectedMarket) {
-      return [] as MarketRow[];
-    }
-
-    return rows
-      .filter(
-        (row) =>
-          row.cityKey === selectedMarket.cityKey && row.eventDate === selectedMarket.eventDate,
-      )
-      .slice(0, 6);
-  }, [rows, selectedMarket]);
-  const relatedCityMarketCount = useMemo(() => {
-    if (!selectedMarket) {
-      return 0;
-    }
-
-    return rows.filter(
-      (row) =>
-        row.cityKey === selectedMarket.cityKey && row.eventDate === selectedMarket.eventDate,
-    ).length;
-  }, [rows, selectedMarket]);
   const hiddenRelatedCityMarketCount = Math.max(
     0,
     relatedCityMarketCount - relatedCityMarkets.length,
@@ -2094,6 +2366,13 @@ export const MarketExplorerView = ({
                   <AlertFactList title="定位信息" items={focusedAlertContext} />
                 </div>
 
+                {temperatureKillStory ? (
+                  <TemperatureKillStoryPanel
+                    story={temperatureKillStory}
+                    onSelectMarket={setSelectedMarketId}
+                  />
+                ) : null}
+
                 {selectedMarket && relatedCityMarkets.length > 0 ? (
                   <section className="market-alert-related" data-testid="market-alert-related">
                     <div className="market-alert-related__head">
@@ -2620,6 +2899,13 @@ export const MarketExplorerView = ({
                       </>
                     )}
                   </section>
+                ) : null}
+
+                {temperatureKillStory ? (
+                  <TemperatureKillStoryPanel
+                    story={temperatureKillStory}
+                    onSelectMarket={setSelectedMarketId}
+                  />
                 ) : null}
 
                 {focusAlert && !isPreciseAlertContext && focusedAlertSignalCards.length > 0 ? (
