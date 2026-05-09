@@ -1,3 +1,15 @@
+export interface LiquidityKillLadderSignal {
+  direction: 'higher' | 'lower';
+  previousPrice: number;
+  currentPrice: number;
+  source: 'temperature_ladder';
+  reason: 'temperature_ladder_high' | 'temperature_ladder_low';
+  anchorMarketId: string;
+  anchorTemperatureBand: string;
+  confirmationMarketId: string;
+  confirmationTemperatureBand: string;
+}
+
 export interface MarketTickSnapshot {
   tokenId: string;
   marketId?: string;
@@ -37,6 +49,7 @@ export interface MarketTickSnapshot {
     visibleSizeAfter: number;
     source: 'price_change' | 'book' | 'fallback';
   };
+  liquidityKillSignal?: LiquidityKillLadderSignal;
   spread?: number;
   lastMessageAt?: number;
 }

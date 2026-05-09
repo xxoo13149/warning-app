@@ -30,7 +30,11 @@ import type {
   TokenRuntimeState,
 } from './polymarket/types';
 import { PolymarketDataService } from './services/polymarket-data-service';
-import { FeedStateStore, MarketStateStore } from './state/market-state';
+import {
+  FeedStateStore,
+  MarketStateStore,
+  type LiquidityKillLadderSignal,
+} from './state/market-state';
 import {
   formatAlertMessage,
   formatBuiltinRuleName,
@@ -138,6 +142,25 @@ interface LotterySignalSnapshot {
   updatedAt: string;
 }
 
+interface TemperatureBandBounds {
+  low: number;
+  high: number;
+}
+
+interface TemperatureLadderMarketState {
+  market: DbTrackedMarket;
+  tokenId: string;
+  bounds: TemperatureBandBounds;
+  yesMark: number | null;
+  bestBid: number | null;
+  bestAsk: number | null;
+  spread: number | null;
+  bidLevelCount?: number;
+  bidVisibleSize?: number;
+  lastMessageAt?: number;
+  updatedAt: number;
+}
+
 type DashboardUnackedAlertRow = Pick<
   DbAlertEventRow,
   'id' | 'ruleId' | 'builtinKey' | 'triggeredAt' | 'cityKey' | 'marketId' | 'acknowledged'
@@ -149,6 +172,8 @@ type BubbleAlertRow = Pick<
 >;
 
 const EMPTY_HEALTH: AppHealth = { ...DEFAULT_HEALTH };
+const LIQUIDITY_KILL_DEFAULT_THRESHOLD = 0.08;
+const LIQUIDITY_KILL_DEFAULT_WINDOW_SEC = 60;
 
 const UI_RULES_SEED: AlertRule[] = [
   {
@@ -209,8 +234,8 @@ const UI_RULES_SEED: AlertRule[] = [
     builtinKey: 'liquidity_kill',
     metric: 'liquidity_kill',
     operator: '>=',
-    threshold: 0.2,
-    windowSec: 30,
+    threshold: LIQUIDITY_KILL_DEFAULT_THRESHOLD,
+    windowSec: LIQUIDITY_KILL_DEFAULT_WINDOW_SEC,
     cooldownSec: 120,
     dedupeWindowSec: 60,
     bubbleWeight: 90,
@@ -490,6 +515,15 @@ const createDefaultStorageMaintenanceSummary = (): StorageMaintenanceSummary => 
 });
 
 const DISPLAY_MIDPOINT_MAX_SPREAD = 0.1;
+const LIQUIDITY_KILL_LADDER_FRESH_MS = 30 * 1000;
+const LIQUIDITY_KILL_LADDER_CONFIRM_WINDOW_MS = 60 * 1000;
+const LIQUIDITY_KILL_LADDER_DEAD_PRICE = 0.02;
+const LIQUIDITY_KILL_LADDER_MAX_TRADE_PRICE = 0.03;
+const LIQUIDITY_KILL_LADDER_MIN_DROP = 0.05;
+const LIQUIDITY_KILL_LADDER_MIN_PREVIOUS_PRICE = 0.08;
+const LIQUIDITY_KILL_LADDER_STRONG_NEIGHBOR_PRICE = 0.5;
+const LIQUIDITY_KILL_LADDER_NEIGHBOR_LIFT = 0.03;
+const LIQUIDITY_KILL_LADDER_MAX_SPREAD = 0.1;
 
 const normalizeOptionalNumber = (
   value: number | null | undefined,
@@ -733,6 +767,36 @@ const compareMarketLifecycle = (left: MarketRow, right: MarketRow, today: string
   }
   return 0;
 };
+
+function parseTemperatureBandBounds(value: string): TemperatureBandBounds | null {
+  const normalized = value
+    .replace(/−/g, '-')
+    .replace(/º/g, '°')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const numbers = Array.from(normalized.matchAll(/-?\d+(?:\.\d+)?/g), (match) => Number(match[0]))
+    .filter((number) => Number.isFinite(number));
+  if (numbers.length === 0) {
+    return null;
+  }
+
+  if (/or\s+higher|or\s+more|above|more than|\+$/i.test(normalized)) {
+    return { low: numbers[0], high: Number.POSITIVE_INFINITY };
+  }
+  if (/or\s+lower|or\s+less|below|less than/i.test(normalized)) {
+    return { low: Number.NEGATIVE_INFINITY, high: numbers[0] };
+  }
+  if (numbers.length >= 2) {
+    return {
+      low: Math.min(numbers[0], numbers[1]),
+      high: Math.max(numbers[0], numbers[1]),
+    };
+  }
+  return {
+    low: numbers[0],
+    high: numbers[0],
+  };
+}
 
 export class WorkerRuntime {
   private readonly port: MessagePort;
@@ -1503,6 +1567,7 @@ export class WorkerRuntime {
       askVisibleSize: tokenState.askVisibleSize,
       removedBidEdge: tokenState.removedBidEdge,
       removedAskEdge: tokenState.removedAskEdge,
+      liquidityKillSignal: this.resolveTemperatureLiquidityKillSignal(meta, tokenState),
       spread: tokenState.spread,
       lastMessageAt: timestamp,
     };
@@ -2418,6 +2483,215 @@ export class WorkerRuntime {
       effectiveNotional: signal.effectiveNotional,
       updatedAt: signal.updatedAt,
     };
+  }
+
+  private resolveTemperatureLiquidityKillSignal(
+    meta: TokenMeta,
+    tokenState: TokenRuntimeState,
+  ): LiquidityKillLadderSignal | undefined {
+    if (meta.side !== 'yes') {
+      return undefined;
+    }
+
+    const nowMs = tokenState.updatedAt;
+    const historicalPreviousPrice = this.resolveMeaningfulPreviousYesPrice(tokenState.tokenId, nowMs);
+    const edgePreviousPrice = normalizeOptionalNumber(tokenState.removedBidEdge?.previousPrice) ?? null;
+    const previousPrice =
+      historicalPreviousPrice !== null && edgePreviousPrice !== null
+        ? Math.max(historicalPreviousPrice, edgePreviousPrice)
+        : historicalPreviousPrice ?? edgePreviousPrice;
+    if (previousPrice === null || previousPrice < LIQUIDITY_KILL_LADDER_MIN_PREVIOUS_PRICE) {
+      return undefined;
+    }
+
+    const currentPrice = resolveDisplayPrice(
+      tokenState.lastTradePrice ?? null,
+      tokenState.bestBid ?? null,
+      tokenState.bestAsk ?? null,
+    );
+    const currentBid = normalizeOptionalNumber(tokenState.bestBid) ?? 0;
+    const currentTrade = normalizeOptionalNumber(tokenState.lastTradePrice);
+    const effectiveCurrent = Math.max(
+      currentBid,
+      currentTrade !== undefined ? currentTrade : 0,
+      currentPrice ?? 0,
+    );
+    if (
+      currentBid > LIQUIDITY_KILL_LADDER_DEAD_PRICE ||
+      (currentTrade !== undefined && currentTrade > LIQUIDITY_KILL_LADDER_MAX_TRADE_PRICE) ||
+      previousPrice - effectiveCurrent < LIQUIDITY_KILL_LADDER_MIN_DROP
+    ) {
+      return undefined;
+    }
+
+    const bidDepthKilled =
+      tokenState.removedBidEdge?.levelCountAfter === 0 ||
+      tokenState.bidLevelCount === 0 ||
+      (tokenState.removedBidEdge?.previousSize !== null &&
+        tokenState.removedBidEdge?.previousSize !== undefined &&
+        tokenState.bidVisibleSize !== undefined &&
+        tokenState.bidVisibleSize <= tokenState.removedBidEdge.previousSize * 0.2);
+    if (!bidDepthKilled) {
+      return undefined;
+    }
+
+    const ladder = this.buildTemperatureLadderStates(meta.cityKey, meta.eventDate, nowMs);
+    const currentIndex = ladder.findIndex((item) => item.market.marketId === meta.marketId);
+    if (currentIndex < 0) {
+      return undefined;
+    }
+
+    const current = ladder[currentIndex];
+    const higherConfirmation = this.findHigherTemperatureConfirmation(ladder, currentIndex, nowMs);
+    const lowerConfirmation = this.findLowerTemperatureConfirmation(ladder, currentIndex, nowMs);
+    const isLowerBoundKilled =
+      currentIndex < ladder.length - 1 && Boolean(higherConfirmation);
+    const isUpperBoundKilled =
+      currentIndex > 0 && Boolean(lowerConfirmation);
+
+    const direction = isLowerBoundKilled ? 'higher' : isUpperBoundKilled ? 'lower' : null;
+    const confirmation = isLowerBoundKilled ? higherConfirmation : lowerConfirmation;
+    if (!direction || !confirmation) {
+      return undefined;
+    }
+
+    return {
+      direction,
+      previousPrice,
+      currentPrice: Math.min(effectiveCurrent, LIQUIDITY_KILL_LADDER_DEAD_PRICE),
+      source: 'temperature_ladder' as const,
+      reason:
+        direction === 'higher'
+          ? ('temperature_ladder_high' as const)
+          : ('temperature_ladder_low' as const),
+      anchorMarketId: current.market.marketId,
+      anchorTemperatureBand: current.market.groupItemTitle,
+      confirmationMarketId: confirmation.market.marketId,
+      confirmationTemperatureBand: confirmation.market.groupItemTitle,
+    };
+  }
+
+  private resolveMeaningfulPreviousYesPrice(tokenId: string, nowMs: number): number | null {
+    const history = this.marketState
+      .getHistory(tokenId, LIQUIDITY_KILL_LADDER_CONFIRM_WINDOW_MS, nowMs)
+      .filter((entry) => entry.timestamp < nowMs);
+    let best: number | null = null;
+
+    for (const entry of history) {
+      const mark = resolveDisplayPrice(
+        entry.lastTradePrice ?? null,
+        entry.bestBid ?? null,
+        entry.bestAsk ?? null,
+      );
+      if (mark !== null && Number.isFinite(mark)) {
+        best = Math.max(best ?? mark, mark);
+      }
+      if (entry.removedBidEdge?.previousPrice !== undefined) {
+        best = Math.max(best ?? entry.removedBidEdge.previousPrice, entry.removedBidEdge.previousPrice);
+      }
+    }
+
+    return best;
+  }
+
+  private buildTemperatureLadderStates(
+    cityKey: string,
+    eventDate: string,
+    nowMs: number,
+  ): TemperatureLadderMarketState[] {
+    return Array.from(this.trackedMarketById.values())
+      .filter((market) => market.cityKey === cityKey && market.eventDate === eventDate)
+      .map((market): TemperatureLadderMarketState | null => {
+        const bounds = parseTemperatureBandBounds(market.groupItemTitle);
+        if (!bounds) {
+          return null;
+        }
+        const latest = this.marketState.getLatest(market.tokenYesId);
+        const state = this.latestTokenStateById.get(market.tokenYesId);
+        const bestBid = latest?.bestBid ?? state?.bestBid ?? null;
+        const bestAsk = latest?.bestAsk ?? state?.bestAsk ?? null;
+        const spread =
+          latest?.spread ??
+          state?.spread ??
+          resolveSpread(bestBid, bestAsk);
+        const yesMark = resolveDisplayPrice(
+          latest?.lastTradePrice ?? state?.lastTradePrice ?? null,
+          bestBid,
+          bestAsk,
+        );
+        const updatedAt = latest?.timestamp ?? state?.updatedAt ?? market.updatedAt;
+        const lastMessageAt = latest?.lastMessageAt ?? state?.lastMessageAt ?? updatedAt;
+        if (nowMs - lastMessageAt > LIQUIDITY_KILL_LADDER_FRESH_MS) {
+          return null;
+        }
+        return {
+          market,
+          tokenId: market.tokenYesId,
+          bounds,
+          yesMark,
+          bestBid,
+          bestAsk,
+          spread,
+          bidLevelCount: latest?.bidLevelCount,
+          bidVisibleSize: latest?.bidVisibleSize,
+          lastMessageAt,
+          updatedAt,
+        };
+      })
+      .filter((item): item is TemperatureLadderMarketState => Boolean(item))
+      .sort((left, right) => left.bounds.low - right.bounds.low);
+  }
+
+  private findHigherTemperatureConfirmation(
+    ladder: TemperatureLadderMarketState[],
+    currentIndex: number,
+    nowMs: number,
+  ): TemperatureLadderMarketState | null {
+    for (const candidate of ladder.slice(currentIndex + 1, currentIndex + 4)) {
+      if (this.isTemperatureLadderConfirmation(candidate, nowMs)) {
+        return candidate;
+      }
+    }
+    return null;
+  }
+
+  private findLowerTemperatureConfirmation(
+    ladder: TemperatureLadderMarketState[],
+    currentIndex: number,
+    nowMs: number,
+  ): TemperatureLadderMarketState | null {
+    const lower = ladder.slice(Math.max(0, currentIndex - 3), currentIndex).reverse();
+    for (const candidate of lower) {
+      if (this.isTemperatureLadderConfirmation(candidate, nowMs)) {
+        return candidate;
+      }
+    }
+    return null;
+  }
+
+  private isTemperatureLadderConfirmation(
+    candidate: TemperatureLadderMarketState,
+    nowMs: number,
+  ): boolean {
+    if (
+      candidate.spread !== null &&
+      candidate.spread > LIQUIDITY_KILL_LADDER_MAX_SPREAD
+    ) {
+      return false;
+    }
+
+    if (
+      candidate.yesMark !== null &&
+      candidate.yesMark >= LIQUIDITY_KILL_LADDER_STRONG_NEIGHBOR_PRICE
+    ) {
+      return true;
+    }
+
+    const previous = this.resolveMeaningfulPreviousYesPrice(candidate.tokenId, nowMs);
+    if (previous === null || candidate.yesMark === null) {
+      return false;
+    }
+    return candidate.yesMark - previous >= LIQUIDITY_KILL_LADDER_NEIGHBOR_LIFT;
   }
 
   private buildMarketRow(
@@ -3389,13 +3663,17 @@ function harmonizeBuiltinRuleDefaults(rule: EngineAlertRule): EngineAlertRule {
   }
 
   const looksLegacyDefault =
-    (rule.operator === '<=' || rule.operator === '<') &&
     Math.abs(rule.threshold - 0.01) < Number.EPSILON &&
     rule.windowSec === 60 &&
     rule.cooldownSec === 180 &&
     rule.dedupeWindowSec === 90;
+  const looksOrderbookDefault =
+    Math.abs(rule.threshold - 0.2) < Number.EPSILON &&
+    rule.windowSec === 30 &&
+    rule.cooldownSec === 120 &&
+    rule.dedupeWindowSec === 60;
 
-  if (!looksLegacyDefault) {
+  if (!looksLegacyDefault && !looksOrderbookDefault) {
     return {
       ...rule,
       liquiditySide: normalizeLiquiditySide(rule.liquiditySide) ?? 'both',
@@ -3406,8 +3684,8 @@ function harmonizeBuiltinRuleDefaults(rule: EngineAlertRule): EngineAlertRule {
     ...rule,
     name: formatBuiltinRuleName('liquidity_kill', 'zh-CN') ?? rule.name,
     operator: '>=',
-    threshold: 0.2,
-    windowSec: 30,
+    threshold: LIQUIDITY_KILL_DEFAULT_THRESHOLD,
+    windowSec: LIQUIDITY_KILL_DEFAULT_WINDOW_SEC,
     cooldownSec: 120,
     dedupeWindowSec: 60,
     liquiditySide: 'both',

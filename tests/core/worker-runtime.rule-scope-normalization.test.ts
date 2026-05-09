@@ -299,4 +299,39 @@ describe('worker runtime rule scope normalization', () => {
     expect(runtime.uiRules[0]?.windowSec).toBe(ABNORMAL_LOTTERY_DEFAULT_WINDOW_MS / 1000);
     expect(runtime.uiRules[0]?.operator).toBe('>=');
   });
+
+  it('self-heals legacy builtin liquidity kill defaults to the ladder threshold', () => {
+    const runtime = createRuntime();
+
+    runtime.repository.upsertAlertRules([
+      {
+        id: 'liquidity-kill',
+        name: 'Legacy liquidity kill',
+        isBuiltin: true,
+        builtinKey: 'liquidity_kill',
+        enabled: true,
+        metric: 'liquidity_kill',
+        operator: '<=',
+        threshold: 0.01,
+        windowSec: 60,
+        cooldownSec: 180,
+        dedupeWindowSec: 90,
+        bubbleWeight: 90,
+        severity: 'critical',
+        soundProfileId: undefined,
+        liquiditySide: undefined,
+        scope: {},
+      },
+    ]);
+
+    runtime.refreshRulesSync();
+
+    expect(runtime.uiRules[0]?.metric).toBe('liquidity_kill');
+    expect(runtime.uiRules[0]?.operator).toBe('>=');
+    expect(runtime.uiRules[0]?.threshold).toBe(0.08);
+    expect(runtime.uiRules[0]?.windowSec).toBe(60);
+    expect(runtime.uiRules[0]?.cooldownSec).toBe(120);
+    expect(runtime.uiRules[0]?.dedupeWindowSec).toBe(60);
+    expect(runtime.uiRules[0]?.liquiditySide).toBe('both');
+  });
 });

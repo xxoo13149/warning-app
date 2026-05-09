@@ -83,6 +83,8 @@ type RuntimeUnderTest = {
   engineRules: EngineAlertRule[];
   latestTokenStateById: Map<string, Record<string, unknown>>;
   tokenMetaById: Map<string, Record<string, unknown>>;
+  trackedMarketById: Map<string, Record<string, unknown>>;
+  cityByKey: Map<string, Record<string, unknown>>;
   alertEngine: {
     evaluateMarketTick: (...args: unknown[]) => unknown[];
   };
@@ -379,5 +381,136 @@ describe('worker runtime startup rule check', () => {
 
     expect(recordTick).toHaveBeenCalledTimes(1);
     expect(evaluateMarketTick).toHaveBeenCalledTimes(1);
+  });
+
+  it('adds a temperature ladder kill signal after adjacent higher bands confirm the move', async () => {
+    const runtime = createRuntime();
+    const now = Date.UTC(2026, 4, 9, 13, 32, 0);
+    const evaluateMarketTick = vi
+      .spyOn(runtime.alertEngine, 'evaluateMarketTick')
+      .mockReturnValue([]);
+
+    runtime.cityByKey = new Map([
+      ['warsaw', { cityKey: 'warsaw', displayName: 'Warsaw', airportCode: 'EPWA' }],
+    ]);
+    runtime.trackedMarketById = new Map([
+      [
+        'warsaw-13c',
+        {
+          marketId: 'warsaw-13c',
+          eventId: 'event-warsaw',
+          cityKey: 'warsaw',
+          seriesSlug: 'warsaw-weather',
+          eventDate: '2026-05-09',
+          groupItemTitle: '13°C',
+          tokenYesId: 'warsaw-13c-yes',
+          tokenNoId: 'warsaw-13c-no',
+          active: true,
+          closed: false,
+          pinned: false,
+          updatedAt: now - 60_000,
+        },
+      ],
+      [
+        'warsaw-14c',
+        {
+          marketId: 'warsaw-14c',
+          eventId: 'event-warsaw',
+          cityKey: 'warsaw',
+          seriesSlug: 'warsaw-weather',
+          eventDate: '2026-05-09',
+          groupItemTitle: '14°C',
+          tokenYesId: 'warsaw-14c-yes',
+          tokenNoId: 'warsaw-14c-no',
+          active: true,
+          closed: false,
+          pinned: false,
+          updatedAt: now - 60_000,
+        },
+      ],
+    ]);
+    runtime.tokenMetaById = new Map([
+      [
+        'warsaw-13c-yes',
+        {
+          marketId: 'warsaw-13c',
+          cityKey: 'warsaw',
+          eventId: 'event-warsaw',
+          eventDate: '2026-05-09',
+          temperatureBand: '13°C',
+          seriesSlug: 'warsaw-weather',
+          side: 'yes',
+        },
+      ],
+      [
+        'warsaw-14c-yes',
+        {
+          marketId: 'warsaw-14c',
+          cityKey: 'warsaw',
+          eventId: 'event-warsaw',
+          eventDate: '2026-05-09',
+          temperatureBand: '14°C',
+          seriesSlug: 'warsaw-weather',
+          side: 'yes',
+        },
+      ],
+    ]);
+    runtime.latestTokenStateById = new Map([
+      [
+        'warsaw-14c-yes',
+        {
+          tokenId: 'warsaw-14c-yes',
+          marketId: 'warsaw-14c',
+          side: 'yes',
+          lastTradePrice: 0.68,
+          bestBid: 0.66,
+          bestAsk: 0.7,
+          spread: 0.04,
+          lastMessageAt: now,
+          updatedAt: now,
+        },
+      ],
+    ]);
+
+    await runtime.handleTokenState({
+      tokenId: 'warsaw-13c-yes',
+      lastTradePrice: 0.102,
+      bestBid: 0.1,
+      bestAsk: 0.12,
+      spread: 0.02,
+      bidLevelCount: 1,
+      updatedAt: now - 20_000,
+      lastEventType: 'best_bid_ask',
+    });
+    await runtime.handleTokenState({
+      tokenId: 'warsaw-13c-yes',
+      bestBid: 0,
+      bidLevelCount: 0,
+      bidVisibleSize: 0,
+      removedBidEdge: {
+        previousPrice: 0.102,
+        previousSize: 40,
+        currentPrice: null,
+        currentSize: 0,
+        levelCountAfter: 0,
+        visibleSizeAfter: 0,
+        source: 'book',
+      },
+      updatedAt: now,
+      lastEventType: 'price_change',
+    });
+
+    expect(evaluateMarketTick).toHaveBeenCalledTimes(1);
+    const input = evaluateMarketTick.mock.calls[0]?.[1] as {
+      liquidityKillSignal?: Record<string, unknown>;
+    };
+    expect(input.liquidityKillSignal).toMatchObject({
+      direction: 'higher',
+      previousPrice: 0.102,
+      currentPrice: 0,
+      source: 'temperature_ladder',
+      reason: 'temperature_ladder_high',
+      confirmationMarketId: 'warsaw-14c',
+    });
   });
 });

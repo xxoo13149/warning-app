@@ -172,7 +172,7 @@ describe('worker runtime market history window', () => {
         id: 'active-short-window',
         metric: 'liquidity_kill',
         operator: '>=',
-        threshold: 0.2,
+        threshold: 0.08,
         windowSec: 60,
         enabled: true,
       }),

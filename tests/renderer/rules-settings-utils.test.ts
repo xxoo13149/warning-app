@@ -61,7 +61,7 @@ describe('rules settings severity unification', () => {
     expect(filtered).toHaveLength(2);
   });
 
-  it('normalizes liquidity rules to the new wipeout defaults', () => {
+  it('normalizes liquidity rules to the temperature ladder kill wording', () => {
     const normalized = normalizeRuleDraft(
       createRule({
         id: 'rule-liquidity',
@@ -72,7 +72,7 @@ describe('rules settings severity unification', () => {
 
     expect(normalized.operator).toBe('>=');
     expect(normalized.liquiditySide).toBe('both');
-    expect(buildRuleConditionSummary(normalized)).toContain('现价盘口');
+    expect(buildRuleConditionSummary(normalized)).toContain('温度阶梯斩杀');
   });
 
   it('normalizes volume pricing as a simple event rule', () => {

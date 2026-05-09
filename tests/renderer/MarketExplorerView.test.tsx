@@ -656,7 +656,7 @@ describe('MarketExplorerView', () => {
         messageParams: {
           actual: 0,
           previous: 0.43,
-          threshold: 0.2,
+          threshold: 0.08,
           operator: '>=',
           side: 'sell',
           outcome: 'yes',
@@ -672,7 +672,7 @@ describe('MarketExplorerView', () => {
         messageParams: {
           actual: 0,
           previous: 0.41,
-          threshold: 0.2,
+          threshold: 0.08,
           operator: '>=',
           side: 'buy',
           outcome: 'yes',

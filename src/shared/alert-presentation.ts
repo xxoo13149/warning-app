@@ -414,6 +414,9 @@ const getLiquidityCauseText = (alert: AlertPresentationSource) => {
     case 'fallback':
       notes.push('来源待确认');
       break;
+    case 'temperature_ladder':
+      notes.push('温度阶梯确认');
+      break;
     default:
       break;
   }
@@ -424,6 +427,12 @@ const getLiquidityCauseText = (alert: AlertPresentationSource) => {
       break;
     case 'top_level':
       notes.push('仅顶档被清空，未整边清空');
+      break;
+    case 'temperature_ladder_high':
+      notes.push('高温锚点上移，较低温度档 YES 被判死');
+      break;
+    case 'temperature_ladder_low':
+      notes.push('低温锚点下移，较高温度档 YES 被判死');
       break;
     default:
       break;

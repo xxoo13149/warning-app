@@ -499,7 +499,7 @@ const getRuleMetricPlainText = (metric: AlertRule['metric']) => {
     case 'spread':
       return '监控买一和卖一之间的价差是否过宽。';
     case 'liquidity_kill':
-      return '监控短窗口内买盘或卖盘该侧现价盘口是否被清空，这是一个事件型规则，不是静态价格阈值。';
+      return '监控同一城市日期的温度阶梯里，某个温度档 YES 被快速打到近零，并由相邻温度档走强确认。';
     case 'volume_pricing':
       return '监控卖一是否在短窗口内被明显推高，并且有成交或盘口量确认。';
     case 'abnormal_lottery':
@@ -522,7 +522,7 @@ const getRuleThresholdHint = (metric: AlertRule['metric']) => {
     case 'price':
       return '按 0 到 1 的价格填写，例如 0.5 表示 50 美分。';
     case 'liquidity_kill':
-      return '填写“该侧现价盘口被清空前的最低价位”，例如 0.2 表示只有清空 20 美分及以上的现价盘口才提醒。';
+      return '填写“被斩前的最低 YES 价位”，例如 0.08 表示该温度档此前至少约 8 美分，并在相邻温度档确认后归零才提醒。';
     case 'volume_pricing':
       return '填写“卖一被推高的最小幅度”，例如 0.1 表示至少推高 10 美分才提醒。';
     case 'abnormal_lottery':
@@ -640,22 +640,22 @@ const buildRuleTriggerGuide = (rule: AlertRule): RuleTriggerGuide => {
         {
           label: '监控指标',
           value: formatRuleMetricLabel(rule.metric),
-          hint: '新版盘口斩杀看的是“买盘/卖盘该侧现价盘口被清空”这个事件，不是当前价格还剩多少。',
+          hint: '新版盘口斩杀看的是“温度阶梯锚点迁移后，旧温度档 YES 被判死并归零”这个事件，不是任意单个盘口缺一档。',
         },
         {
-          label: '监控盘口',
+          label: '兜底盘口',
           value: formatLiquiditySideLabel(rule.liquiditySide),
-          hint: '买盘=买一侧现价盘口，卖盘=卖一侧现价盘口；如果选买卖两边，只要任意一侧现价盘口被清空就会判断。',
+          hint: '主路径按 YES 温度阶梯判断；该项只控制没有阶梯确认时的传统买盘/卖盘整边清空兜底。',
         },
         {
-          label: '最低清空前价位',
+          label: '最低被斩前价位',
           value: formatRuleValue(rule, rule.threshold),
           hint: getRuleThresholdHint(rule.metric),
         },
         {
           label: '观察窗口',
           value: formatRuleDuration(rule.windowSec),
-          hint: `后台会在 ${formatRuleDuration(rule.windowSec)} 的窗口里看是否发生该侧现价盘口被清空，再叠加冷却和去重控制重复提醒。`,
+          hint: `后台会在 ${formatRuleDuration(rule.windowSec)} 的窗口里寻找“候选温度档归零 + 相邻温度档确认”的组合，再叠加冷却和去重控制重复提醒。`,
         },
       ],
     };
@@ -779,7 +779,7 @@ const buildRuleListSignal = (
         statusText: '已启用',
         coverageText: '0 个盘口',
         hitText: '按事件判断',
-        hint: '当前还没有可评估的盘口数据，后台暂时抓不到该侧现价盘口被清空的事件。',
+        hint: '当前还没有可评估的盘口数据，后台暂时抓不到温度阶梯斩杀事件。',
       };
     }
 
@@ -788,7 +788,7 @@ const buildRuleListSignal = (
       statusText: '已启用',
       coverageText: `${scopedRows.length} 个盘口`,
       hitText: '事件型规则',
-      hint: `监控 ${formatLiquiditySideLabel(rule.liquiditySide)} 的现价盘口是否会在 ${formatRuleDuration(rule.windowSec)} 内被清空；当前买一卖一只用来辅助预览。`,
+      hint: `监控同城同日期温度阶梯里，YES 从 ${formatRuleValue(rule, rule.threshold)} 以上快速归零，并由相邻温度档走强确认；传统整边清空仅作兜底。`,
     };
   }
 
@@ -2209,9 +2209,9 @@ export const RulesSettingsView = ({
                             {selectedRule.metric !== 'liquidity_kill' ? null : (
                               <label className="field">
                                 <span>判断方式</span>
-                                <input value="不低于最低清空前价位" disabled />
+                                <input value="温度阶梯归零 + 相邻档确认" disabled />
                                 <small className="rule-field-hint">
-                                  新版盘口斩杀固定按“该侧现价盘口被清空前的价位是否达到最低门槛”判断。
+                                  新版盘口斩杀优先判断“旧温度档 YES 快速归零，且相邻温度档走强”；没有阶梯确认时才使用传统整边清空兜底。
                                 </small>
                               </label>
                             )}

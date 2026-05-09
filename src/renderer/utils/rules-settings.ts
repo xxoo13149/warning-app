@@ -158,6 +158,8 @@ export const DEFAULT_RULE_DRAFT_SORT: RuleDraftSortOptions = {
 const UNIFIED_RULE_SEVERITY: AlertRule['severity'] = 'warning';
 const UNIFIED_RULE_SEVERITY_KEY = 'alert';
 const UNIFIED_RULE_SEVERITY_LABEL = '告警';
+const LIQUIDITY_KILL_DEFAULT_THRESHOLD = 0.08;
+const LIQUIDITY_KILL_DEFAULT_WINDOW_SEC = 60;
 
 const RULE_SCOPE_EMPTY_LABEL = '未限定范围，监控全部市场';
 const RULE_SCOPE_GLOBAL_QUIET_HOURS_LABEL = '使用全局静音时段';
@@ -363,8 +365,8 @@ const BUILTIN_RULE_DEFAULTS: Omit<AlertRule, 'soundProfileId'>[] = [
     builtinKey: 'liquidity_kill',
     metric: 'liquidity_kill',
     operator: '>=',
-    threshold: 0.2,
-    windowSec: 30,
+    threshold: LIQUIDITY_KILL_DEFAULT_THRESHOLD,
+    windowSec: LIQUIDITY_KILL_DEFAULT_WINDOW_SEC,
     cooldownSec: 120,
     dedupeWindowSec: 60,
     bubbleWeight: 90,
@@ -662,7 +664,7 @@ export const buildRuleConditionSummary = (rule: AlertRule) => {
     case 'spread':
       return `买卖价差${operatorLabel}${thresholdLabel}时提醒`;
     case 'liquidity_kill':
-      return `${formatLiquiditySideLabel(rule.liquiditySide)}现价盘口整边被清空，且清空前价位${operatorLabel}${thresholdLabel}时提醒`;
+      return `温度阶梯斩杀确认，且被斩前价位${operatorLabel}${thresholdLabel}时提醒`;
     case 'volume_pricing':
       return `卖一在${formatRuleDuration(rule.windowSec)}内带量推高${operatorLabel}${thresholdLabel}时提醒`;
     case 'abnormal_lottery':

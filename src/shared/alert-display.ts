@@ -376,6 +376,8 @@ const formatLiquiditySource = (
       return locale === 'zh-CN' ? '疑似撤单抽走' : 'likely cancel pull';
     case 'fallback':
       return locale === 'zh-CN' ? '来源待确认' : 'source unconfirmed';
+    case 'temperature_ladder':
+      return locale === 'zh-CN' ? '温度阶梯确认' : 'temperature ladder confirmed';
     default:
       return locale === 'zh-CN' ? '原因待确认' : 'cause unconfirmed';
   }
@@ -410,6 +412,14 @@ const formatLiquidityReason = (
       return locale === 'zh-CN'
         ? '仅顶档被清空，未达到整边清空'
         : 'only the top level was cleared; the full side was not emptied';
+    case 'temperature_ladder_high':
+      return locale === 'zh-CN'
+        ? '高温锚点上移，较低温度档 YES 被判死'
+        : 'higher-temperature anchor moved up; lower YES band was killed';
+    case 'temperature_ladder_low':
+      return locale === 'zh-CN'
+        ? '低温锚点下移，较高温度档 YES 被判死'
+        : 'lower-temperature anchor moved down; higher YES band was killed';
     default:
       return '';
   }

@@ -378,6 +378,109 @@ describe('alert engine for market ticks', () => {
     });
   });
 
+  it('triggers liquidity kill for a temperature ladder kill signal', () => {
+    const engine = new AlertEngine(new MarketStateStore());
+    const t0 = Date.UTC(2026, 4, 9, 13, 32, 0);
+    const rule: AlertRule = {
+      id: 'rule-temperature-kill',
+      name: '盘口斩杀',
+      enabled: true,
+      metric: 'liquidity_kill',
+      operator: '>=',
+      threshold: 0.08,
+      windowSec: 60,
+      cooldownSec: 0,
+      dedupeWindowSec: 0,
+      severity: 'critical',
+      liquiditySide: 'buy',
+    };
+
+    const result = engine.evaluateMarketTick(
+      [rule],
+      {
+        tokenId: 'warsaw-13c-yes',
+        marketId: 'warsaw-13c',
+        cityKey: 'warsaw',
+        eventDate: '2026-05-09',
+        temperatureBand: '13°C',
+        side: 'yes',
+        timestamp: t0,
+        bestBid: 0,
+        bidLevelCount: 0,
+        liquidityKillSignal: {
+          direction: 'higher',
+          previousPrice: 0.102,
+          currentPrice: 0,
+          source: 'temperature_ladder',
+          reason: 'temperature_ladder_high',
+          anchorMarketId: 'warsaw-13c',
+          anchorTemperatureBand: '13°C',
+          confirmationMarketId: 'warsaw-14c',
+          confirmationTemperatureBand: '14°C',
+        },
+      },
+      t0,
+    );
+
+    expect(result).toHaveLength(1);
+    expect(result[0].messageKey).toBe('liquidity_kill');
+    expect(result[0].messageParams).toMatchObject({
+      outcome: 'yes',
+      side: 'buy',
+      source: 'temperature_ladder',
+      reason: 'temperature_ladder_high',
+      previous: 0.102,
+      actual: 0,
+    });
+  });
+
+  it('does not trigger generic low-price liquidity kill below the meaningful price floor', () => {
+    const engine = new AlertEngine(new MarketStateStore());
+    const t0 = Date.UTC(2026, 4, 9, 13, 33, 0);
+    const rule: AlertRule = {
+      id: 'rule-low-dust-kill',
+      name: '盘口斩杀',
+      enabled: true,
+      metric: 'liquidity_kill',
+      operator: '>=',
+      threshold: 0.08,
+      windowSec: 60,
+      cooldownSec: 0,
+      dedupeWindowSec: 0,
+      severity: 'critical',
+      liquiditySide: 'buy',
+    };
+
+    engine.evaluateMarketTick(
+      [],
+      {
+        tokenId: 'dust-token',
+        marketId: 'dust-market',
+        cityKey: 'warsaw',
+        timestamp: t0,
+        side: 'yes',
+        bestBid: 0.08,
+        bidLevelCount: 1,
+      },
+      t0,
+    );
+
+    const result = engine.evaluateMarketTick(
+      [rule],
+      {
+        tokenId: 'dust-token',
+        marketId: 'dust-market',
+        cityKey: 'warsaw',
+        timestamp: t0 + 15_000,
+        side: 'yes',
+        bidLevelCount: 0,
+      },
+      t0 + 15_000,
+    );
+
+    expect(result).toHaveLength(0);
+  });
+
   it('triggers volume pricing when best ask is lifted with depth confirmation', () => {
     const engine = new AlertEngine(new MarketStateStore());
     const t0 = Date.UTC(2026, 0, 1, 0, 3, 0);

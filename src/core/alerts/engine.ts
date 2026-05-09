@@ -35,6 +35,7 @@ const VOLUME_PRICING_MAX_SPREAD = 0.1;
 const VOLUME_PRICING_PRICE_FLOOR = 0.03;
 const VOLUME_PRICING_PRICE_CEILING = 0.97;
 const VOLUME_PRICING_TRADE_PRICE_TOLERANCE = 0.02;
+const LEGACY_LIQUIDITY_KILL_MIN_PRICE = 0.2;
 
 export class AlertEngine {
   private readonly ruleCooldownByKey = new Map<string, number>();
@@ -162,7 +163,7 @@ export class AlertEngine {
       case 'price_change_pct':
         return this.evaluatePriceChange(rule, current, nowMs);
       case 'liquidity_kill':
-        return this.evaluateLiquidityKillV2(rule, current, nowMs);
+        return this.evaluateLiquidityKill(rule, current, nowMs);
       case 'volume_pricing':
         return this.evaluateVolumePricing(rule, current, nowMs);
       case 'abnormal_lottery':
@@ -196,86 +197,31 @@ export class AlertEngine {
     };
   }
 
-  private evaluateLiquidityKill(rule: AlertRule, current: MarketEvaluationInput, nowMs: number): NumericEvaluation {
-    const windowMs = rule.windowSec * 1000;
-    const history = this.stateStore.getHistory(current.tokenId, windowMs, nowMs);
-    const priorHistory = history.filter((entry) => entry.timestamp < nowMs);
-    const threshold = rule.threshold;
-
-    const bidSnapshot = findLastHistoryEntry(priorHistory, 'bestBid', (value) => value > threshold + EPSILON);
-    const askSnapshot = findLastHistoryEntry(priorHistory, 'bestAsk', (value) => value > threshold + EPSILON);
-
-    const currentBid = normalizeFiniteNumber(current.bestBid);
-    const currentAsk = normalizeFiniteNumber(current.bestAsk);
-
-    // Missing bid/ask is treated as liquidity disappearing, same as collapsing to 0.
-    const bidProbeValue = currentBid ?? 0;
-    const askProbeValue = currentAsk ?? 0;
-
-    const dropBid = bidProbeValue <= threshold + EPSILON && Boolean(bidSnapshot);
-    const dropAsk = askProbeValue <= threshold + EPSILON && Boolean(askSnapshot);
-
-    if (!dropBid && !dropAsk) {
-      return { triggered: false };
-    }
-
-    const evaluateSide = (
-      side: 'buy' | 'sell',
-      currentValue: number | undefined,
-      previousValue: number | undefined,
-    ): NumericEvaluation | null => {
-      if (currentValue === undefined || !Number.isFinite(currentValue) || previousValue === undefined) {
-        return null;
-      }
-      const comparison = compareWithOperator(currentValue, rule.operator, threshold, previousValue);
-      if (!comparison.triggered) {
-        return null;
-      }
-      return {
-        triggered: true,
-        actual: currentValue,
-        previous: previousValue,
-        side,
-      };
-    };
-
-    const candidates: NumericEvaluation[] = [];
-    if (dropBid && bidSnapshot?.bestBid !== undefined && Number.isFinite(bidSnapshot.bestBid)) {
-      const bidEval = evaluateSide('buy', bidProbeValue, bidSnapshot.bestBid);
-      if (bidEval) {
-        candidates.push(bidEval);
-      }
-    }
-    if (dropAsk && askSnapshot?.bestAsk !== undefined && Number.isFinite(askSnapshot.bestAsk)) {
-      const askEval = evaluateSide('sell', askProbeValue, askSnapshot.bestAsk);
-      if (askEval) {
-        candidates.push(askEval);
-      }
-    }
-
-    if (candidates.length === 0) {
-      return { triggered: false };
-    }
-
-    return candidates.reduce((best, next) => {
-      if (!best) {
-        return next;
-      }
-      if (best.actual === undefined) {
-        return next;
-      }
-      if (next.actual === undefined) {
-        return best;
-      }
-      return next.actual < best.actual ? next : best;
-    }, candidates[0]);
-  }
-
-  private evaluateLiquidityKillV2(
+  private evaluateLiquidityKill(
     rule: AlertRule,
     current: MarketEvaluationInput,
     nowMs: number,
   ): NumericEvaluation {
+    const ladderSignal = current.liquidityKillSignal;
+    if (ladderSignal) {
+      if (!compareWithOperator(ladderSignal.previousPrice, '>=', rule.threshold).triggered) {
+        return { triggered: false };
+      }
+
+      return {
+        triggered: true,
+        actual: ladderSignal.currentPrice,
+        previous: ladderSignal.previousPrice,
+        side: 'buy',
+        source: ladderSignal.source,
+        reason: ladderSignal.reason,
+      };
+    }
+
+    const legacyRule: AlertRule = {
+      ...rule,
+      threshold: Math.max(rule.threshold, LEGACY_LIQUIDITY_KILL_MIN_PRICE),
+    };
     const windowMs = rule.windowSec * 1000;
     const history = this.stateStore.getHistory(current.tokenId, windowMs, nowMs);
     const priorHistory = history.filter((entry) => entry.timestamp < nowMs);
@@ -284,7 +230,7 @@ export class AlertEngine {
 
     if (matchesLiquidityRuleSide(rule, 'buy')) {
       const explicitBid = this.evaluateExplicitLiquidityEdge(
-        rule,
+        legacyRule,
         operator,
         current.removedBidEdge,
         current.bestBid,
@@ -295,10 +241,10 @@ export class AlertEngine {
       const fallbackBid =
         explicitBid ??
         this.evaluateFallbackLiquidityEdge(
-          rule,
+          legacyRule,
           operator,
           findLastHistoryEntry(priorHistory, 'bestBid', (value) =>
-            compareWithOperator(value, operator, rule.threshold).triggered,
+            compareWithOperator(value, operator, legacyRule.threshold).triggered,
           )?.bestBid,
           current.bestBid,
           current.bidLevelCount,
@@ -311,7 +257,7 @@ export class AlertEngine {
 
     if (matchesLiquidityRuleSide(rule, 'sell')) {
       const explicitAsk = this.evaluateExplicitLiquidityEdge(
-        rule,
+        legacyRule,
         operator,
         current.removedAskEdge,
         current.bestAsk,
@@ -322,10 +268,10 @@ export class AlertEngine {
       const fallbackAsk =
         explicitAsk ??
         this.evaluateFallbackLiquidityEdge(
-          rule,
+          legacyRule,
           operator,
           findLastHistoryEntry(priorHistory, 'bestAsk', (value) =>
-            compareWithOperator(value, operator, rule.threshold).triggered,
+            compareWithOperator(value, operator, legacyRule.threshold).triggered,
           )?.bestAsk,
           current.bestAsk,
           current.askLevelCount,
